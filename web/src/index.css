@@ -104,6 +104,9 @@
   /* Markdown prose used in assistant/user messages. */
   .prose-vibe {
     @apply text-[14.5px] leading-relaxed text-slate-200;
+    /* Break long unbreakable strings (URLs, tokens, cookies) instead of overflowing.
+       `pre` keeps white-space: pre, so code blocks still scroll horizontally. */
+    overflow-wrap: break-word;
   }
   .prose-vibe p {
     @apply my-2;

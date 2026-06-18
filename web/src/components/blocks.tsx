@@ -47,7 +47,7 @@ export const BlockView = memo(function BlockView({ block }: { block: ChatBlock }
 function UserView({ block }: { block: UserBlock }) {
   return (
     <div className="flex justify-end animate-fade-in">
-      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-accent/15 px-4 py-2.5 text-[14.5px] leading-relaxed text-slate-100">
+      <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent/15 px-4 py-2.5 text-[14.5px] leading-relaxed text-slate-100">
         {block.text}
       </div>
     </div>
@@ -80,7 +80,7 @@ function ThinkingView({ block }: { block: ThinkingBlock }) {
         <ChevronRight className={cn('ml-auto h-3.5 w-3.5 transition-transform', open && 'rotate-90')} />
       </button>
       {open && (
-        <div className="whitespace-pre-wrap border-t border-white/5 px-3 py-2.5 font-mono text-[12px] leading-relaxed text-slate-500">
+        <div className="whitespace-pre-wrap break-words border-t border-white/5 px-3 py-2.5 font-mono text-[12px] leading-relaxed text-slate-500">
           {block.text}
         </div>
       )}
