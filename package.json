@@ -1,0 +1,51 @@
+{
+  "name": "vibe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Vibe — an elegant, low-latency web UI to drive Claude Code on any machine.",
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c green,cyan \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "cross-env NODE_ENV=production tsx server/src/index.ts",
+    "serve": "npm run build && npm run start",
+    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.181",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "clsx": "^2.1.1",
+    "express": "^4.21.2",
+    "highlight.js": "^11.10.0",
+    "lucide-react": "^0.460.0",
+    "node-pty": "^1.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.1",
+    "remark-gfm": "^4.0.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

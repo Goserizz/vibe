@@ -1,0 +1,165 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Dark theme (default). Values are space-separated RGB for rgb(var() / a). */
+  :root,
+  .dark {
+    color-scheme: dark;
+    --ink-950: 10 11 15;
+    --ink-900: 14 16 22;
+    --ink-850: 19 22 31;
+    --ink-800: 24 28 39;
+    --ink-750: 31 36 48;
+    --ink-700: 39 45 58;
+    --ink-600: 54 61 77;
+    --ink-500: 75 83 101;
+    --slate-100: 241 245 249;
+    --slate-200: 226 232 240;
+    --slate-300: 203 213 225;
+    --slate-400: 148 163 184;
+    --slate-500: 100 116 139;
+    --slate-600: 71 85 105;
+    --c-white: 255 255 255;
+    --accent: 124 156 255;
+    --accent-soft: 157 180 255;
+    --accent-muted: 91 111 158;
+    --accent-glow: rgba(124, 156, 255, 0.18);
+  }
+
+  /* Light theme. Surfaces brighten, the text scale inverts (100 darkest …
+     600 lightest), and white-based hairlines become subtle dark lines. */
+  .light {
+    color-scheme: light;
+    --ink-950: 255 255 255;
+    --ink-900: 247 248 250;
+    --ink-850: 241 243 246;
+    --ink-800: 235 238 242;
+    --ink-750: 227 231 237;
+    --ink-700: 218 223 230;
+    --ink-600: 198 205 215;
+    --ink-500: 158 167 181;
+    --slate-100: 15 23 42;
+    --slate-200: 30 41 59;
+    --slate-300: 51 65 85;
+    --slate-400: 71 85 105;
+    --slate-500: 100 116 139;
+    --slate-600: 148 163 184;
+    --c-white: 15 23 42;
+    --accent: 59 91 219;
+    --accent-soft: 67 99 216;
+    --accent-muted: 110 128 168;
+    --accent-glow: rgba(59, 91, 219, 0.14);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-950 text-slate-200 antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    overscroll-behavior: none;
+    transition: background-color 0.2s ease;
+  }
+
+  /* Refined scrollbars that fade into the current theme. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--ink-600)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-ink-700;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-600;
+  }
+
+  ::selection {
+    background: var(--accent-glow);
+  }
+
+  textarea,
+  input {
+    @apply bg-transparent;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply border border-white/5 bg-ink-850/70 backdrop-blur-xl;
+  }
+
+  /* Markdown prose used in assistant/user messages. */
+  .prose-vibe {
+    @apply text-[14.5px] leading-relaxed text-slate-200;
+  }
+  .prose-vibe p {
+    @apply my-2;
+  }
+  .prose-vibe p:first-child {
+    @apply mt-0;
+  }
+  .prose-vibe p:last-child {
+    @apply mb-0;
+  }
+  .prose-vibe ul {
+    @apply my-2 list-disc space-y-1 pl-5;
+  }
+  .prose-vibe ol {
+    @apply my-2 list-decimal space-y-1 pl-5;
+  }
+  .prose-vibe h1,
+  .prose-vibe h2,
+  .prose-vibe h3 {
+    @apply mb-2 mt-4 font-semibold text-slate-100;
+  }
+  .prose-vibe h1 {
+    @apply text-lg;
+  }
+  .prose-vibe h2 {
+    @apply text-base;
+  }
+  .prose-vibe a {
+    @apply text-accent-soft underline decoration-accent/40 underline-offset-2 hover:decoration-accent;
+  }
+  .prose-vibe blockquote {
+    @apply my-2 border-l-2 border-ink-600 pl-3 text-slate-400;
+  }
+  .prose-vibe table {
+    @apply my-2 block w-full overflow-x-auto border-collapse text-sm;
+  }
+  .prose-vibe th,
+  .prose-vibe td {
+    @apply border border-ink-700 px-2 py-1 text-left;
+  }
+  /* Inline code */
+  .prose-vibe :not(pre) > code {
+    @apply rounded bg-ink-750 px-1.5 py-0.5 font-mono text-[0.85em] text-accent-soft;
+  }
+  /* Code blocks */
+  .prose-vibe pre {
+    @apply my-3 overflow-x-auto rounded-xl border border-white/5 bg-[#0b0e14] p-3.5 text-[13px] leading-relaxed;
+  }
+  .prose-vibe pre code {
+    @apply bg-transparent p-0 font-mono;
+  }
+}
+
+/* Soft caret pulse for the streaming cursor */
+.stream-caret::after {
+  content: '▍';
+  @apply ml-0.5 text-accent;
+  animation: pulse-dot 1.1s ease-in-out infinite;
+}
