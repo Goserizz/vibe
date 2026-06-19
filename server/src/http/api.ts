@@ -6,6 +6,7 @@ import { log } from '../log.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import { getRecentProjects, validateDir } from '../projects.js';
 import { getClaudeSessionInfo, listClaudeSessions, type DiscoveredSession } from '../sessions/discovery.js';
+import { searchConversations } from '../sessions/search.js';
 import { hostRegistry } from '../remote/hosts.js';
 import { listRemoteSessions, getRemoteSessionInfo } from '../remote/discovery.js';
 import { sshCheck } from '../remote/ssh.js';
@@ -270,6 +271,14 @@ export function createApiRouter(): Router {
   router.get('/sessions/:id/messages', async (req, res) => {
     await ensureRemoteCached(req.params.id);
     res.json(await hub.snapshot(req.params.id));
+  });
+
+  // Full-text search across local + remote conversation messages.
+  router.get('/search', async (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 200) : 50;
+    res.json({ results: await searchConversations(q, limit) });
   });
 
   // Surface available permission modes for the UI.

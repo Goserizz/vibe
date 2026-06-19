@@ -144,6 +144,26 @@ export interface ProjectDir {
   sessionCount?: number;
 }
 
+/** A full-text match inside a conversation (user/assistant/thinking text). */
+export interface SearchHit {
+  kind: 'user' | 'assistant' | 'thinking';
+  /** Short text window around the match (plain text; client highlights the query). */
+  snippet: string;
+}
+
+/** A conversation that matched a full-text search, ready to render in a list. */
+export interface SearchResult {
+  /** App-level session id (openable via `openSession`). */
+  sessionId: string;
+  title: string;
+  cwd: string;
+  host: string;
+  source: 'vibe' | 'claude';
+  updatedAt: number;
+  /** Up to a few matching snippets, best first. */
+  hits: SearchHit[];
+}
+
 export interface PermissionRequest {
   requestId: string;
   toolName: string;

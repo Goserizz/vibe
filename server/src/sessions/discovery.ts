@@ -119,14 +119,14 @@ async function scanFile(file: string, claudeSessionId: string): Promise<Discover
   });
 }
 
-interface FileRef {
+export interface FileRef {
   file: string;
   id: string;
   mtime: number;
 }
 
 /** Collect candidate transcript files (top-level UUID-named jsonl per project). */
-function candidateFiles(): FileRef[] {
+export function candidateFiles(): FileRef[] {
   const root = config.claudeProjectsDir;
   let projectDirs: string[];
   try {

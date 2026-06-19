@@ -6,6 +6,7 @@ import type {
   PermissionRequest,
   ProjectDir,
   RemoteHost,
+  SearchResult,
   ServerEvent,
   SessionMeta,
   TokenUsage,
@@ -17,6 +18,11 @@ import { emptyView, reduceView, viewFromBlocks, type SessionView } from './block
 
 let socket: VibeSocket | null = null;
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+
+// Debounced full-text search: a timer per keystroke + a monotonic id so stale
+// in-flight responses are discarded.
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let searchReqId = 0;
 
 type Theme = 'dark' | 'light';
 
@@ -44,6 +50,11 @@ interface StoreState {
   usage: Record<string, TokenUsage | undefined>;
   pending: Record<string, PermissionRequest[]>;
   toast: string | null;
+
+  searchQuery: string;
+  searchResults: SearchResult[];
+  searchLoading: boolean;
+  setSearchQuery: (q: string) => void;
 
   init: (token: string) => Promise<void>;
   signOut: () => void;
@@ -193,6 +204,9 @@ export const useStore = create<StoreState>((set, get) => {
     usage: {},
     pending: {},
     toast: null,
+    searchQuery: '',
+    searchResults: [],
+    searchLoading: false,
 
     async init(token: string) {
       setApiToken(token);
@@ -221,7 +235,7 @@ export const useStore = create<StoreState>((set, get) => {
       socket?.close();
       socket = null;
       clearToken();
-      set({ phase: 'unauthorized', sessions: [], views: {}, activeId: null });
+      set({ phase: 'unauthorized', sessions: [], views: {}, activeId: null, searchQuery: '', searchResults: [], searchLoading: false });
     },
 
     async refreshSessions() {
@@ -365,6 +379,32 @@ export const useStore = create<StoreState>((set, get) => {
 
     setToast(msg) {
       set({ toast: msg });
+    },
+
+    setSearchQuery(q) {
+      set({ searchQuery: q });
+      if (searchTimer) {
+        clearTimeout(searchTimer);
+        searchTimer = null;
+      }
+      const trimmed = q.trim();
+      if (trimmed.length < 2) {
+        set({ searchResults: [], searchLoading: false });
+        return;
+      }
+      set({ searchLoading: true });
+      const reqId = ++searchReqId;
+      searchTimer = setTimeout(async () => {
+        searchTimer = null;
+        try {
+          const results = await api.search(trimmed);
+          if (reqId !== searchReqId) return; // a newer query superseded this one
+          set({ searchResults: results, searchLoading: false });
+        } catch {
+          if (reqId !== searchReqId) return;
+          set({ searchResults: [], searchLoading: false });
+        }
+      }, 300);
     },
   };
 });

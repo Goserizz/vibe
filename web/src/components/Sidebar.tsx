@@ -1,6 +1,6 @@
-import { useState } from 'react';
-import { Plus, MessageSquareText, Trash2, Check, X, Pencil, LogOut, Server } from 'lucide-react';
-import type { SessionMeta } from '@shared/protocol';
+import { useState, type ReactNode } from 'react';
+import { Plus, MessageSquareText, Trash2, Check, X, Pencil, LogOut, Server, Search } from 'lucide-react';
+import type { SearchResult, SessionMeta } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { Logo } from './Logo';
 import { ConnectionBadge } from './ConnectionBadge';
@@ -18,7 +18,13 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
   const activeId = useStore((s) => s.activeId);
   const hosts = useStore((s) => s.hosts);
   const signOut = useStore((s) => s.signOut);
+  const searchQuery = useStore((s) => s.searchQuery);
+  const searchResults = useStore((s) => s.searchResults);
+  const searchLoading = useStore((s) => s.searchLoading);
+  const setSearchQuery = useStore((s) => s.setSearchQuery);
   const [hostsOpen, setHostsOpen] = useState(false);
+
+  const searching = searchQuery.trim().length >= 2;
 
   return (
     <>
@@ -48,8 +54,36 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
           </button>
         </div>
 
+        <div className="px-3 pb-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search conversations"
+              className="w-full rounded-lg border border-white/5 bg-ink-850 py-1.5 pl-8 pr-7 text-[13px] text-slate-200 placeholder:text-slate-600 outline-none transition focus:border-accent/40"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-600 transition hover:text-slate-300"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
         <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
-          {sessions.length === 0 ? (
+          {searching ? (
+            <SearchResults
+              results={searchResults}
+              loading={searchLoading}
+              query={searchQuery.trim()}
+              activeId={activeId}
+              onClose={onClose}
+            />
+          ) : sessions.length === 0 ? (
             <div className="px-3 py-10 text-center text-xs text-slate-600">
               No sessions yet.
               <br />
@@ -96,6 +130,110 @@ function HostChip({ host }: { host: string }) {
       <span className={cn('h-1.5 w-1.5 rounded-full', isRemote ? 'bg-accent/80' : 'bg-slate-600')} />
       <span className="max-w-[96px] truncate">{host}</span>
     </span>
+  );
+}
+
+/** Highlight every case-insensitive occurrence of `query` within `text`. */
+function Highlight({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const lower = text.toLowerCase();
+  const q = query.toLowerCase();
+  const out: ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+  let idx = lower.indexOf(q, cursor);
+  while (idx >= 0) {
+    if (idx > cursor) out.push(text.slice(cursor, idx));
+    out.push(
+      <mark key={key++} className="rounded bg-accent/25 px-0.5 text-slate-100">
+        {text.slice(idx, idx + q.length)}
+      </mark>,
+    );
+    cursor = idx + q.length;
+    idx = lower.indexOf(q, cursor);
+  }
+  if (cursor < text.length) out.push(text.slice(cursor));
+  return <>{out}</>;
+}
+
+function SearchResults({
+  results,
+  loading,
+  query,
+  activeId,
+  onClose,
+}: {
+  results: SearchResult[];
+  loading: boolean;
+  query: string;
+  activeId: string | null;
+  onClose: () => void;
+}) {
+  const openSession = useStore((s) => s.openSession);
+  const setSearchQuery = useStore((s) => s.setSearchQuery);
+
+  if (loading && results.length === 0) {
+    return <div className="px-3 py-10 text-center text-xs text-slate-600">Searching…</div>;
+  }
+  if (results.length === 0) {
+    return (
+      <div className="px-3 py-10 text-center text-xs text-slate-600">
+        No matches for “{query}”.
+      </div>
+    );
+  }
+
+  return (
+    <ul className="space-y-0.5">
+      {results.map((r) => {
+        const active = r.sessionId === activeId;
+        return (
+          <li key={r.sessionId}>
+            <div
+              className={cn(
+                'group relative cursor-pointer rounded-lg px-2.5 py-2 transition',
+                active ? 'bg-ink-750' : 'hover:bg-ink-800',
+              )}
+              onClick={() => {
+                void openSession(r.sessionId);
+                setSearchQuery('');
+                onClose();
+              }}
+            >
+              <div className="flex items-center gap-1.5">
+                <span className={cn('truncate text-[13px]', active ? 'text-slate-100' : 'text-slate-300')}>
+                  {r.title}
+                </span>
+                {r.source === 'claude' && (
+                  <span
+                    title="Started from the Claude Code CLI"
+                    className="shrink-0 rounded bg-ink-700 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-slate-400"
+                  >
+                    CLI
+                  </span>
+                )}
+              </div>
+              <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-600">
+                <HostChip host={r.host} />
+                <span className="truncate">{basename(r.cwd)}</span>
+                <span>·</span>
+                <span className="shrink-0">{relativeTime(r.updatedAt)}</span>
+              </div>
+              <div className="mt-1 space-y-1">
+                {r.hits.slice(0, 2).map((h, i) => (
+                  <div key={i} className="flex gap-1.5 text-[11px] leading-snug text-slate-500">
+                    <span className="shrink-0 capitalize text-slate-600">{h.kind}</span>
+                    <span className="min-w-0 break-words">
+                      <Highlight text={h.snippet} query={query} />
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

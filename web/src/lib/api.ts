@@ -5,6 +5,7 @@ import type {
   PermissionMode,
   ProjectDir,
   RemoteHost,
+  SearchResult,
   SessionMeta,
 } from '@shared/protocol';
 
@@ -78,4 +79,7 @@ export const api = {
   deleteSession: (id: string) => request<{ ok: boolean }>(`/sessions/${id}`, { method: 'DELETE' }),
 
   getMessages: (id: string) => request<{ blocks: ChatBlock[]; seq: number }>(`/sessions/${id}/messages`),
+
+  search: (q: string) =>
+    request<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(q)}`).then((r) => r.results),
 };
