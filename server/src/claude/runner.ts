@@ -50,7 +50,12 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
 
   // Permission gate. Pre-approved tools short-circuit; everything else asks the user.
   sdkOptions.canUseTool = async (toolName: string, input: unknown) => {
-    if (allowed.has(toolName)) return { behavior: 'allow', updatedInput: input };
+    // AskUserQuestion must always route through the interactive prompt so the
+    // user's selections are collected; pre-approving it would skip the picker
+    // and the tool would receive an empty-answers result.
+    if (toolName !== 'AskUserQuestion' && allowed.has(toolName)) {
+      return { behavior: 'allow', updatedInput: input };
+    }
 
     const request: PermissionRequest = { requestId: crypto.randomUUID(), toolName, input, ts: Date.now() };
     const decision = await cb.requestPermission(request);
