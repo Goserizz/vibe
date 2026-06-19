@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, MessageSquareText, Trash2, Check, X, Pencil, LogOut, Server, Sun, Moon } from 'lucide-react';
+import { Plus, MessageSquareText, Trash2, Check, X, Pencil, LogOut, Server } from 'lucide-react';
 import type { SessionMeta } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { Logo } from './Logo';
@@ -18,8 +18,6 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
   const activeId = useStore((s) => s.activeId);
   const hosts = useStore((s) => s.hosts);
   const signOut = useStore((s) => s.signOut);
-  const theme = useStore((s) => s.theme);
-  const toggleTheme = useStore((s) => s.toggleTheme);
   const [hostsOpen, setHostsOpen] = useState(false);
 
   return (
@@ -74,13 +72,6 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
             <Server className="h-3.5 w-3.5" />
             Hosts
             {hosts.length > 0 && <span className="rounded bg-ink-700 px-1.5 text-[10px] text-slate-400">{hosts.length}</span>}
-          </button>
-          <button
-            onClick={toggleTheme}
-            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-            className="flex items-center rounded-lg px-2 py-2 text-xs text-slate-500 transition hover:bg-ink-800 hover:text-slate-300"
-          >
-            {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
           </button>
           <button
             onClick={signOut}

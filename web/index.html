@@ -7,9 +7,10 @@
     <link rel="apple-touch-icon" href="/favicon.svg" />
     <title>Vibe</title>
     <script>
-      // Apply the saved theme before paint to avoid a flash.
+      // Match the device's color-scheme before paint to avoid a flash.
       try {
-        document.documentElement.className = localStorage.getItem('vibe.theme') === 'light' ? 'light' : 'dark';
+        var light = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+        document.documentElement.className = light ? 'light' : 'dark';
       } catch (e) {
         document.documentElement.className = 'dark';
       }

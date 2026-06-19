@@ -20,9 +20,12 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toStr
 
 type Theme = 'dark' | 'light';
 
+const LIGHT_MQ = '(prefers-color-scheme: light)';
+
 function initialTheme(): Theme {
-  if (typeof document !== 'undefined' && document.documentElement.classList.contains('light')) return 'light';
-  return 'dark';
+  return typeof window !== 'undefined' && window.matchMedia && window.matchMedia(LIGHT_MQ).matches
+    ? 'light'
+    : 'dark';
 }
 
 interface StoreState {
@@ -31,7 +34,6 @@ interface StoreState {
   serverVersion: string;
   defaultModel: string;
   theme: Theme;
-  toggleTheme: () => void;
 
   sessions: SessionMeta[];
   projects: ProjectDir[];
@@ -182,18 +184,6 @@ export const useStore = create<StoreState>((set, get) => {
     serverVersion: '',
     defaultModel: 'opus',
     theme: initialTheme(),
-    toggleTheme: () => {
-      const next: Theme = get().theme === 'dark' ? 'light' : 'dark';
-      const el = document.documentElement;
-      el.classList.remove('dark', 'light');
-      el.classList.add(next);
-      try {
-        localStorage.setItem('vibe.theme', next);
-      } catch {
-        /* ignore */
-      }
-      set({ theme: next });
-    },
     sessions: [],
     projects: [],
     hosts: [],
@@ -378,3 +368,16 @@ export const useStore = create<StoreState>((set, get) => {
     },
   };
 });
+
+// Keep the theme in sync with the device's color-scheme preference. The inline
+// script in index.html sets the initial class before paint; this updates it
+// (and the store) live when the system theme changes.
+if (typeof window !== 'undefined' && window.matchMedia) {
+  window.matchMedia(LIGHT_MQ).addEventListener('change', (e) => {
+    const next: Theme = e.matches ? 'light' : 'dark';
+    const el = document.documentElement;
+    el.classList.remove('dark', 'light');
+    el.classList.add(next);
+    useStore.setState({ theme: next });
+  });
+}
