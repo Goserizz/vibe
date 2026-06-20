@@ -147,13 +147,13 @@ function ToolView({ block }: { block: ToolBlock }) {
       </button>
       {open && (
         <div className="space-y-2 border-t border-white/5 px-3 py-2.5">
-          <pre className="overflow-x-auto rounded-lg bg-[#0b0e14] p-2.5 font-mono text-[12px] leading-relaxed text-slate-400">
+          <pre className="overflow-x-auto rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] leading-relaxed text-slate-400">
             {JSON.stringify(block.input, null, 2)}
           </pre>
           {hasResult && (
             <pre
               className={cn(
-                'max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-[#0b0e14] p-2.5 font-mono text-[12px] leading-relaxed',
+                'max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] leading-relaxed',
                 block.isError ? 'text-rose-300' : 'text-slate-400',
               )}
             >

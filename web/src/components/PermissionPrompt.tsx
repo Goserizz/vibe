@@ -36,7 +36,7 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
               <span className="font-medium text-slate-200">{meta.label}</span>
             </div>
             {meta.detail && (
-              <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-[#0b0e14] p-2.5 font-mono text-[12px] text-slate-400">
+              <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] text-slate-400">
                 {meta.detail}
               </pre>
             )}
