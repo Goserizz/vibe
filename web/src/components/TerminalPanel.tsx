@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -26,12 +26,27 @@ const MIN_WIDTH = 320;
 const DEFAULT_WIDTH = 460;
 const maxWidth = () => Math.max(MIN_WIDTH, Math.min(960, window.innerWidth - 360));
 
+// One persistent terminal per session. Switching sessions only toggles which
+// container is shown — the PTY (server-side, tied to the WS) keeps running, so
+// history and running processes survive. Instances are destroyed only when the
+// panel closes (or the session is deleted).
+interface TermInstance {
+  term: Terminal;
+  fit: FitAddon;
+  ws: WebSocket;
+  el: HTMLDivElement;
+  dataDisp: { dispose: () => void };
+  ro: ResizeObserver;
+  resize: () => void;
+}
+
 export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const activeId = useStore((s) => s.activeId);
-  const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
+  const sessions = useStore((s) => s.sessions);
+  const session = sessions.find((x) => x.id === activeId);
   const theme = useStore((s) => s.theme);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const instances = useRef<Map<string, TermInstance>>(new Map());
 
   const [width, setWidth] = useState(() => {
     const saved = Number(localStorage.getItem('vibe.termWidth'));
@@ -63,87 +78,145 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     document.body.style.cursor = 'col-resize';
   };
 
-  // (Re)connect whenever the active session changes — the terminal follows the
-  // session's host + cwd.
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!activeId || !el) return;
-
-    const term = new Terminal({
-      fontSize: 12.5,
-      fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
-      cursorBlink: true,
-      scrollback: 5000,
-      theme: theme === 'light' ? LIGHT_THEME : DARK_THEME,
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(el);
+  const destroyInstance = useCallback((id: string) => {
+    const inst = instances.current.get(id);
+    if (!inst) return;
+    inst.ro.disconnect();
+    inst.dataDisp.dispose();
     try {
-      fit.fit();
+      inst.ws.close();
     } catch {
-      /* container not measured yet */
+      /* already gone */
     }
-    termRef.current = term;
+    inst.term.dispose();
+    inst.el.remove();
+    instances.current.delete(id);
+  }, []);
 
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const token = resolveToken() ?? '';
-    const url = `${proto}://${window.location.host}/terminal?token=${encodeURIComponent(token)}&sessionId=${encodeURIComponent(activeId)}&cols=${term.cols}&rows=${term.rows}`;
-    const ws = new WebSocket(url);
-    let closedByUs = false;
-
-    const sendResize = () => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
-    };
-
-    ws.onopen = () => {
-      sendResize();
-      term.focus();
-    };
-    ws.onmessage = (e) => {
-      let m: any;
-      try {
-        m = JSON.parse(e.data);
-      } catch {
-        return;
+  // Lazily create a terminal instance for a session. The WS stays open across
+  // session switches, so the server-side PTY is preserved.
+  const ensureInstance = useCallback(
+    (id: string): TermInstance | undefined => {
+      const existing = instances.current.get(id);
+      if (existing) {
+        const host = hostRef.current;
+        if (host && existing.el.parentNode !== host) host.appendChild(existing.el);
+        return existing;
       }
-      if (m.t === 'data') term.write(m.data);
-      else if (m.t === 'exit') term.write('\r\n\x1b[2m[session ended]\x1b[0m\r\n');
-      else if (m.t === 'error') term.write(`\r\n\x1b[31m${m.message}\x1b[0m\r\n`);
-    };
-    ws.onclose = () => {
-      if (!closedByUs) term.write('\r\n\x1b[2m[disconnected]\x1b[0m\r\n');
-    };
+      const host = hostRef.current;
+      if (!host) return undefined;
 
-    const dataDisp = term.onData((d) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'input', data: d }));
-    });
+      const el = document.createElement('div');
+      el.className = 'absolute inset-0';
+      el.style.display = 'none';
+      host.appendChild(el);
 
-    const onFit = () => {
+      const term = new Terminal({
+        fontSize: 12.5,
+        fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+        cursorBlink: true,
+        scrollback: 5000,
+        theme: theme === 'light' ? LIGHT_THEME : DARK_THEME,
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(el);
       try {
         fit.fit();
-        sendResize();
       } catch {
-        /* ignore */
+        /* container not measured yet */
       }
-    };
-    const ro = new ResizeObserver(onFit);
-    ro.observe(el);
 
-    return () => {
-      closedByUs = true;
-      ro.disconnect();
-      dataDisp.dispose();
-      ws.close();
-      term.dispose();
-      termRef.current = null;
-    };
-  }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const token = resolveToken() ?? '';
+      const url = `${proto}://${window.location.host}/terminal?token=${encodeURIComponent(token)}&sessionId=${encodeURIComponent(id)}&cols=${term.cols}&rows=${term.rows}`;
+      const ws = new WebSocket(url);
 
-  // Live theme switch without dropping the running shell.
+      const sendResize = () => {
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+      };
+
+      ws.onopen = () => {
+        sendResize();
+      };
+      ws.onmessage = (e) => {
+        let m: any;
+        try {
+          m = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+        if (m.t === 'data') term.write(m.data);
+        else if (m.t === 'exit') term.write('\r\n\x1b[2m[session ended]\x1b[0m\r\n');
+        else if (m.t === 'error') term.write(`\r\n\x1b[31m${m.message}\x1b[0m\r\n`);
+      };
+      ws.onclose = () => {
+        try {
+          term.write('\r\n\x1b[2m[disconnected]\x1b[0m\r\n');
+        } catch {
+          /* term already disposed (panel/session closed) */
+        }
+      };
+
+      const dataDisp = term.onData((d) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'input', data: d }));
+      });
+
+      const resize = () => {
+        try {
+          fit.fit();
+          sendResize();
+        } catch {
+          /* ignore */
+        }
+      };
+      const ro = new ResizeObserver(resize);
+      ro.observe(el);
+
+      const inst: TermInstance = { term, fit, ws, el, dataDisp, ro, resize };
+      instances.current.set(id, inst);
+      return inst;
+    },
+    [theme],
+  );
+
+  // Show the active session's terminal (creating it if needed) and hide the
+  // rest. Re-fit on return from hidden — a display:none container has no size.
   useEffect(() => {
-    if (termRef.current) termRef.current.options.theme = theme === 'light' ? LIGHT_THEME : DARK_THEME;
+    if (!activeId) return;
+    const inst = ensureInstance(activeId);
+    if (!inst) return;
+    for (const [id, it] of instances.current) {
+      it.el.style.display = id === activeId ? '' : 'none';
+    }
+    const raf = requestAnimationFrame(() => {
+      inst.resize();
+      inst.term.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [activeId, ensureInstance]);
+
+  // Live theme switch without dropping any running shell.
+  useEffect(() => {
+    const t = theme === 'light' ? LIGHT_THEME : DARK_THEME;
+    for (const it of instances.current.values()) it.term.options.theme = t;
   }, [theme]);
+
+  // Reap terminals whose session was deleted (otherwise they'd leak, unreachable).
+  useEffect(() => {
+    const ids = new Set(sessions.map((s) => s.id));
+    for (const id of [...instances.current.keys()]) {
+      if (!ids.has(id)) destroyInstance(id);
+    }
+  }, [sessions, destroyInstance]);
+
+  // Closing the panel destroys every terminal.
+  useEffect(() => {
+    return () => {
+      for (const id of [...instances.current.keys()]) destroyInstance(id);
+    };
+  }, [destroyInstance]);
 
   return (
     <aside
@@ -170,7 +243,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
       </div>
       {activeId ? (
         <div className="min-h-0 flex-1 overflow-hidden p-2">
-          <div ref={containerRef} className="h-full w-full" />
+          <div ref={hostRef} className="relative h-full w-full" />
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-slate-600">
