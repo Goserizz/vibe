@@ -204,14 +204,6 @@ function SearchResults({
                 <span className={cn('truncate text-[13px]', active ? 'text-slate-100' : 'text-slate-300')}>
                   {r.title}
                 </span>
-                {r.source === 'claude' && (
-                  <span
-                    title="Started from the Claude Code CLI"
-                    className="shrink-0 rounded bg-ink-700 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-slate-400"
-                  >
-                    CLI
-                  </span>
-                )}
               </div>
               <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-600">
                 <HostChip host={r.host} />
@@ -297,14 +289,6 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
               <span className={cn('truncate text-[13px]', active ? 'text-slate-100' : 'text-slate-300')}>
                 {session.title}
               </span>
-              {session.source === 'claude' && (
-                <span
-                  title="Started from the Claude Code CLI"
-                  className="shrink-0 rounded bg-ink-700 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-slate-400"
-                >
-                  CLI
-                </span>
-              )}
             </div>
           )}
           <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-600">
