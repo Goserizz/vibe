@@ -144,6 +144,13 @@ export interface ProjectDir {
   sessionCount?: number;
 }
 
+/** An entry in a directory listing shown in the Files panel (file or subdir). */
+export interface FileEntry {
+  name: string;
+  dir: boolean;
+  size?: number;
+}
+
 /** A full-text match inside a conversation (user/assistant/thinking text). */
 export interface SearchHit {
   kind: 'user' | 'assistant' | 'thinking';

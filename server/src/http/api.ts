@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth.js';
@@ -9,10 +12,10 @@ import { getClaudeSessionInfo, listClaudeSessions, type DiscoveredSession } from
 import { searchConversations } from '../sessions/search.js';
 import { hostRegistry } from '../remote/hosts.js';
 import { listRemoteSessions, getRemoteSessionInfo } from '../remote/discovery.js';
-import { sshCheck } from '../remote/ssh.js';
+import { sshExec, loginShellCommand, shQuote, sshCheck } from '../remote/ssh.js';
 import { encodeRemoteId, parseSessionId } from '../remote/sessionId.js';
 import { hub } from '../ws/hub.js';
-import type { EffortLevel, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
+import type { EffortLevel, FileEntry, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
 
 const permissionModes: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
 const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -73,6 +76,38 @@ const hostSchema = z.object({
   ssh: z.string().min(1),
 });
 
+// -- File browser/editor (local + remote) ------------------------------------
+
+/** Max bytes we're willing to load into the editor. */
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/** Resolve a local path the user is browsing/editing: expand `~`, make it
+ *  absolute. Unlike validateDir this does NOT require the path to exist or be
+ *  a directory — callers stat/read/write as needed. */
+function resolveLocalPath(input: string): string {
+  let p = input.trim();
+  if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
+  return path.resolve(p);
+}
+
+/** Resolve an optional host param to an SSH target. Absent/empty ⇒ local. */
+function resolveFileTarget(host?: string): { remote: boolean; target: string } {
+  if (!host) return { remote: false, target: '' };
+  const h = hostRegistry.get(host);
+  return { remote: true, target: h?.ssh ?? host };
+}
+
+const filesQuerySchema = z.object({
+  host: z.string().optional(),
+  path: z.string().min(1),
+});
+
+const fileWriteSchema = z.object({
+  host: z.string().optional(),
+  path: z.string().min(1),
+  content: z.string(),
+});
+
 export function createApiRouter(): Router {
   const router = Router();
   router.use(requireAuth);
@@ -88,6 +123,139 @@ export function createApiRouter(): Router {
   router.post('/projects/validate', (req, res) => {
     const path = typeof req.body?.path === 'string' ? req.body.path : '';
     res.json(validateDir(path));
+  });
+
+  // -- Files: list / read / write (local + remote over SSH) ------------------
+
+  router.get('/files', async (req, res) => {
+    const parsed = filesQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid query' });
+      return;
+    }
+    const dirPath = parsed.data.path;
+    const { remote, target } = resolveFileTarget(parsed.data.host);
+    try {
+      let entries: FileEntry[];
+      let resolved = dirPath;
+      if (remote) {
+        // `ls -1Ap`: one per line, append `/` to directories, almost-all.
+        const r = await sshExec(target, loginShellCommand(`ls -1Ap ${shQuote(dirPath)}`), { timeoutMs: 15_000 });
+        if (r.timedOut) {
+          res.status(504).json({ error: 'list timed out' });
+          return;
+        }
+        if (r.code !== 0) {
+          res.status(400).json({ error: (r.stderr.trim() || r.stdout.trim() || 'list failed').slice(0, 500) });
+          return;
+        }
+        entries = r.stdout
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .map((name): FileEntry => {
+            const dir = name.endsWith('/');
+            return { name: dir ? name.slice(0, -1) : name, dir };
+          });
+      } else {
+        resolved = resolveLocalPath(dirPath);
+        const ents = fs.readdirSync(resolved, { withFileTypes: true });
+        entries = ents.map((e): FileEntry => {
+          const entry: FileEntry = { name: e.name, dir: e.isDirectory() };
+          try {
+            entry.size = fs.statSync(path.join(resolved, e.name)).size;
+          } catch {
+            /* broken symlink etc. — skip size */
+          }
+          return entry;
+        });
+      }
+      res.json({ path: resolved, entries });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'list failed' });
+    }
+  });
+
+  router.get('/files/read', async (req, res) => {
+    const parsed = filesQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid query' });
+      return;
+    }
+    const filePath = parsed.data.path;
+    const { remote, target } = resolveFileTarget(parsed.data.host);
+    try {
+      let content: string;
+      if (remote) {
+        // Refuse huge files before slurping them over SSH.
+        const sizeRes = await sshExec(target, loginShellCommand(`wc -c < ${shQuote(filePath)}`), { timeoutMs: 10_000 });
+        const size = Number((sizeRes.stdout || '').trim());
+        if (sizeRes.code === 0 && Number.isFinite(size) && size > MAX_FILE_BYTES) {
+          res.status(422).json({ error: 'file too large to edit (>2MB)' });
+          return;
+        }
+        const r = await sshExec(target, loginShellCommand(`cat ${shQuote(filePath)}`), { timeoutMs: 20_000 });
+        if (r.timedOut) {
+          res.status(504).json({ error: 'read timed out' });
+          return;
+        }
+        if (r.code !== 0) {
+          res.status(400).json({ error: (r.stderr.trim() || 'read failed').slice(0, 500) });
+          return;
+        }
+        content = r.stdout;
+      } else {
+        const resolved = resolveLocalPath(filePath);
+        const stat = fs.statSync(resolved);
+        if (stat.size > MAX_FILE_BYTES) {
+          res.status(422).json({ error: 'file too large to edit (>2MB)' });
+          return;
+        }
+        content = fs.readFileSync(resolved, 'utf8');
+      }
+      // Reject binary (NUL bytes survive utf8 decode).
+      if (content.includes('\0')) {
+        res.status(422).json({ error: 'binary file (not editable)' });
+        return;
+      }
+      res.json({ path: filePath, content });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'read failed' });
+    }
+  });
+
+  router.put('/files', async (req, res) => {
+    const parsed = fileWriteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid body' });
+      return;
+    }
+    const { path: filePath, content, host } = parsed.data;
+    if (content.includes('\0')) {
+      res.status(422).json({ error: 'cannot write binary content' });
+      return;
+    }
+    const { remote, target } = resolveFileTarget(host);
+    try {
+      if (remote) {
+        // `cat > file` writes piped stdin verbatim — the content never goes
+        // through shell quoting. Truncates + replaces, like an editor Save.
+        const r = await sshExec(target, loginShellCommand(`cat > ${shQuote(filePath)}`), { input: content, timeoutMs: 30_000 });
+        if (r.timedOut) {
+          res.status(504).json({ error: 'write timed out' });
+          return;
+        }
+        if (r.code !== 0) {
+          res.status(400).json({ error: (r.stderr.trim() || 'write failed').slice(0, 500) });
+          return;
+        }
+      } else {
+        fs.writeFileSync(resolveLocalPath(filePath), content, 'utf8');
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'write failed' });
+    }
   });
 
   // -- Remote hosts ---------------------------------------------------------

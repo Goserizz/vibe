@@ -1,6 +1,7 @@
 import type {
   ChatBlock,
   EffortLevel,
+  FileEntry,
   HostStatus,
   PermissionMode,
   ProjectDir,
@@ -82,4 +83,25 @@ export const api = {
 
   search: (q: string) =>
     request<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(q)}`).then((r) => r.results),
+
+  // -- Files panel (local + remote) -------------------------------------------
+  // `host` is passed only for remote sessions; omit it for local.
+
+  listFiles: ({ host, dir }: { host?: string; dir: string }) => {
+    const qs = new URLSearchParams({ path: dir });
+    if (host) qs.set('host', host);
+    return request<{ path: string; entries: FileEntry[] }>(`/files?${qs.toString()}`).then((r) => r.entries);
+  },
+
+  readFile: ({ host, path }: { host?: string; path: string }) => {
+    const qs = new URLSearchParams({ path });
+    if (host) qs.set('host', host);
+    return request<{ path: string; content: string }>(`/files/read?${qs.toString()}`).then((r) => r.content);
+  },
+
+  writeFile: ({ host, path, content }: { host?: string; path: string; content: string }) =>
+    request<{ ok: boolean }>('/files', {
+      method: 'PUT',
+      body: JSON.stringify({ host, path, content }),
+    }),
 };

@@ -1,4 +1,4 @@
-import { Menu as MenuIcon, ChevronDown, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal } from 'lucide-react';
+import { Menu as MenuIcon, ChevronDown, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from 'lucide-react';
 import type { EffortLevel, PermissionMode } from '@shared/protocol';
 import { api } from '../lib/api';
 import { useStore } from '../store/store';
@@ -22,11 +22,12 @@ import {
 interface ChatViewProps {
   onOpenSidebar: () => void;
   onNewSession: () => void;
-  terminalOpen?: boolean;
+  rightTab?: 'terminal' | 'files' | null;
   onToggleTerminal?: () => void;
+  onToggleFiles?: () => void;
 }
 
-export function ChatView({ onOpenSidebar, onNewSession, terminalOpen, onToggleTerminal }: ChatViewProps) {
+export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTerminal, onToggleFiles }: ChatViewProps) {
   const activeId = useStore((s) => s.activeId);
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
 
@@ -36,7 +37,7 @@ export function ChatView({ onOpenSidebar, onNewSession, terminalOpen, onToggleTe
 
   return (
     <main className="flex min-w-0 flex-1 flex-col bg-ink-950">
-      <Header onOpenSidebar={onOpenSidebar} terminalOpen={terminalOpen} onToggleTerminal={onToggleTerminal} />
+      <Header onOpenSidebar={onOpenSidebar} rightTab={rightTab} onToggleTerminal={onToggleTerminal} onToggleFiles={onToggleFiles} />
       <MessageList sessionId={activeId} />
       <PermissionPrompt sessionId={activeId} />
       <Composer sessionId={activeId} />
@@ -44,7 +45,7 @@ export function ChatView({ onOpenSidebar, onNewSession, terminalOpen, onToggleTe
   );
 }
 
-function Header({ onOpenSidebar, terminalOpen, onToggleTerminal }: { onOpenSidebar: () => void; terminalOpen?: boolean; onToggleTerminal?: () => void }) {
+function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { onOpenSidebar: () => void; rightTab?: 'terminal' | 'files' | null; onToggleTerminal?: () => void; onToggleFiles?: () => void }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
 
   return (
@@ -72,13 +73,26 @@ function Header({ onOpenSidebar, terminalOpen, onToggleTerminal }: { onOpenSideb
         title="Terminal"
         className={cn(
           'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] transition',
-          terminalOpen
+          rightTab === 'terminal'
             ? 'border-accent/50 bg-accent/15 text-accent-soft'
             : 'border-ink-700 text-slate-300 hover:border-ink-600',
         )}
       >
         <SquareTerminal className="h-3.5 w-3.5" />
         <span className="hidden sm:inline">Terminal</span>
+      </button>
+      <button
+        onClick={onToggleFiles}
+        title="Files"
+        className={cn(
+          'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] transition',
+          rightTab === 'files'
+            ? 'border-accent/50 bg-accent/15 text-accent-soft'
+            : 'border-ink-700 text-slate-300 hover:border-ink-600',
+        )}
+      >
+        <FolderOpen className="h-3.5 w-3.5" />
+        <span className="hidden sm:inline">Files</span>
       </button>
     </header>
   );

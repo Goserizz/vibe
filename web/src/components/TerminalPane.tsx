@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { X, SquareTerminal } from 'lucide-react';
 import { useStore } from '../store/store';
 import { resolveToken } from '../lib/token';
 import type { ITheme } from '@xterm/xterm';
@@ -22,14 +21,12 @@ const LIGHT_THEME: ITheme = {
   selectionBackground: 'rgba(59,91,219,0.20)',
 };
 
-const MIN_WIDTH = 320;
-const DEFAULT_WIDTH = 460;
-const maxWidth = () => Math.max(MIN_WIDTH, Math.min(960, window.innerWidth - 360));
-
-// One persistent terminal per session. Switching sessions only toggles which
-// container is shown — the PTY (server-side, tied to the WS) keeps running, so
-// history and running processes survive. Instances are destroyed only when the
-// panel closes (or the session is deleted).
+// One persistent terminal per session. Switching sessions (or tabs) only
+// toggles which container is shown — the PTY (server-side, tied to the WS)
+// keeps running, so history and running processes survive. Instances are
+// destroyed only when the panel closes (or the session is deleted). This pane
+// is kept mounted (just hidden) while the Files tab is active, so returning to
+// the Terminal tab never drops a live shell.
 interface TermInstance {
   term: Terminal;
   fit: FitAddon;
@@ -40,43 +37,12 @@ interface TermInstance {
   resize: () => void;
 }
 
-export function TerminalPanel({ onClose }: { onClose: () => void }) {
+export function TerminalPane({ active }: { active: boolean }) {
   const activeId = useStore((s) => s.activeId);
   const sessions = useStore((s) => s.sessions);
-  const session = sessions.find((x) => x.id === activeId);
   const theme = useStore((s) => s.theme);
   const hostRef = useRef<HTMLDivElement>(null);
   const instances = useRef<Map<string, TermInstance>>(new Map());
-
-  const [width, setWidth] = useState(() => {
-    const saved = Number(localStorage.getItem('vibe.termWidth'));
-    return Number.isFinite(saved) && saved >= MIN_WIDTH ? saved : DEFAULT_WIDTH;
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem('vibe.termWidth', String(width));
-    } catch {
-      /* ignore */
-    }
-  }, [width]);
-
-  const startDrag = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const onMove = (ev: MouseEvent) => {
-      const next = Math.max(MIN_WIDTH, Math.min(maxWidth(), window.innerWidth - ev.clientX));
-      setWidth(next);
-    };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.userSelect = '';
-      document.body.style.cursor = '';
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.body.style.userSelect = 'none';
-    document.body.style.cursor = 'col-resize';
-  };
 
   const destroyInstance = useCallback((id: string) => {
     const inst = instances.current.get(id);
@@ -94,7 +60,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   }, []);
 
   // Lazily create a terminal instance for a session. The WS stays open across
-  // session switches, so the server-side PTY is preserved.
+  // session/tab switches, so the server-side PTY is preserved.
   const ensureInstance = useCallback(
     (id: string): TermInstance | undefined => {
       const existing = instances.current.get(id);
@@ -181,10 +147,12 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     [theme],
   );
 
-  // Show the active session's terminal (creating it if needed) and hide the
-  // rest. Re-fit on return from hidden — a display:none container has no size.
+  // Show + create + fit the active session's terminal, but only while this tab
+  // is active. Creating lazily (gated on `active`) avoids spawning a background
+  // PTY when the panel opened straight on the Files tab. Re-runs on session
+  // switch and on tab return — the rAF fit recovers from a display:none parent.
   useEffect(() => {
-    if (!activeId) return;
+    if (!active || !activeId) return;
     const inst = ensureInstance(activeId);
     if (!inst) return;
     for (const [id, it] of instances.current) {
@@ -195,7 +163,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
       inst.term.focus();
     });
     return () => cancelAnimationFrame(raf);
-  }, [activeId, ensureInstance]);
+  }, [activeId, active, ensureInstance]);
 
   // Live theme switch without dropping any running shell.
   useEffect(() => {
@@ -219,28 +187,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   }, [destroyInstance]);
 
   return (
-    <aside
-      style={{ ['--term-w' as string]: `${width}px` } as React.CSSProperties}
-      className="relative z-40 flex h-full w-full shrink-0 flex-col border-l border-white/5 bg-ink-950 max-md:fixed max-md:inset-0 md:w-[var(--term-w)]"
-    >
-      {/* Drag handle to resize the panel (desktop only). */}
-      <div
-        onMouseDown={startDrag}
-        title="Drag to resize"
-        className="absolute inset-y-0 -left-1 z-20 hidden w-2 cursor-col-resize transition-colors hover:bg-accent/30 md:block"
-      />
-      <div className="flex shrink-0 items-center gap-2 border-b border-white/5 px-3 py-2.5">
-        <SquareTerminal className="h-4 w-4 text-accent" />
-        <span className="text-[13px] font-medium text-slate-200">Terminal</span>
-        {session && <span className="truncate text-[11px] text-slate-500">· {session.host}</span>}
-        <button
-          onClick={onClose}
-          title="Close terminal"
-          className="ml-auto rounded-lg p-1.5 text-slate-500 transition hover:bg-ink-800 hover:text-slate-300"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
+    <div className="flex h-full w-full min-h-0 flex-col">
       {activeId ? (
         <div className="min-h-0 flex-1 overflow-hidden p-2">
           <div ref={hostRef} className="relative h-full w-full" />
@@ -250,6 +197,6 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
           Open a session to use its host's terminal.
         </div>
       )}
-    </aside>
+    </div>
   );
 }

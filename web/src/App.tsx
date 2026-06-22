@@ -4,7 +4,7 @@ import { resolveToken, setToken } from './lib/token';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { NewSessionDialog } from './components/NewSessionDialog';
-import { TerminalPanel } from './components/TerminalPanel';
+import { RightPanel } from './components/RightPanel';
 import { Toast } from './components/Toast';
 import { Logo } from './components/Logo';
 
@@ -13,7 +13,7 @@ export default function App() {
   const init = useStore((s) => s.init);
   const [newOpen, setNewOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [rightTab, setRightTab] = useState<'terminal' | 'files' | null>(null);
 
   useEffect(() => {
     const token = resolveToken();
@@ -34,10 +34,11 @@ export default function App() {
       <ChatView
         onOpenSidebar={() => setSidebarOpen(true)}
         onNewSession={() => setNewOpen(true)}
-        terminalOpen={terminalOpen}
-        onToggleTerminal={() => setTerminalOpen((v) => !v)}
+        rightTab={rightTab}
+        onToggleTerminal={() => setRightTab((v) => (v === 'terminal' ? null : 'terminal'))}
+        onToggleFiles={() => setRightTab((v) => (v === 'files' ? null : 'files'))}
       />
-      {terminalOpen && <TerminalPanel onClose={() => setTerminalOpen(false)} />}
+      {rightTab && <RightPanel tab={rightTab} onTab={(t) => setRightTab(t)} onClose={() => setRightTab(null)} />}
       {newOpen && <NewSessionDialog onClose={() => setNewOpen(false)} />}
       <Toast />
     </div>
