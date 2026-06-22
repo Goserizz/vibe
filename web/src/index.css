@@ -100,6 +100,12 @@
   .glass {
     @apply border border-white/5 bg-ink-850/70 backdrop-blur-xl;
   }
+  /* Light mode: the translucent surface over a dark modal scrim reads as muddy
+     gray, and border-white/5 is invisible. Render it opaque + visibly bordered
+     for a crisp, bright panel. */
+  .light .glass {
+    @apply border-ink-700 bg-ink-850;
+  }
 
   /* Markdown prose used in assistant/user messages. */
   .prose-vibe {
