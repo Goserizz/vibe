@@ -104,4 +104,12 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ host, path, content }),
     }),
+
+  // Direct URL for binary display (e.g. <img src>). Token in the query lets the
+  // browser fetch it without a custom auth header.
+  fileRawUrl: ({ host, path }: { host?: string; path: string }) => {
+    const qs = new URLSearchParams({ path });
+    if (host) qs.set('host', host);
+    return `/api/files/raw?token=${encodeURIComponent(authToken)}&${qs.toString()}`;
+  },
 };

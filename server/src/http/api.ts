@@ -81,6 +81,27 @@ const hostSchema = z.object({
 /** Max bytes we're willing to load into the editor. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
+/** Max bytes for a raw (e.g. image) download. */
+const MAX_RAW_BYTES = 25 * 1024 * 1024;
+
+/** Content-Type for image extensions served by /files/raw. */
+const imageMimes: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+  avif: 'image/avif',
+};
+
+function mimeForPath(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+  return imageMimes[ext] ?? 'application/octet-stream';
+}
+
 /** Resolve a local path the user is browsing/editing: expand `~`, make it
  *  absolute. Unlike validateDir this does NOT require the path to exist or be
  *  a directory — callers stat/read/write as needed. */
@@ -219,6 +240,54 @@ export function createApiRouter(): Router {
         return;
       }
       res.json({ path: filePath, content });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'read failed' });
+    }
+  });
+
+  // Raw bytes (e.g. an image) for <img> display. The token may arrive via
+  // ?token= so the URL works directly in an <img src>. Remote binary is
+  // transported as base64 because sshExec accumulates stdout as utf8 text,
+  // which would corrupt raw bytes.
+  router.get('/files/raw', async (req, res) => {
+    const parsed = filesQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid query' });
+      return;
+    }
+    const filePath = parsed.data.path;
+    const { remote, target } = resolveFileTarget(parsed.data.host);
+    try {
+      let buf: Buffer;
+      if (remote) {
+        const sizeRes = await sshExec(target, loginShellCommand(`wc -c < ${shQuote(filePath)}`), { timeoutMs: 10_000 });
+        const size = Number((sizeRes.stdout || '').trim());
+        if (sizeRes.code === 0 && Number.isFinite(size) && size > MAX_RAW_BYTES) {
+          res.status(422).json({ error: 'file too large (>25MB)' });
+          return;
+        }
+        const r = await sshExec(target, loginShellCommand(`base64 < ${shQuote(filePath)}`), { timeoutMs: 30_000 });
+        if (r.timedOut) {
+          res.status(504).json({ error: 'read timed out' });
+          return;
+        }
+        if (r.code !== 0) {
+          res.status(400).json({ error: (r.stderr.trim() || 'read failed').slice(0, 500) });
+          return;
+        }
+        buf = Buffer.from(r.stdout.replace(/\s+/g, ''), 'base64');
+      } else {
+        const resolved = resolveLocalPath(filePath);
+        const stat = fs.statSync(resolved);
+        if (stat.size > MAX_RAW_BYTES) {
+          res.status(422).json({ error: 'file too large (>25MB)' });
+          return;
+        }
+        buf = fs.readFileSync(resolved);
+      }
+      res.set('Content-Type', mimeForPath(filePath));
+      res.set('Cache-Control', 'no-store');
+      res.send(buf);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'read failed' });
     }

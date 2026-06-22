@@ -9,7 +9,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
-import { ArrowUp, ChevronRight, Folder, FileText, Save, Loader2, AlertCircle } from 'lucide-react';
+import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle } from 'lucide-react';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
 import { cn, basename } from '../lib/format';
@@ -26,6 +26,12 @@ function languageForPath(filePath: string) {
   if (['css', 'scss', 'less'].includes(ext)) return [css()];
   if (['html', 'htm', 'xml', 'svg'].includes(ext)) return [html()];
   return [];
+}
+
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
+function isImage(filePath: string): boolean {
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+  return IMAGE_EXTS.has(ext);
 }
 
 function joinPath(dir: string, name: string): string {
@@ -72,6 +78,41 @@ export function FilesPane() {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const prevSession = useRef(activeId);
+
+  // Resizable split between the directory list (top) and the editor (bottom).
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [listH, setListH] = useState(() => {
+    const saved = Number(localStorage.getItem('vibe.filesListHeight'));
+    return Number.isFinite(saved) && saved >= 60 ? Math.min(saved, 600) : 220;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('vibe.filesListHeight', String(listH));
+    } catch {
+      /* ignore */
+    }
+  }, [listH]);
+
+  const startVDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = listH;
+    const root = rootRef.current;
+    const onMove = (ev: MouseEvent) => {
+      const max = Math.max(80, (root?.clientHeight ?? 600) - 140);
+      setListH(Math.max(60, Math.min(max, startH + (ev.clientY - startY))));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'row-resize';
+  };
 
   const save = useCallback(async () => {
     const view = viewRef.current;
@@ -197,6 +238,13 @@ export function FilesPane() {
       view?.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '' } });
       return;
     }
+    if (isImage(p)) {
+      // Images render via <img src=/files/raw>; there's no text content to load.
+      setFileName(basename(p));
+      setReadError(null);
+      view?.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '' } });
+      return;
+    }
     let cancelled = false;
     setReadLoading(true);
     setReadError(null);
@@ -243,10 +291,11 @@ export function FilesPane() {
     return acc;
   }, [cwd, dir]);
 
-  const editorVisible = !!session && !!selected && !readLoading && !readError;
+  const imageMode = !!selected && isImage(selected);
+  const editorVisible = !!session && !!selected && !imageMode && !readLoading && !readError;
 
   return (
-    <div className="relative flex h-full w-full min-h-0 flex-col">
+    <div ref={rootRef} className="relative flex h-full w-full min-h-0 flex-col">
       {session && (
         <>
           {/* Breadcrumb / directory toolbar */}
@@ -280,8 +329,8 @@ export function FilesPane() {
             </div>
           </div>
 
-          {/* Directory listing */}
-          <div className="shrink-0 overflow-y-auto border-b border-white/5" style={{ maxHeight: '38%' }}>
+          {/* Directory listing (height set by the drag handle below) */}
+          <div className="shrink-0 overflow-y-auto" style={{ height: listH }}>
             {listLoading ? (
               <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-slate-500">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
@@ -306,6 +355,8 @@ export function FilesPane() {
                   >
                     {e.dir ? (
                       <Folder className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                    ) : isImage(e.name) ? (
+                      <ImageIcon className="h-3.5 w-3.5 shrink-0 text-slate-500" />
                     ) : (
                       <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
                     )}
@@ -316,8 +367,18 @@ export function FilesPane() {
             )}
           </div>
 
-          {/* Editor save bar */}
-          {selected && (
+          {/* Drag handle: resize the directory list vs. the editor below. */}
+          <div
+            onMouseDown={startVDrag}
+            title="Drag to resize"
+            className="group relative shrink-0 cursor-row-resize"
+            style={{ height: 6 }}
+          >
+            <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/10 transition-colors group-hover:bg-accent/50" />
+          </div>
+
+          {/* Editor save bar (text files only — images aren't editable here) */}
+          {selected && !imageMode && (
             <div className="flex shrink-0 items-center gap-2 border-b border-white/5 px-3 py-1.5">
               <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
               <span className="truncate font-mono text-[11px] text-slate-300">{fileName || basename(selected)}</span>
@@ -342,6 +403,17 @@ export function FilesPane() {
           they never cover the directory list above — which must stay clickable. */}
       <div className="relative min-h-0 flex-1">
         <div ref={editorEl} className={cn('h-full w-full overflow-hidden', editorVisible ? 'block' : 'hidden')} />
+        {imageMode && selected && (
+          <div className="absolute inset-0 flex items-center justify-center overflow-auto p-4">
+            <img
+              key={selected}
+              src={api.fileRawUrl({ host: hostArg, path: selected })}
+              alt={basename(selected)}
+              onError={() => setToast('Failed to load image')}
+              className="max-h-full max-w-full object-contain"
+            />
+          </div>
+        )}
         {!session && <Overlay text="Open a session to browse its files." />}
         {session && !selected && !readLoading && <Overlay text="Select a file to view or edit." />}
         {readLoading && <Overlay text="Loading…" spin />}
