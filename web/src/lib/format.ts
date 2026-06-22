@@ -50,9 +50,9 @@ export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: str
 export const EFFORT_LEVELS: { value: EffortLevel; label: string; hint: string }[] = [
   { value: 'low', label: 'Low', hint: 'Fastest, minimal thinking' },
   { value: 'medium', label: 'Medium', hint: 'Moderate thinking' },
-  { value: 'high', label: 'High', hint: 'Deep reasoning (default)' },
+  { value: 'high', label: 'High', hint: 'Deep reasoning' },
   { value: 'xhigh', label: 'X-High', hint: 'Deeper than high' },
-  { value: 'max', label: 'Max', hint: 'Maximum effort' },
+  { value: 'max', label: 'Max', hint: 'Maximum effort (default)' },
 ];
 
 export function modelLabel(value: string): string {

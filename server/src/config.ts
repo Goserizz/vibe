@@ -51,7 +51,7 @@ export const config = {
   webDist: path.resolve(import.meta.dirname, '../../dist/web'),
   defaultModel: process.env.VIBE_DEFAULT_MODEL || 'opus',
   /** Default reasoning effort for new sessions (low|medium|high|xhigh|max). */
-  defaultEffort: process.env.VIBE_DEFAULT_EFFORT || 'high',
+  defaultEffort: process.env.VIBE_DEFAULT_EFFORT || 'max',
   /** Path to the user's real claude binary (preferred over the SDK's bundled one). */
   claudeExecutable: resolveClaudeExecutable(),
   serverVersion: '0.1.0',
