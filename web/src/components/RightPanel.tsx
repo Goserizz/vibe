@@ -110,14 +110,16 @@ export function RightPanel({
 function TabButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
   return (
     <button
+      type="button"
       onClick={onClick}
+      aria-label={label}
+      title={label}
       className={cn(
-        'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] transition',
+        'inline-flex h-8 w-8 items-center justify-center rounded-lg transition',
         active ? 'bg-accent/15 text-accent-soft' : 'text-slate-400 hover:bg-ink-800 hover:text-slate-200',
       )}
     >
       {icon}
-      <span>{label}</span>
     </button>
   );
 }

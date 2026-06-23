@@ -94,6 +94,14 @@
   input {
     @apply bg-transparent;
   }
+
+  @media (max-width: 767px) {
+    input:not([type='checkbox']):not([type='radio']):not([type='range']),
+    textarea[class],
+    select[class] {
+      font-size: 16px;
+    }
+  }
 }
 
 @layer components {

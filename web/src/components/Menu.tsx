@@ -9,8 +9,9 @@ export interface MenuItem {
   active?: boolean;
 }
 
-export function Menu({ trigger, items, onSelect, align = 'left', searchable = false, allowCustom = false, customLabel }: {
+export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', searchable = false, allowCustom = false, customLabel }: {
   trigger: ReactNode;
+  triggerLabel?: string;
   items: MenuItem[];
   onSelect: (value: string) => void;
   align?: 'left' | 'right';
@@ -40,7 +41,17 @@ export function Menu({ trigger, items, onSelect, align = 'left', searchable = fa
 
   return (
     <div className="relative">
-      <button onClick={() => (open ? close() : setOpen(true))}>{trigger}</button>
+      <button
+        type="button"
+        aria-label={triggerLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={triggerLabel}
+        className="block"
+        onClick={() => (open ? close() : setOpen(true))}
+      >
+        {trigger}
+      </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={close} />

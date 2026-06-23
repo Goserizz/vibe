@@ -1,4 +1,4 @@
-import { Menu as MenuIcon, ChevronDown, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from 'lucide-react';
+import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from 'lucide-react';
 import type { EffortLevel, PermissionMode } from '@shared/protocol';
 import { api } from '../lib/api';
 import { useStore } from '../store/store';
@@ -82,30 +82,32 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
       {session.agent !== 'cursor' && <EffortControl />}
       <PermissionControl />
       <button
+        type="button"
         onClick={onToggleTerminal}
+        aria-label="Terminal"
         title="Terminal"
         className={cn(
-          'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] transition',
+          'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition',
           rightTab === 'terminal'
             ? 'border-accent/50 bg-accent/15 text-accent-soft'
             : 'border-ink-700 text-slate-300 hover:border-ink-600',
         )}
       >
-        <SquareTerminal className="h-3.5 w-3.5" />
-        <span className="hidden sm:inline">Terminal</span>
+        <SquareTerminal className="h-4 w-4" />
       </button>
       <button
+        type="button"
         onClick={onToggleFiles}
+        aria-label="Files"
         title="Files"
         className={cn(
-          'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] transition',
+          'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition',
           rightTab === 'files'
             ? 'border-accent/50 bg-accent/15 text-accent-soft'
             : 'border-ink-700 text-slate-300 hover:border-ink-600',
         )}
       >
-        <FolderOpen className="h-3.5 w-3.5" />
-        <span className="hidden sm:inline">Files</span>
+        <FolderOpen className="h-4 w-4" />
       </button>
     </header>
   );
@@ -122,15 +124,14 @@ function ModelControl() {
   return (
     <Menu
       align="right"
+      triggerLabel={`Model: ${modelLabel(session.model, cursorModels, codexModels)}`}
       searchable={usePicker}
       allowCustom={usePicker}
       items={modelsForAgent(session.agent, cursorModels, codexModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
       onSelect={(value) => void patchSession(session.id, { model: value })}
       trigger={
-        <span className="flex items-center gap-1.5 rounded-lg border border-ink-700 px-2.5 py-1.5 text-[12px] text-slate-300 transition hover:border-ink-600">
-          <Cpu className="h-3.5 w-3.5 text-slate-500" />
-          {modelLabel(session.model, cursorModels, codexModels)}
-          <ChevronDown className="h-3 w-3 text-slate-500" />
+        <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-300 transition hover:border-ink-600">
+          <Cpu className="h-4 w-4 text-slate-400" />
         </span>
       }
     />
@@ -143,13 +144,12 @@ function EffortControl() {
   return (
     <Menu
       align="right"
+      triggerLabel={`Effort: ${effortLabel(session.effort)}`}
       items={effortLevelsForAgent(session.agent).map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
       onSelect={(value) => void patchSession(session.id, { effort: value as EffortLevel })}
       trigger={
-        <span className="flex items-center gap-1.5 rounded-lg border border-ink-700 px-2.5 py-1.5 text-[12px] text-slate-300 transition hover:border-ink-600">
-          <Gauge className="h-3.5 w-3.5 text-slate-500" />
-          {effortLabel(session.effort)}
-          <ChevronDown className="h-3 w-3 text-slate-500" />
+        <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-300 transition hover:border-ink-600">
+          <Gauge className="h-4 w-4 text-slate-400" />
         </span>
       }
     />
@@ -163,20 +163,19 @@ function PermissionControl() {
   return (
     <Menu
       align="right"
+      triggerLabel={`Permissions: ${permissionModeLabel(mode)}`}
       items={permissionModesForAgent(session.agent).map((m) => ({ value: m.value, label: m.label, hint: m.hint, active: m.value === mode }))}
       onSelect={(value) => void patchSession(session.id, { permissionMode: value as PermissionMode })}
       trigger={
         <span
           className={cn(
-            'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] transition',
+            'inline-flex h-8 w-8 items-center justify-center rounded-lg border transition',
             mode === 'bypassPermissions'
               ? 'border-rose-500/30 text-rose-300'
               : 'border-ink-700 text-slate-300 hover:border-ink-600',
           )}
         >
-          <ShieldCheck className="h-3.5 w-3.5 text-slate-500" />
-          {permissionModeLabel(mode)}
-          <ChevronDown className="h-3 w-3 text-slate-500" />
+          <ShieldCheck className={cn('h-4 w-4', mode === 'bypassPermissions' ? 'text-rose-300' : 'text-slate-400')} />
         </span>
       }
     />
