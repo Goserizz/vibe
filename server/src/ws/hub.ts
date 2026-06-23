@@ -11,6 +11,13 @@ import {
   readCursorStoreTranscript,
   readCursorTranscript,
 } from '../cursor/transcript.js';
+import { startCodexRun } from '../codex/runner.js';
+import { resolveCodexSessionSync } from '../codex/discovery.js';
+import {
+  appendCodexBlocks,
+  readCodexRolloutTranscript,
+  readCodexTranscript,
+} from '../codex/transcript.js';
 import { readTranscriptBlocks } from '../sessions/transcript.js';
 import { resolveClaudeSessionSync } from '../sessions/discovery.js';
 import { readRemoteTranscript } from '../remote/discovery.js';
@@ -125,7 +132,8 @@ class SessionRuntime {
     this.agent = init.agent;
     this.host = init.host;
     this.sshTarget = init.sshTarget;
-    if (this.agent === 'cursor') this.transcript = new CursorTranscriptBuilder();
+    // Cursor and Codex both self-persist via the shared LiveEvent→blocks accumulator.
+    if (this.agent === 'cursor' || this.agent === 'codex') this.transcript = new CursorTranscriptBuilder();
   }
 
   private emit(ev: LiveEvent): void {
@@ -242,6 +250,18 @@ class SessionRuntime {
         },
         cb,
       );
+    } else if (this.agent === 'codex') {
+      this.run = startCodexRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          resume: this.claudeSessionId,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd } : undefined,
+        },
+        cb,
+      );
     } else {
       this.run = this.sshTarget
         ? startRun({ ...runOpts, remote: { sshTarget: this.sshTarget, cwd } }, cb)
@@ -261,9 +281,11 @@ class SessionRuntime {
     this.pending.clear();
     this.emit({ k: 'run_state', running: false });
 
-    // Cursor sessions self-persist: append this turn's blocks to the Vibe JSONL.
+    // Cursor/Codex sessions self-persist: append this turn's blocks to the Vibe JSONL.
     if (this.transcript) {
-      appendCursorBlocks(this.sessionId, this.transcript.blocks.slice(this.turnStartBlocks));
+      const blocks = this.transcript.blocks.slice(this.turnStartBlocks);
+      if (this.agent === 'codex') appendCodexBlocks(this.sessionId, blocks);
+      else appendCursorBlocks(this.sessionId, blocks);
     }
 
     const stored = sessionStore.get(this.sessionId);
@@ -388,6 +410,11 @@ export class Hub {
     if (cursorInfo) {
       return { cwd: cursorInfo.cwd, model: cursorInfo.model, permissionMode: 'default', effort: defaultEffort, title: cursorInfo.title, claudeSessionId: sessionId, agent: 'cursor' };
     }
+    // …or from ~/.codex/sessions (Codex).
+    const codexInfo = resolveCodexSessionSync(sessionId);
+    if (codexInfo) {
+      return { cwd: codexInfo.cwd, model: codexInfo.model, permissionMode: 'default', effort: defaultEffort, title: codexInfo.title, claudeSessionId: sessionId, agent: 'codex' };
+    }
     return undefined;
   }
 
@@ -497,6 +524,19 @@ export class Hub {
       if (!host && !rt?.running) {
         const cwd = stored?.cwd ?? rt?.cwd;
         if (cwd && sid) return { blocks: readCursorStoreTranscript(cwd, sid), seq: plan.seq };
+      }
+      return { blocks: [], seq: plan.seq };
+    }
+
+    if (agent === 'codex') {
+      // Vibe-persisted transcript is authoritative for sessions we drove.
+      const own = readCodexTranscript(sessionId);
+      if (own.length) return { blocks: own, seq: plan.seq };
+      // No Vibe transcript yet: for an idle local session created outside Vibe,
+      // best-effort parse its on-disk rollout; while running we rely on the live
+      // stream (avoids duplicating in-flight blocks).
+      if (!host && !rt?.running && sid) {
+        return { blocks: readCodexRolloutTranscript(stored?.cwd ?? rt?.cwd ?? '', sid), seq: plan.seq };
       }
       return { blocks: [], seq: plan.seq };
     }

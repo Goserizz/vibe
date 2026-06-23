@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { resolveClaudeExecutable } from './claude/resolve.js';
 import { resolveCursorExecutable } from './cursor/resolve.js';
+import { resolveCodexExecutable } from './codex/resolve.js';
 
 function resolveHome(): string {
   const custom = process.env.VIBE_HOME;
@@ -52,6 +53,10 @@ export const config = {
   cursorChatsDir: path.join(os.homedir(), '.cursor', 'chats'),
   /** Where Vibe persists transcripts for Cursor sessions it drives. */
   cursorTranscriptsDir: path.join(VIBE_HOME, 'cursor-transcripts'),
+  /** Where the Codex CLI stores rollout transcripts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). */
+  codexSessionsDir: path.join(os.homedir(), '.codex', 'sessions'),
+  /** Where Vibe persists transcripts for Codex sessions it drives. */
+  codexTranscriptsDir: path.join(VIBE_HOME, 'codex-transcripts'),
   /** Where Vite emits the production bundle. */
   webDist: path.resolve(import.meta.dirname, '../../dist/web'),
   defaultModel: process.env.VIBE_DEFAULT_MODEL || 'opus',
@@ -59,11 +64,15 @@ export const config = {
   defaultEffort: process.env.VIBE_DEFAULT_EFFORT || 'max',
   /** Default model for new Cursor sessions. */
   defaultCursorModel: process.env.VIBE_DEFAULT_CURSOR_MODEL || 'auto',
-  /** Which engine new sessions use by default ('claude' | 'cursor'). */
-  defaultAgent: process.env.VIBE_DEFAULT_AGENT === 'cursor' ? 'cursor' : 'claude',
+  /** Default model for new Codex sessions. */
+  defaultCodexModel: process.env.VIBE_DEFAULT_CODEX_MODEL || 'auto',
+  /** Which engine new sessions use by default ('claude' | 'cursor' | 'codex'). */
+  defaultAgent: process.env.VIBE_DEFAULT_AGENT === 'cursor' ? 'cursor' : process.env.VIBE_DEFAULT_AGENT === 'codex' ? 'codex' : 'claude',
   /** Path to the user's real claude binary (preferred over the SDK's bundled one). */
   claudeExecutable: resolveClaudeExecutable(),
   /** Path to the user's cursor-agent binary (the Cursor CLI). */
   cursorExecutable: resolveCursorExecutable(),
+  /** Path to the user's codex binary (the Codex CLI). */
+  codexExecutable: resolveCodexExecutable(),
   serverVersion: '0.1.0',
 } as const;

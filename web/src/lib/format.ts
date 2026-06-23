@@ -36,6 +36,7 @@ export function relativeTime(ts: number): string {
 export const AGENTS: { value: AgentKind; label: string }[] = [
   { value: 'claude', label: 'Claude' },
   { value: 'cursor', label: 'Cursor' },
+  { value: 'codex', label: 'Codex' },
 ];
 
 export const MODELS: { value: string; label: string }[] = [
@@ -65,10 +66,22 @@ export const CURSOR_MODELS: ModelOption[] = [
   { value: 'claude-opus-4-8-thinking-high', label: 'Opus 4.8 Thinking' },
 ];
 
-/** Model options for an agent. Cursor uses the live CLI list when available. */
+/** Codex has no models subcommand; this static list + custom typing covers it.
+ *  `auto` lets Codex pick per its config.toml. */
+export const CODEX_MODELS: ModelOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'gpt-5.4', label: 'GPT-5.4' },
+  { value: 'gpt-5.1-codex', label: 'Codex 5.1' },
+  { value: 'gpt-5.3-codex', label: 'Codex 5.3' },
+  { value: 'o3', label: 'o3' },
+];
+
+/** Model options for an agent. Cursor uses the live CLI list when available;
+ *  Codex uses a static list; Claude uses the built-in set. */
 export function modelsForAgent(agent: AgentKind, cursorModels?: ModelOption[]): ModelOption[] {
-  if (agent !== 'cursor') return MODELS;
-  return cursorModels && cursorModels.length ? cursorModels : CURSOR_MODELS;
+  if (agent === 'cursor') return cursorModels && cursorModels.length ? cursorModels : CURSOR_MODELS;
+  if (agent === 'codex') return CODEX_MODELS;
+  return MODELS;
 }
 
 export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
@@ -84,8 +97,16 @@ export const CURSOR_PERMISSION_MODES: { value: PermissionMode; label: string; hi
   { value: 'plan', label: 'Plan', hint: 'Read-only planning mode' },
 ];
 
+/** Codex headless mode is sandbox-level only: full-auto (workspace-write) vs read-only. */
+export const CODEX_PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
+  { value: 'default', label: 'Auto', hint: 'Sandboxed, auto-run (workspace-write)' },
+  { value: 'plan', label: 'Plan', hint: 'Read-only planning mode' },
+];
+
 export function permissionModesForAgent(agent: AgentKind): { value: PermissionMode; label: string; hint: string }[] {
-  return agent === 'cursor' ? CURSOR_PERMISSION_MODES : PERMISSION_MODES;
+  if (agent === 'cursor') return CURSOR_PERMISSION_MODES;
+  if (agent === 'codex') return CODEX_PERMISSION_MODES;
+  return PERMISSION_MODES;
 }
 
 export function agentLabel(agent: AgentKind): string {
@@ -105,6 +126,7 @@ export function modelLabel(value: string, cursorModels?: ModelOption[]): string 
     MODELS.find((m) => m.value === value)?.label ??
     cursorModels?.find((m) => m.value === value)?.label ??
     CURSOR_MODELS.find((m) => m.value === value)?.label ??
+    CODEX_MODELS.find((m) => m.value === value)?.label ??
     value
   );
 }

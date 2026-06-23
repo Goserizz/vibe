@@ -11,6 +11,7 @@ import { getRecentProjects, validateDir } from '../projects.js';
 import { getClaudeSessionInfo, listClaudeSessions, type DiscoveredSession } from '../sessions/discovery.js';
 import { listCursorSessions, resolveCursorSessionSync } from '../cursor/discovery.js';
 import { listCursorModels } from '../cursor/models.js';
+import { listCodexSessions, resolveCodexSessionSync } from '../codex/discovery.js';
 import { searchConversations } from '../sessions/search.js';
 import { hostRegistry } from '../remote/hosts.js';
 import { listRemoteSessions, getRemoteSessionInfo } from '../remote/discovery.js';
@@ -40,7 +41,7 @@ function discoveredToMeta(d: DiscoveredSession, host: string, remote: boolean, a
     updatedAt: d.updatedAt,
     messageCount: d.messageCount,
     running: false,
-    source: agent === 'cursor' ? 'cursor' : 'claude',
+    source: agent === 'cursor' ? 'cursor' : agent === 'codex' ? 'codex' : 'claude',
     host,
   };
 }
@@ -63,7 +64,7 @@ const createSchema = z.object({
   permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']).optional(),
   effort: z.enum(effortLevels).optional(),
   /** Engine to drive the session; defaults to the server's default agent. */
-  agent: z.enum(['claude', 'cursor']).optional(),
+  agent: z.enum(['claude', 'cursor', 'codex']).optional(),
   title: z.string().optional(),
   /** Remote host name to create the session on; omit for local. */
   host: z.string().optional(),
@@ -405,6 +406,17 @@ export function createApiRouter(): Router {
       log.warn('cursor session discovery failed', err);
     }
 
+    // Local Codex CLI sessions (~/.codex/sessions/**/rollout-*.jsonl).
+    try {
+      for (const d of listCodexSessions()) {
+        if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
+          discovered.push(discoveredToMeta(d, config.localName, false, 'codex'));
+        }
+      }
+    } catch (err) {
+      log.warn('codex session discovery failed', err);
+    }
+
     // Remote hosts (in parallel; a down host just contributes nothing).
     await Promise.all(
       hostRegistry.list().map(async (host) => {
@@ -453,7 +465,7 @@ export function createApiRouter(): Router {
     const agent: AgentKind = parsed.data.agent ?? config.defaultAgent;
     const session = sessionStore.create({
       cwd,
-      model: parsed.data.model || (agent === 'cursor' ? config.defaultCursorModel : config.defaultModel),
+      model: parsed.data.model || (agent === 'cursor' ? config.defaultCursorModel : agent === 'codex' ? config.defaultCodexModel : config.defaultModel),
       permissionMode: (parsed.data.permissionMode as PermissionMode) || 'default',
       effort: (parsed.data.effort as EffortLevel) || (config.defaultEffort as EffortLevel),
       agent,
@@ -489,12 +501,18 @@ export function createApiRouter(): Router {
         ? await getRemoteSessionInfo(remoteHost, claudeSessionId)
         : await getClaudeSessionInfo(id);
       let agent: AgentKind = 'claude';
-      // Not a Claude session — maybe a local Cursor chat.
+      // Not a Claude session — maybe a local Cursor chat or Codex rollout.
       if (!info && !host) {
         const c = resolveCursorSessionSync(id);
         if (c) {
           info = c;
           agent = 'cursor';
+        } else {
+          const x = resolveCodexSessionSync(id);
+          if (x) {
+            info = x;
+            agent = 'codex';
+          }
         }
       }
       if (!info) {

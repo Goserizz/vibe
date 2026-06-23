@@ -27,13 +27,16 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const [creating, setCreating] = useState(false);
 
   const isRemote = host !== '';
-  const isCursor = agent === 'cursor';
+  // Cursor and Codex use a model dropdown + 2 permission modes and have no
+  // effort control; only Claude uses the segmented model/perms + effort gauge.
+  const isClaude = agent === 'claude';
 
   // Switching engine resets model + permission to that engine's sensible defaults.
   const onAgent = (a: AgentKind) => {
     setAgent(a);
-    setModel(a === 'cursor' ? 'auto' : defaultModel);
-    setPermissionMode(a === 'cursor' ? 'default' : 'bypassPermissions');
+    const custom = a !== 'claude';
+    setModel(custom ? 'auto' : defaultModel);
+    setPermissionMode(custom ? 'default' : 'bypassPermissions');
   };
 
   // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
@@ -167,18 +170,18 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Model</label>
-              {isCursor ? (
+              {isClaude ? (
+                <Segmented options={MODELS} value={model} onChange={setModel} />
+              ) : (
                 <select
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
                   className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-[13px] text-slate-200 outline-none transition focus:border-accent/60"
                 >
-                  {modelsForAgent('cursor', cursorModels).map((m) => (
+                  {modelsForAgent(agent, cursorModels).map((m) => (
                     <option key={m.value} value={m.value}>{m.label}</option>
                   ))}
                 </select>
-              ) : (
-                <Segmented options={MODELS} value={model} onChange={setModel} />
               )}
             </div>
             <div>
@@ -194,7 +197,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
 
           <div>
             <label className="mb-1.5 block text-xs font-medium text-slate-400">Permissions</label>
-            <div className={cn('grid gap-1.5', isCursor ? 'grid-cols-2' : 'grid-cols-4')}>
+            <div className={cn('grid gap-1.5', isClaude ? 'grid-cols-4' : 'grid-cols-2')}>
               {permissionModesForAgent(agent).map((m) => (
                 <button
                   key={m.value}
@@ -213,7 +216,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          {!isCursor && (
+          {isClaude && (
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Reasoning effort</label>
               <div className="grid grid-cols-5 gap-1.5">

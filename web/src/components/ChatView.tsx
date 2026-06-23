@@ -61,7 +61,11 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
           <span
             className={cn(
               'shrink-0 rounded px-1 py-px text-[10px] font-medium',
-              session.agent === 'cursor' ? 'bg-accent/15 text-accent-soft' : 'bg-ink-700 text-slate-300',
+              session.agent === 'cursor'
+                ? 'bg-accent/15 text-accent-soft'
+                : session.agent === 'codex'
+                  ? 'bg-emerald-500/15 text-emerald-300'
+                  : 'bg-ink-700 text-slate-300',
             )}
           >
             {agentLabel(session.agent)}
@@ -75,7 +79,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 
       <ContextMeter sessionId={session.id} />
       <ModelControl />
-      {session.agent !== 'cursor' && <EffortControl />}
+      {session.agent === 'claude' && <EffortControl />}
       <PermissionControl />
       <button
         onClick={onToggleTerminal}
@@ -110,13 +114,15 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 function ModelControl() {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
   const cursorModels = useStore((s) => s.cursorModels);
-  const isCursor = session.agent === 'cursor';
+  // Cursor's model list is large (search it); Codex/Claude are short. Allow a
+  // custom typed value for Cursor and Codex (both accept arbitrary model ids).
+  const usePicker = session.agent !== 'claude';
 
   return (
     <Menu
       align="right"
-      searchable={isCursor}
-      allowCustom={isCursor}
+      searchable={usePicker}
+      allowCustom={usePicker}
       items={modelsForAgent(session.agent, cursorModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
       onSelect={(value) => void patchSession(session.id, { model: value })}
       trigger={
