@@ -88,6 +88,41 @@ export function parseCodexResponseItem(item: any): ParsedItem[] {
     const content = typeof out === 'string' ? out : out == null ? '' : JSON.stringify(out, null, 2);
     return [{ kind: 'toolResult', id, content, isError: Boolean(item.is_error) }];
   }
+
+  // Live `--json` item types (flat, pre-dispatched) — distinct from the rollout's
+  // message/function_call format above. These arrive as `item.started` (in progress)
+  // then `item.completed` (with output); tool ids are stable across both.
+  if (type === 'agent_message') {
+    const t = String(item.text ?? '').trim();
+    return t ? [{ kind: 'assistant', text: t }] : [];
+  }
+  if (type === 'agent_reasoning') {
+    const t = String(item.text ?? '').trim();
+    return t ? [{ kind: 'thinking', text: t }] : [];
+  }
+  if (type === 'command_execution') {
+    const id = String(item.id ?? '');
+    if (!id) return [];
+    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name: 'shell', input: { command: item.command } }];
+    const done = item.status === 'completed' || item.exit_code != null;
+    if (done) {
+      const out = typeof item.aggregated_output === 'string' && item.aggregated_output.length ? item.aggregated_output : '(no output)';
+      const isError = typeof item.exit_code === 'number' && item.exit_code !== 0;
+      parts.push({ kind: 'toolResult', id, content: out, isError });
+    }
+    return parts;
+  }
+  if (type === 'file_change') {
+    const id = String(item.id ?? '');
+    if (!id) return [];
+    const changes = Array.isArray(item.changes) ? item.changes : [];
+    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name: 'edit', input: { changes: changes.map((c: any) => ({ path: c.path, kind: c.kind })) } }];
+    if (item.status === 'completed') {
+      const summary = changes.length ? changes.map((c: any) => `${c.kind || 'change'} ${c.path}`).join('\n') : '(no changes)';
+      parts.push({ kind: 'toolResult', id, content: summary, isError: false });
+    }
+    return parts;
+  }
   return [];
 }
 
