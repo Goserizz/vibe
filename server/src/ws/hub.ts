@@ -257,6 +257,7 @@ class SessionRuntime {
           cwd,
           model,
           permissionMode,
+          effort,
           resume: this.claudeSessionId,
           remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd } : undefined,
         },

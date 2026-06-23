@@ -11,8 +11,8 @@ import { Logo } from './Logo';
 import {
   agentLabel,
   cn,
-  EFFORT_LEVELS,
   effortLabel,
+  effortLevelsForAgent,
   modelLabel,
   modelsForAgent,
   permissionModeLabel,
@@ -79,7 +79,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 
       <ContextMeter sessionId={session.id} />
       <ModelControl />
-      {session.agent === 'claude' && <EffortControl />}
+      {session.agent !== 'cursor' && <EffortControl />}
       <PermissionControl />
       <button
         onClick={onToggleTerminal}
@@ -114,6 +114,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 function ModelControl() {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
   const cursorModels = useStore((s) => s.cursorModels);
+  const codexModels = useStore((s) => s.codexModels);
   // Cursor's model list is large (search it); Codex/Claude are short. Allow a
   // custom typed value for Cursor and Codex (both accept arbitrary model ids).
   const usePicker = session.agent !== 'claude';
@@ -123,12 +124,12 @@ function ModelControl() {
       align="right"
       searchable={usePicker}
       allowCustom={usePicker}
-      items={modelsForAgent(session.agent, cursorModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
+      items={modelsForAgent(session.agent, cursorModels, codexModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
       onSelect={(value) => void patchSession(session.id, { model: value })}
       trigger={
         <span className="flex items-center gap-1.5 rounded-lg border border-ink-700 px-2.5 py-1.5 text-[12px] text-slate-300 transition hover:border-ink-600">
           <Cpu className="h-3.5 w-3.5 text-slate-500" />
-          {modelLabel(session.model, cursorModels)}
+          {modelLabel(session.model, cursorModels, codexModels)}
           <ChevronDown className="h-3 w-3 text-slate-500" />
         </span>
       }
@@ -142,7 +143,7 @@ function EffortControl() {
   return (
     <Menu
       align="right"
-      items={EFFORT_LEVELS.map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
+      items={effortLevelsForAgent(session.agent).map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
       onSelect={(value) => void patchSession(session.id, { effort: value as EffortLevel })}
       trigger={
         <span className="flex items-center gap-1.5 rounded-lg border border-ink-700 px-2.5 py-1.5 text-[12px] text-slate-300 transition hover:border-ink-600">

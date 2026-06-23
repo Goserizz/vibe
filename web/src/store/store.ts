@@ -41,6 +41,7 @@ interface StoreState {
   serverVersion: string;
   defaultModel: string;
   cursorModels: { value: string; label: string }[];
+  codexModels: { value: string; label: string }[];
   theme: Theme;
 
   sessions: SessionMeta[];
@@ -64,6 +65,7 @@ interface StoreState {
   loadProjects: () => Promise<void>;
   loadHosts: () => Promise<void>;
   loadCursorModels: () => Promise<void>;
+  loadCodexModels: () => Promise<void>;
   addHost: (host: RemoteHost) => Promise<boolean>;
   removeHost: (name: string) => Promise<void>;
   openSession: (id: string) => Promise<void>;
@@ -198,6 +200,7 @@ export const useStore = create<StoreState>((set, get) => {
     serverVersion: '',
     defaultModel: 'opus',
     cursorModels: [],
+    codexModels: [],
     theme: initialTheme(),
     sessions: [],
     projects: [],
@@ -228,7 +231,7 @@ export const useStore = create<StoreState>((set, get) => {
       socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus });
       socket.connect(token);
 
-      await Promise.all([get().refreshSessions(), get().loadProjects(), get().loadHosts(), get().loadCursorModels()]);
+      await Promise.all([get().refreshSessions(), get().loadProjects(), get().loadHosts(), get().loadCursorModels(), get().loadCodexModels()]);
       set({ phase: 'ready' });
 
       const { sessions, activeId } = get();
@@ -264,6 +267,15 @@ export const useStore = create<StoreState>((set, get) => {
       try {
         const cursorModels = await api.listCursorModels();
         set({ cursorModels });
+      } catch {
+        /* ignore — the picker falls back to a small static list */
+      }
+    },
+
+    async loadCodexModels() {
+      try {
+        const codexModels = await api.listCodexModels();
+        set({ codexModels });
       } catch {
         /* ignore — the picker falls back to a small static list */
       }

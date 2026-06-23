@@ -12,6 +12,7 @@ import { getClaudeSessionInfo, listClaudeSessions, type DiscoveredSession } from
 import { listCursorSessions, resolveCursorSessionSync } from '../cursor/discovery.js';
 import { listCursorModels } from '../cursor/models.js';
 import { listCodexSessions, resolveCodexSessionSync } from '../codex/discovery.js';
+import { listCodexModels } from '../codex/models.js';
 import { searchConversations } from '../sessions/search.js';
 import { hostRegistry } from '../remote/hosts.js';
 import { listRemoteSessions, getRemoteSessionInfo } from '../remote/discovery.js';
@@ -151,6 +152,12 @@ export function createApiRouter(): Router {
   // them dynamically so the picker always matches the installed CLI.
   router.get('/cursor/models', async (_req, res) => {
     res.json({ models: await listCursorModels() });
+  });
+
+  // Codex has no `models` subcommand; its cached model list (~/.codex/models_cache.json)
+  // is read directly so the picker matches the installed CLI.
+  router.get('/codex/models', (_req, res) => {
+    res.json({ models: listCodexModels() });
   });
 
   router.post('/projects/validate', (req, res) => {

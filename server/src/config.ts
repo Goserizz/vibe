@@ -55,6 +55,8 @@ export const config = {
   cursorTranscriptsDir: path.join(VIBE_HOME, 'cursor-transcripts'),
   /** Where the Codex CLI stores rollout transcripts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). */
   codexSessionsDir: path.join(os.homedir(), '.codex', 'sessions'),
+  /** Codex's cached model list (~/.codex/models_cache.json) — no `codex models` subcommand exists. */
+  codexModelsCacheFile: path.join(os.homedir(), '.codex', 'models_cache.json'),
   /** Where Vibe persists transcripts for Codex sessions it drives. */
   codexTranscriptsDir: path.join(VIBE_HOME, 'codex-transcripts'),
   /** Where Vite emits the production bundle. */

@@ -52,6 +52,9 @@ export const api = {
   listCursorModels: () =>
     request<{ models: { value: string; label: string }[] }>('/cursor/models').then((r) => r.models),
 
+  listCodexModels: () =>
+    request<{ models: { value: string; label: string }[] }>('/codex/models').then((r) => r.models),
+
   validateDir: (path: string) =>
     request<{ ok: boolean; path: string; error?: string }>('/projects/validate', {
       method: 'POST',

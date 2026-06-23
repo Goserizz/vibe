@@ -4,7 +4,7 @@ import { log } from '../log.js';
 import { CodexStreamNormalizer } from './normalize.js';
 import { sshConnectPrefix, shQuote, loginShellCommand } from '../remote/ssh.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
-import type { PermissionMode } from '../../../shared/protocol.js';
+import type { EffortLevel, PermissionMode } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
 
 export interface CodexRunOptions {
@@ -12,6 +12,8 @@ export interface CodexRunOptions {
   cwd: string;
   model: string;
   permissionMode: PermissionMode;
+  /** Reasoning effort → codex `model_reasoning_effort` (max clamps to xhigh). */
+  effort: EffortLevel;
   /** Codex thread id to resume; omit for a fresh session. */
   resume?: string;
   /** When set, the turn runs on a remote host over SSH. `cwd` is the remote path. */
@@ -37,6 +39,12 @@ function sandboxArgs(mode: PermissionMode): string[] {
   return ['--full-auto'];
 }
 
+/** Vibe effort → codex `model_reasoning_effort`. Codex tops out at `xhigh`
+ *  (no `max`), so clamp it. */
+function codexReasoningEffort(e: EffortLevel): 'low' | 'medium' | 'high' | 'xhigh' {
+  return e === 'max' ? 'xhigh' : e;
+}
+
 /** Build the codex invocation (shared by local spawn and remote ssh). The prompt
  *  is fed via stdin (positional `-` tells codex to read it there). We deliberately
  *  do NOT pass `-C/--cd`: `codex exec resume` rejects it (only fresh `exec` takes
@@ -45,6 +53,7 @@ function sandboxArgs(mode: PermissionMode): string[] {
 function buildSpawn(opts: CodexRunOptions): { bin?: string; args: string[]; remote: boolean } {
   const cwd = opts.remote ? opts.remote.cwd : opts.cwd;
   const base = ['--json', '--skip-git-repo-check', ...sandboxArgs(opts.permissionMode)];
+  base.push('-c', `model_reasoning_effort=${codexReasoningEffort(opts.effort)}`);
   if (opts.model) base.push('-m', opts.model);
 
   const args = opts.resume ? ['exec', 'resume', opts.resume, ...base, '-'] : ['exec', ...base, '-'];

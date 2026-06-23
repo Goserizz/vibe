@@ -3,7 +3,7 @@ import { X, FolderGit2, Folder, Loader2, Check, AlertCircle } from 'lucide-react
 import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
-import { basename, cn, AGENTS, EFFORT_LEVELS, MODELS, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
+import { basename, cn, AGENTS, MODELS, effortLevelsForAgent, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
 
 export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const projects = useStore((s) => s.projects);
@@ -12,6 +12,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const localName = useStore((s) => s.localName);
   const defaultModel = useStore((s) => s.defaultModel);
   const cursorModels = useStore((s) => s.cursorModels);
+  const codexModels = useStore((s) => s.codexModels);
   const createSession = useStore((s) => s.createSession);
 
   // '' = local machine; otherwise a remote host name.
@@ -30,6 +31,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   // Cursor and Codex use a model dropdown + 2 permission modes and have no
   // effort control; only Claude uses the segmented model/perms + effort gauge.
   const isClaude = agent === 'claude';
+  const effortLevels = effortLevelsForAgent(agent);
 
   // Switching engine resets model + permission to that engine's sensible defaults.
   const onAgent = (a: AgentKind) => {
@@ -37,6 +39,8 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     const custom = a !== 'claude';
     setModel(custom ? 'auto' : defaultModel);
     setPermissionMode(custom ? 'default' : 'bypassPermissions');
+    // Codex's model_reasoning_effort tops out at xhigh (its max); claude defaults to max.
+    setEffort(a === 'codex' ? 'xhigh' : 'max');
   };
 
   // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
@@ -178,7 +182,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                   onChange={(e) => setModel(e.target.value)}
                   className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-[13px] text-slate-200 outline-none transition focus:border-accent/60"
                 >
-                  {modelsForAgent(agent, cursorModels).map((m) => (
+                  {modelsForAgent(agent, cursorModels, codexModels).map((m) => (
                     <option key={m.value} value={m.value}>{m.label}</option>
                   ))}
                 </select>
@@ -216,11 +220,11 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          {isClaude && (
+          {effortLevels.length > 0 && (
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Reasoning effort</label>
-              <div className="grid grid-cols-5 gap-1.5">
-                {EFFORT_LEVELS.map((e) => (
+              <div className={cn('grid gap-1.5', effortLevels.length === 5 ? 'grid-cols-5' : 'grid-cols-4')}>
+                {effortLevels.map((e) => (
                   <button
                     key={e.value}
                     onClick={() => setEffort(e.value)}

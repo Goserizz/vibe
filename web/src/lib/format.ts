@@ -66,21 +66,20 @@ export const CURSOR_MODELS: ModelOption[] = [
   { value: 'claude-opus-4-8-thinking-high', label: 'Opus 4.8 Thinking' },
 ];
 
-/** Codex has no models subcommand; this static list + custom typing covers it.
- *  `auto` lets Codex pick per its config.toml. */
+/** Fallback Codex models until the live list from `~/.codex/models_cache.json`
+ *  loads (or if the cache is missing). `auto` lets Codex pick per its config.toml. */
 export const CODEX_MODELS: ModelOption[] = [
   { value: 'auto', label: 'Auto' },
+  { value: 'gpt-5.5', label: 'GPT-5.5' },
   { value: 'gpt-5.4', label: 'GPT-5.4' },
-  { value: 'gpt-5.1-codex', label: 'Codex 5.1' },
-  { value: 'gpt-5.3-codex', label: 'Codex 5.3' },
-  { value: 'o3', label: 'o3' },
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4-Mini' },
 ];
 
-/** Model options for an agent. Cursor uses the live CLI list when available;
- *  Codex uses a static list; Claude uses the built-in set. */
-export function modelsForAgent(agent: AgentKind, cursorModels?: ModelOption[]): ModelOption[] {
+/** Model options for an agent. Cursor/Codex use their live CLI lists when
+ *  available (fetched from the server); Claude uses the built-in set. */
+export function modelsForAgent(agent: AgentKind, cursorModels?: ModelOption[], codexModels?: ModelOption[]): ModelOption[] {
   if (agent === 'cursor') return cursorModels && cursorModels.length ? cursorModels : CURSOR_MODELS;
-  if (agent === 'codex') return CODEX_MODELS;
+  if (agent === 'codex') return codexModels && codexModels.length ? codexModels : CODEX_MODELS;
   return MODELS;
 }
 
@@ -121,10 +120,11 @@ export const EFFORT_LEVELS: { value: EffortLevel; label: string; hint: string }[
   { value: 'max', label: 'Max', hint: 'Maximum effort (default)' },
 ];
 
-export function modelLabel(value: string, cursorModels?: ModelOption[]): string {
+export function modelLabel(value: string, cursorModels?: ModelOption[], codexModels?: ModelOption[]): string {
   return (
     MODELS.find((m) => m.value === value)?.label ??
     cursorModels?.find((m) => m.value === value)?.label ??
+    codexModels?.find((m) => m.value === value)?.label ??
     CURSOR_MODELS.find((m) => m.value === value)?.label ??
     CODEX_MODELS.find((m) => m.value === value)?.label ??
     value
@@ -137,4 +137,12 @@ export function permissionModeLabel(value: PermissionMode): string {
 
 export function effortLabel(value: EffortLevel): string {
   return EFFORT_LEVELS.find((e) => e.value === value)?.label ?? value;
+}
+
+/** Effort levels an agent exposes. Codex's `model_reasoning_effort` tops out at
+ *  `xhigh` (no `max`); Cursor has effort baked into its model ids (hidden). */
+export function effortLevelsForAgent(agent: AgentKind): { value: EffortLevel; label: string; hint: string }[] {
+  if (agent === 'cursor') return [];
+  if (agent === 'codex') return EFFORT_LEVELS.filter((e) => e.value !== 'max');
+  return EFFORT_LEVELS;
 }
