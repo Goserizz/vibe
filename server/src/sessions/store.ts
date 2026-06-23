@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { encodeRemoteId } from '../remote/sessionId.js';
-import type { EffortLevel, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
+import type { AgentKind, EffortLevel, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
 
 /** Persisted shape (a superset of SessionMeta minus the live `running` flag). */
 export interface StoredSession {
@@ -14,6 +14,8 @@ export interface StoredSession {
   model: string;
   permissionMode: PermissionMode;
   effort?: EffortLevel;
+  /** CLI engine driving this session; absent on legacy data ⇒ 'claude'. */
+  agent?: AgentKind;
   createdAt: number;
   updatedAt: number;
   messageCount: number;
@@ -78,7 +80,7 @@ class SessionStore {
     return this.sessions.get(id);
   }
 
-  create(input: { cwd: string; model: string; permissionMode: PermissionMode; effort?: EffortLevel; title?: string; host?: string }): StoredSession {
+  create(input: { cwd: string; model: string; permissionMode: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }): StoredSession {
     const now = Date.now();
     const uuid = crypto.randomUUID();
     const session: StoredSession = {
@@ -89,6 +91,7 @@ class SessionStore {
       model: input.model,
       permissionMode: input.permissionMode,
       effort: input.effort,
+      agent: input.agent,
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
@@ -108,6 +111,7 @@ class SessionStore {
     model: string;
     permissionMode: PermissionMode;
     effort?: EffortLevel;
+    agent?: AgentKind;
     createdAt?: number;
     messageCount?: number;
     host?: string;
@@ -123,6 +127,7 @@ class SessionStore {
       model: input.model,
       permissionMode: input.permissionMode,
       effort: input.effort,
+      agent: input.agent,
       createdAt: input.createdAt ?? now,
       updatedAt: now,
       messageCount: input.messageCount ?? 0,
@@ -158,7 +163,7 @@ class SessionStore {
   }
 }
 
-export function toMeta(s: StoredSession, running: boolean, source: 'vibe' | 'claude' = 'vibe'): SessionMeta {
+export function toMeta(s: StoredSession, running: boolean, source: 'vibe' | 'claude' | 'cursor' = 'vibe'): SessionMeta {
   return {
     id: s.id,
     claudeSessionId: s.claudeSessionId,
@@ -167,6 +172,7 @@ export function toMeta(s: StoredSession, running: boolean, source: 'vibe' | 'cla
     model: s.model,
     permissionMode: s.permissionMode,
     effort: s.effort ?? (config.defaultEffort as EffortLevel),
+    agent: s.agent ?? 'claude',
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     messageCount: s.messageCount,

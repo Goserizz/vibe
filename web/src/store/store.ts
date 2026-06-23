@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  AgentKind,
   EffortLevel,
   PermissionDecision,
   PermissionMode,
@@ -39,6 +40,7 @@ interface StoreState {
   status: ConnStatus;
   serverVersion: string;
   defaultModel: string;
+  cursorModels: { value: string; label: string }[];
   theme: Theme;
 
   sessions: SessionMeta[];
@@ -61,10 +63,11 @@ interface StoreState {
   refreshSessions: () => Promise<void>;
   loadProjects: () => Promise<void>;
   loadHosts: () => Promise<void>;
+  loadCursorModels: () => Promise<void>;
   addHost: (host: RemoteHost) => Promise<boolean>;
   removeHost: (name: string) => Promise<void>;
   openSession: (id: string) => Promise<void>;
-  createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; title?: string; host?: string }) => Promise<void>;
+  createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   sendMessage: (text: string) => void;
@@ -194,6 +197,7 @@ export const useStore = create<StoreState>((set, get) => {
     status: 'connecting',
     serverVersion: '',
     defaultModel: 'opus',
+    cursorModels: [],
     theme: initialTheme(),
     sessions: [],
     projects: [],
@@ -224,7 +228,7 @@ export const useStore = create<StoreState>((set, get) => {
       socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus });
       socket.connect(token);
 
-      await Promise.all([get().refreshSessions(), get().loadProjects(), get().loadHosts()]);
+      await Promise.all([get().refreshSessions(), get().loadProjects(), get().loadHosts(), get().loadCursorModels()]);
       set({ phase: 'ready' });
 
       const { sessions, activeId } = get();
@@ -253,6 +257,15 @@ export const useStore = create<StoreState>((set, get) => {
         set({ projects });
       } catch {
         /* ignore */
+      }
+    },
+
+    async loadCursorModels() {
+      try {
+        const cursorModels = await api.listCursorModels();
+        set({ cursorModels });
+      } catch {
+        /* ignore — the picker falls back to a small static list */
       }
     },
 

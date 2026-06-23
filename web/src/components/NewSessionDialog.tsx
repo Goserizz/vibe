@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
 import { X, FolderGit2, Folder, Loader2, Check, AlertCircle } from 'lucide-react';
-import type { EffortLevel, PermissionMode } from '@shared/protocol';
+import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
-import { basename, cn, EFFORT_LEVELS, MODELS, PERMISSION_MODES, shortenPath } from '../lib/format';
+import { basename, cn, AGENTS, EFFORT_LEVELS, MODELS, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
 
 export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const projects = useStore((s) => s.projects);
@@ -11,12 +11,14 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const hosts = useStore((s) => s.hosts);
   const localName = useStore((s) => s.localName);
   const defaultModel = useStore((s) => s.defaultModel);
+  const cursorModels = useStore((s) => s.cursorModels);
   const createSession = useStore((s) => s.createSession);
 
   // '' = local machine; otherwise a remote host name.
   const [host, setHost] = useState('');
   const [cwd, setCwd] = useState('');
   const [title, setTitle] = useState('');
+  const [agent, setAgent] = useState<AgentKind>('claude');
   const [model, setModel] = useState(defaultModel);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('bypassPermissions');
   const [effort, setEffort] = useState<EffortLevel>('max');
@@ -25,6 +27,14 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const [creating, setCreating] = useState(false);
 
   const isRemote = host !== '';
+  const isCursor = agent === 'cursor';
+
+  // Switching engine resets model + permission to that engine's sensible defaults.
+  const onAgent = (a: AgentKind) => {
+    setAgent(a);
+    setModel(a === 'cursor' ? 'auto' : defaultModel);
+    setPermissionMode(a === 'cursor' ? 'default' : 'bypassPermissions');
+  };
 
   // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
   const suggestions = useMemo(() => {
@@ -72,7 +82,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     const dir = cwd.trim() || query.trim();
     if (!dir) return;
     setCreating(true);
-    await createSession({ cwd: dir, model, permissionMode, effort, title: title.trim() || basename(dir), host: host || undefined });
+    await createSession({ cwd: dir, model, permissionMode, effort, agent, title: title.trim() || basename(dir), host: host || undefined });
     setCreating(false);
     onClose();
   };
@@ -91,6 +101,11 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="space-y-4 p-5">
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-slate-400">Agent</label>
+            <Segmented options={AGENTS} value={agent} onChange={(v) => onAgent(v as AgentKind)} />
+          </div>
+
           {hosts.length > 0 && (
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Machine</label>
@@ -152,11 +167,19 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Model</label>
-              <Segmented
-                options={MODELS}
-                value={model}
-                onChange={setModel}
-              />
+              {isCursor ? (
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-[13px] text-slate-200 outline-none transition focus:border-accent/60"
+                >
+                  {modelsForAgent('cursor', cursorModels).map((m) => (
+                    <option key={m.value} value={m.value}>{m.label}</option>
+                  ))}
+                </select>
+              ) : (
+                <Segmented options={MODELS} value={model} onChange={setModel} />
+              )}
             </div>
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Title</label>
@@ -171,8 +194,8 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
 
           <div>
             <label className="mb-1.5 block text-xs font-medium text-slate-400">Permissions</label>
-            <div className="grid grid-cols-4 gap-1.5">
-              {PERMISSION_MODES.map((m) => (
+            <div className={cn('grid gap-1.5', isCursor ? 'grid-cols-2' : 'grid-cols-4')}>
+              {permissionModesForAgent(agent).map((m) => (
                 <button
                   key={m.value}
                   onClick={() => setPermissionMode(m.value)}
@@ -190,26 +213,28 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-400">Reasoning effort</label>
-            <div className="grid grid-cols-5 gap-1.5">
-              {EFFORT_LEVELS.map((e) => (
-                <button
-                  key={e.value}
-                  onClick={() => setEffort(e.value)}
-                  title={e.hint}
-                  className={cn(
-                    'rounded-lg border px-2 py-2 text-[12px] transition',
-                    effort === e.value
-                      ? 'border-accent/50 bg-accent/15 text-accent-soft'
-                      : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
-                  )}
-                >
-                  {e.label}
-                </button>
-              ))}
+          {!isCursor && (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-slate-400">Reasoning effort</label>
+              <div className="grid grid-cols-5 gap-1.5">
+                {EFFORT_LEVELS.map((e) => (
+                  <button
+                    key={e.value}
+                    onClick={() => setEffort(e.value)}
+                    title={e.hint}
+                    className={cn(
+                      'rounded-lg border px-2 py-2 text-[12px] transition',
+                      effort === e.value
+                        ? 'border-accent/50 bg-accent/15 text-accent-soft'
+                        : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
+                    )}
+                  >
+                    {e.label}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         <div className="flex justify-end gap-2 border-t border-white/5 px-5 py-3.5">

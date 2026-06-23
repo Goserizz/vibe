@@ -1,4 +1,5 @@
 import type {
+  AgentKind,
   ChatBlock,
   EffortLevel,
   FileEntry,
@@ -48,6 +49,9 @@ export const api = {
 
   listProjects: () => request<{ projects: ProjectDir[] }>('/projects').then((r) => r.projects),
 
+  listCursorModels: () =>
+    request<{ models: { value: string; label: string }[] }>('/cursor/models').then((r) => r.models),
+
   validateDir: (path: string) =>
     request<{ ok: boolean; path: string; error?: string }>('/projects/validate', {
       method: 'POST',
@@ -56,7 +60,7 @@ export const api = {
 
   listSessions: () => request<{ sessions: SessionMeta[] }>('/sessions').then((r) => r.sessions),
 
-  createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; title?: string; host?: string }) =>
+  createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) =>
     request<{ session: SessionMeta }>('/sessions', {
       method: 'POST',
       body: JSON.stringify(input),

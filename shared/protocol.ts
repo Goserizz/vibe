@@ -22,6 +22,9 @@ export type PermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermiss
 /** Reasoning/thinking effort Claude applies to a turn. */
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+/** Which CLI engine drives a session: Claude Code or the Cursor agent. */
+export type AgentKind = 'claude' | 'cursor';
+
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
@@ -102,19 +105,22 @@ export interface SessionMeta {
   /** Stable app-level id. For sessions discovered from `~/.claude` this is the
    *  Claude session id itself. */
   id: string;
-  /** Claude Code session id used to resume the conversation. */
+  /** Native engine session id used to resume the conversation (Claude session
+   *  id, or Cursor chat id — both are UUIDs). */
   claudeSessionId?: string;
   title: string;
   cwd: string;
   model: string;
   permissionMode: PermissionMode;
   effort: EffortLevel;
+  /** Which CLI engine drives this session (default 'claude'). */
+  agent: AgentKind;
   createdAt: number;
   updatedAt: number;
   messageCount: number;
   running: boolean;
-  /** 'vibe' = created/managed in Vibe; 'claude' = discovered from the CLI. */
-  source: 'vibe' | 'claude';
+  /** 'vibe' = created/managed in Vibe; 'claude'/'cursor' = discovered from that CLI. */
+  source: 'vibe' | 'claude' | 'cursor';
   /** Which machine the project lives on (local machine name, or an SSH host). */
   host: string;
 }

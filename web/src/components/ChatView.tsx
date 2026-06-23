@@ -9,13 +9,14 @@ import { ContextMeter } from './ContextMeter';
 import { Menu } from './Menu';
 import { Logo } from './Logo';
 import {
+  agentLabel,
   cn,
   EFFORT_LEVELS,
   effortLabel,
-  MODELS,
   modelLabel,
-  PERMISSION_MODES,
+  modelsForAgent,
   permissionModeLabel,
+  permissionModesForAgent,
   shortenPath,
 } from '../lib/format';
 
@@ -57,6 +58,14 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
       <div className="min-w-0 flex-1">
         <div className="truncate text-[14px] font-medium text-slate-100">{session.title}</div>
         <div className="flex items-center gap-1.5 truncate text-[11px] text-slate-500">
+          <span
+            className={cn(
+              'shrink-0 rounded px-1 py-px text-[10px] font-medium',
+              session.agent === 'cursor' ? 'bg-accent/15 text-accent-soft' : 'bg-ink-700 text-slate-300',
+            )}
+          >
+            {agentLabel(session.agent)}
+          </span>
           <span className="shrink-0 font-medium text-slate-400">{session.host}</span>
           <span>·</span>
           <FolderGit2 className="h-3 w-3 shrink-0" />
@@ -66,7 +75,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 
       <ContextMeter sessionId={session.id} />
       <ModelControl />
-      <EffortControl />
+      {session.agent !== 'cursor' && <EffortControl />}
       <PermissionControl />
       <button
         onClick={onToggleTerminal}
@@ -100,16 +109,20 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 
 function ModelControl() {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const cursorModels = useStore((s) => s.cursorModels);
+  const isCursor = session.agent === 'cursor';
 
   return (
     <Menu
       align="right"
-      items={MODELS.map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
+      searchable={isCursor}
+      allowCustom={isCursor}
+      items={modelsForAgent(session.agent, cursorModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
       onSelect={(value) => void patchSession(session.id, { model: value })}
       trigger={
         <span className="flex items-center gap-1.5 rounded-lg border border-ink-700 px-2.5 py-1.5 text-[12px] text-slate-300 transition hover:border-ink-600">
           <Cpu className="h-3.5 w-3.5 text-slate-500" />
-          {modelLabel(session.model)}
+          {modelLabel(session.model, cursorModels)}
           <ChevronDown className="h-3 w-3 text-slate-500" />
         </span>
       }
@@ -143,7 +156,7 @@ function PermissionControl() {
   return (
     <Menu
       align="right"
-      items={PERMISSION_MODES.map((m) => ({ value: m.value, label: m.label, hint: m.hint, active: m.value === mode }))}
+      items={permissionModesForAgent(session.agent).map((m) => ({ value: m.value, label: m.label, hint: m.hint, active: m.value === mode }))}
       onSelect={(value) => void patchSession(session.id, { permissionMode: value as PermissionMode })}
       trigger={
         <span

@@ -9,13 +9,15 @@ import { log } from '../log.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import { getRecentProjects, validateDir } from '../projects.js';
 import { getClaudeSessionInfo, listClaudeSessions, type DiscoveredSession } from '../sessions/discovery.js';
+import { listCursorSessions, resolveCursorSessionSync } from '../cursor/discovery.js';
+import { listCursorModels } from '../cursor/models.js';
 import { searchConversations } from '../sessions/search.js';
 import { hostRegistry } from '../remote/hosts.js';
 import { listRemoteSessions, getRemoteSessionInfo } from '../remote/discovery.js';
 import { sshExec, loginShellCommand, shQuote, sshCheck } from '../remote/ssh.js';
 import { encodeRemoteId, parseSessionId } from '../remote/sessionId.js';
 import { hub } from '../ws/hub.js';
-import type { EffortLevel, FileEntry, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
+import type { AgentKind, EffortLevel, FileEntry, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
 
 const permissionModes: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
 const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -24,7 +26,7 @@ const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
  * Present a CLI-discovered session as session metadata. For remote hosts the id
  * is namespaced (`host::sessionId`) and tagged with the host name.
  */
-function discoveredToMeta(d: DiscoveredSession, host: string, remote: boolean): SessionMeta {
+function discoveredToMeta(d: DiscoveredSession, host: string, remote: boolean, agent: AgentKind = 'claude'): SessionMeta {
   return {
     id: remote ? encodeRemoteId(host, d.claudeSessionId) : d.claudeSessionId,
     claudeSessionId: d.claudeSessionId,
@@ -33,11 +35,12 @@ function discoveredToMeta(d: DiscoveredSession, host: string, remote: boolean): 
     model: d.model,
     permissionMode: 'default',
     effort: config.defaultEffort as EffortLevel,
+    agent,
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
     messageCount: d.messageCount,
     running: false,
-    source: 'claude',
+    source: agent === 'cursor' ? 'cursor' : 'claude',
     host,
   };
 }
@@ -59,6 +62,8 @@ const createSchema = z.object({
   model: z.string().min(1).optional(),
   permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']).optional(),
   effort: z.enum(effortLevels).optional(),
+  /** Engine to drive the session; defaults to the server's default agent. */
+  agent: z.enum(['claude', 'cursor']).optional(),
   title: z.string().optional(),
   /** Remote host name to create the session on; omit for local. */
   host: z.string().optional(),
@@ -139,6 +144,12 @@ export function createApiRouter(): Router {
 
   router.get('/projects', (_req, res) => {
     res.json({ projects: getRecentProjects() });
+  });
+
+  // The Cursor CLI enumerates every model variant (effort/thinking/fast); list
+  // them dynamically so the picker always matches the installed CLI.
+  router.get('/cursor/models', async (_req, res) => {
+    res.json({ models: await listCursorModels() });
   });
 
   router.post('/projects/validate', (req, res) => {
@@ -372,7 +383,7 @@ export function createApiRouter(): Router {
 
     const discovered: SessionMeta[] = [];
 
-    // Local CLI sessions.
+    // Local CLI sessions (Claude).
     try {
       for (const d of await listClaudeSessions()) {
         if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
@@ -381,6 +392,17 @@ export function createApiRouter(): Router {
       }
     } catch (err) {
       log.warn('local session discovery failed', err);
+    }
+
+    // Local Cursor CLI sessions (~/.cursor/chats, cwd recovered via md5).
+    try {
+      for (const d of listCursorSessions()) {
+        if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
+          discovered.push(discoveredToMeta(d, config.localName, false, 'cursor'));
+        }
+      }
+    } catch (err) {
+      log.warn('cursor session discovery failed', err);
     }
 
     // Remote hosts (in parallel; a down host just contributes nothing).
@@ -428,11 +450,13 @@ export function createApiRouter(): Router {
       }
       cwd = check.path;
     }
+    const agent: AgentKind = parsed.data.agent ?? config.defaultAgent;
     const session = sessionStore.create({
       cwd,
-      model: parsed.data.model || config.defaultModel,
+      model: parsed.data.model || (agent === 'cursor' ? config.defaultCursorModel : config.defaultModel),
       permissionMode: (parsed.data.permissionMode as PermissionMode) || 'default',
       effort: (parsed.data.effort as EffortLevel) || (config.defaultEffort as EffortLevel),
+      agent,
       title: parsed.data.title,
       host,
     });
@@ -461,9 +485,18 @@ export function createApiRouter(): Router {
     if (!sessionStore.get(id)) {
       const { host, claudeSessionId } = parseSessionId(id);
       const remoteHost = host ? hostRegistry.get(host) : undefined;
-      const info = remoteHost
+      let info: DiscoveredSession | null = remoteHost
         ? await getRemoteSessionInfo(remoteHost, claudeSessionId)
         : await getClaudeSessionInfo(id);
+      let agent: AgentKind = 'claude';
+      // Not a Claude session — maybe a local Cursor chat.
+      if (!info && !host) {
+        const c = resolveCursorSessionSync(id);
+        if (c) {
+          info = c;
+          agent = 'cursor';
+        }
+      }
       if (!info) {
         res.status(404).json({ error: 'not found' });
         return;
@@ -475,6 +508,7 @@ export function createApiRouter(): Router {
         title: info.title,
         model: info.model,
         permissionMode: 'default',
+        agent,
         createdAt: info.createdAt,
         messageCount: info.messageCount,
         host,

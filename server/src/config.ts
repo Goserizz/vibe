@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { resolveClaudeExecutable } from './claude/resolve.js';
+import { resolveCursorExecutable } from './cursor/resolve.js';
 
 function resolveHome(): string {
   const custom = process.env.VIBE_HOME;
@@ -47,12 +48,22 @@ export const config = {
   isProd: process.env.NODE_ENV === 'production',
   /** Path to the Claude project transcripts (~/.claude/projects). */
   claudeProjectsDir: path.join(os.homedir(), '.claude', 'projects'),
+  /** Where Cursor CLI stores per-workspace chats (~/.cursor/chats/<md5(cwd)>/<chatId>). */
+  cursorChatsDir: path.join(os.homedir(), '.cursor', 'chats'),
+  /** Where Vibe persists transcripts for Cursor sessions it drives. */
+  cursorTranscriptsDir: path.join(VIBE_HOME, 'cursor-transcripts'),
   /** Where Vite emits the production bundle. */
   webDist: path.resolve(import.meta.dirname, '../../dist/web'),
   defaultModel: process.env.VIBE_DEFAULT_MODEL || 'opus',
   /** Default reasoning effort for new sessions (low|medium|high|xhigh|max). */
   defaultEffort: process.env.VIBE_DEFAULT_EFFORT || 'max',
+  /** Default model for new Cursor sessions. */
+  defaultCursorModel: process.env.VIBE_DEFAULT_CURSOR_MODEL || 'auto',
+  /** Which engine new sessions use by default ('claude' | 'cursor'). */
+  defaultAgent: process.env.VIBE_DEFAULT_AGENT === 'cursor' ? 'cursor' : 'claude',
   /** Path to the user's real claude binary (preferred over the SDK's bundled one). */
   claudeExecutable: resolveClaudeExecutable(),
+  /** Path to the user's cursor-agent binary (the Cursor CLI). */
+  cursorExecutable: resolveCursorExecutable(),
   serverVersion: '0.1.0',
 } as const;

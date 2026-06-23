@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { config } from '../config.js';
 
 /** Connection options: never block on prompts, fail fast, stay alive.
@@ -19,6 +19,14 @@ function sshBin(): { bin: string; base: string[] } {
   // `sshCommand` is usually just "ssh" but can be overridden (custom options/testing).
   const [bin, ...base] = config.sshCommand.split(/\s+/).filter(Boolean);
   return { bin, base };
+}
+
+/** The ssh binary + connection options derived from `config.sshCommand` + CONNECT_OPTS.
+ *  Used by the Agent-SDK-over-SSH wrapper (claude/claude-ssh-wrap.sh) so remote turns
+ *  dial the host with the same options as the rest of the remote layer. */
+export function sshConnectPrefix(): { bin: string; opts: string[] } {
+  const { bin, base } = sshBin();
+  return { bin, opts: [...base, ...CONNECT_OPTS] };
 }
 
 function sshArgv(target: string, remoteCmd: string): { bin: string; args: string[] } {
@@ -70,12 +78,6 @@ export function sshExec(
     if (opts.input != null) child.stdin.write(opts.input);
     child.stdin.end();
   });
-}
-
-/** Spawn a streaming SSH process (caller manages stdin/stdout/lifecycle). */
-export function sshSpawn(target: string, remoteCmd: string): ChildProcessWithoutNullStreams {
-  const { bin, args } = sshArgv(target, remoteCmd);
-  return spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 /** Quote a string for safe interpolation inside a remote POSIX shell command. */

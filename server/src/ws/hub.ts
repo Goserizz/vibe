@@ -3,7 +3,14 @@ import { WebSocket } from 'ws';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { startRun, type RunHandle } from '../claude/runner.js';
-import { startRemoteRun } from '../remote/runner.js';
+import { startCursorRun } from '../cursor/runner.js';
+import { resolveCursorSessionSync } from '../cursor/discovery.js';
+import {
+  CursorTranscriptBuilder,
+  appendCursorBlocks,
+  readCursorStoreTranscript,
+  readCursorTranscript,
+} from '../cursor/transcript.js';
 import { readTranscriptBlocks } from '../sessions/transcript.js';
 import { resolveClaudeSessionSync } from '../sessions/discovery.js';
 import { readRemoteTranscript } from '../remote/discovery.js';
@@ -11,6 +18,7 @@ import { hostRegistry } from '../remote/hosts.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import type {
+  AgentKind,
   ChatBlock,
   EffortLevel,
   LiveEvent,
@@ -27,6 +35,8 @@ interface RuntimeInit {
   effort: EffortLevel;
   title: string;
   claudeSessionId?: string;
+  /** Which CLI engine drives the session. */
+  agent: AgentKind;
   /** Remote host name (display); undefined for local sessions. */
   host?: string;
   /** SSH target for remote sessions; undefined runs locally via the SDK. */
@@ -40,6 +50,7 @@ interface RemoteSessionInfo {
   cwd: string;
   model: string;
   title: string;
+  agent?: AgentKind;
 }
 
 /** Newer events are kept; older ones are evicted once the log passes this size. */
@@ -84,6 +95,7 @@ class SessionRuntime {
   permissionMode: PermissionMode;
   effort: EffortLevel;
   title: string;
+  readonly agent: AgentKind;
   readonly host?: string;
   readonly sshTarget?: string;
   lastActivity = Date.now();
@@ -95,6 +107,9 @@ class SessionRuntime {
   private runBaseSeq = 0;
   private baselineClaudeSessionId?: string;
   private run?: RunHandle;
+  /** Cursor sessions persist their own transcript; this accumulates the turn. */
+  private transcript?: CursorTranscriptBuilder;
+  private turnStartBlocks = 0;
 
   constructor(
     readonly sessionId: string,
@@ -107,14 +122,18 @@ class SessionRuntime {
     this.effort = init.effort;
     this.title = init.title;
     this.claudeSessionId = init.claudeSessionId;
+    this.agent = init.agent;
     this.host = init.host;
     this.sshTarget = init.sshTarget;
+    if (this.agent === 'cursor') this.transcript = new CursorTranscriptBuilder();
   }
 
   private emit(ev: LiveEvent): void {
     this.seq += 1;
     const entry: LoggedEvent = { seq: this.seq, ev };
     this.logBuf.push(entry);
+    // Mirror events into the Cursor transcript accumulator (before pruning).
+    this.transcript?.apply(ev);
     this.pruneFinalized(ev);
     if (this.logBuf.length > LOG_CAP) this.logBuf.splice(0, this.logBuf.length - LOG_CAP);
     const frame: ServerEvent = { t: 'event', sessionId: this.sessionId, seq: this.seq, ev };
@@ -186,10 +205,11 @@ class SessionRuntime {
     this.running = true;
     this.runBaseSeq = this.seq;
     this.baselineClaudeSessionId = this.claudeSessionId;
+    this.turnStartBlocks = this.transcript?.blocks.length ?? 0;
     this.lastActivity = Date.now();
 
     const where = this.sshTarget ? `host=${this.host}` : 'local';
-    log.debug(`turn start session=${this.sessionId} ${where} resume=${this.claudeSessionId ?? 'new'} model=${model} cwd=${cwd}`);
+    log.debug(`turn start session=${this.sessionId} agent=${this.agent} ${where} resume=${this.claudeSessionId ?? 'new'} model=${model} cwd=${cwd}`);
     this.emit({ k: 'run_state', running: true });
     this.emit({ k: 'block', block: { id: clientMsgId, kind: 'user', text, ts: Date.now() } });
 
@@ -210,9 +230,23 @@ class SessionRuntime {
       requestPermission: (request: PermissionRequest) => this.requestPermission(request),
     };
 
-    this.run = this.sshTarget
-      ? startRemoteRun({ ...runOpts, sshTarget: this.sshTarget }, cb)
-      : startRun(runOpts, cb);
+    if (this.agent === 'cursor') {
+      this.run = startCursorRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          resume: this.claudeSessionId,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd } : undefined,
+        },
+        cb,
+      );
+    } else {
+      this.run = this.sshTarget
+        ? startRun({ ...runOpts, remote: { sshTarget: this.sshTarget, cwd } }, cb)
+        : startRun(runOpts, cb);
+    }
 
     void this.run.done.then(() => this.finishTurn());
     return true;
@@ -226,6 +260,11 @@ class SessionRuntime {
     for (const [, p] of this.pending) p.resolve({ allow: false });
     this.pending.clear();
     this.emit({ k: 'run_state', running: false });
+
+    // Cursor sessions self-persist: append this turn's blocks to the Vibe JSONL.
+    if (this.transcript) {
+      appendCursorBlocks(this.sessionId, this.transcript.blocks.slice(this.turnStartBlocks));
+    }
 
     const stored = sessionStore.get(this.sessionId);
     if (stored) {
@@ -243,6 +282,7 @@ class SessionRuntime {
         model: this.model,
         permissionMode: this.permissionMode,
         effort: this.effort,
+        agent: this.agent,
         messageCount: 1,
         host: this.host,
       });
@@ -319,14 +359,14 @@ export class Hub {
         return {
           cwd: stored.cwd, model: stored.model, permissionMode: stored.permissionMode,
           effort: stored.effort ?? defaultEffort, title: stored.title, claudeSessionId: stored.claudeSessionId,
-          host, sshTarget: remoteHost.ssh,
+          agent: stored.agent ?? 'claude', host, sshTarget: remoteHost.ssh,
         };
       }
       const cached = this.remoteCache.get(sessionId);
       if (!cached) return undefined;
       return {
         cwd: cached.cwd, model: cached.model, permissionMode: 'default', effort: defaultEffort,
-        title: cached.title, claudeSessionId, host, sshTarget: cached.sshTarget,
+        title: cached.title, claudeSessionId, agent: cached.agent ?? 'claude', host, sshTarget: cached.sshTarget,
       };
     }
 
@@ -335,12 +375,18 @@ export class Hub {
       return {
         cwd: stored.cwd, model: stored.model, permissionMode: stored.permissionMode,
         effort: stored.effort ?? defaultEffort, title: stored.title, claudeSessionId: stored.claudeSessionId,
+        agent: stored.agent ?? 'claude',
       };
     }
-    // Maybe a CLI session on this machine — resolve it from ~/.claude.
+    // Maybe a CLI session on this machine — resolve it from ~/.claude (Claude)…
     const info = resolveClaudeSessionSync(sessionId);
     if (info) {
-      return { cwd: info.cwd, model: info.model, permissionMode: 'default', effort: defaultEffort, title: info.title, claudeSessionId: sessionId };
+      return { cwd: info.cwd, model: info.model, permissionMode: 'default', effort: defaultEffort, title: info.title, claudeSessionId: sessionId, agent: 'claude' };
+    }
+    // …or from ~/.cursor/chats (Cursor).
+    const cursorInfo = resolveCursorSessionSync(sessionId);
+    if (cursorInfo) {
+      return { cwd: cursorInfo.cwd, model: cursorInfo.model, permissionMode: 'default', effort: defaultEffort, title: cursorInfo.title, claudeSessionId: sessionId, agent: 'cursor' };
     }
     return undefined;
   }
@@ -406,6 +452,7 @@ export class Hub {
         model: rt.model,
         permissionMode: rt.permissionMode,
         effort: rt.effort,
+        agent: rt.agent,
         host: rt.host,
       });
     }
@@ -438,6 +485,21 @@ export class Hub {
       ? rt.snapshotPlan(stored?.claudeSessionId)
       : { claudeSessionId: stored?.claudeSessionId ?? rawId, seq: 0 };
     const sid = plan.claudeSessionId ?? rawId;
+    const agent: AgentKind = rt?.agent ?? stored?.agent ?? 'claude';
+
+    if (agent === 'cursor') {
+      // Vibe-persisted transcript is authoritative for sessions we drove.
+      const own = readCursorTranscript(sessionId);
+      if (own.length) return { blocks: own, seq: plan.seq };
+      // No Vibe transcript yet: for an idle local session that was created
+      // outside Vibe, best-effort parse its on-disk store; while running we
+      // rely on the live stream (avoids duplicating in-flight blocks).
+      if (!host && !rt?.running) {
+        const cwd = stored?.cwd ?? rt?.cwd;
+        if (cwd && sid) return { blocks: readCursorStoreTranscript(cwd, sid), seq: plan.seq };
+      }
+      return { blocks: [], seq: plan.seq };
+    }
 
     if (host) {
       const remoteHost = hostRegistry.get(host);

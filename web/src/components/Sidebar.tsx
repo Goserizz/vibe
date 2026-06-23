@@ -289,6 +289,11 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
               <span className={cn('truncate text-[13px]', active ? 'text-slate-100' : 'text-slate-300')}>
                 {session.title}
               </span>
+              {session.agent === 'cursor' && (
+                <span className="shrink-0 rounded bg-accent/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-accent-soft">
+                  Cursor
+                </span>
+              )}
             </div>
           )}
           <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-600">
