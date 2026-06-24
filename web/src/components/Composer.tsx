@@ -39,7 +39,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   };
 
   return (
-    <div className="px-4 pb-4 pt-1 md:px-6">
+    <div className="px-4 pb-0 pt-1 md:px-6 md:pb-4">
       <div className="mx-auto max-w-3xl">
         <div
           className={cn(

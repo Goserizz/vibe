@@ -96,10 +96,11 @@ export const CURSOR_PERMISSION_MODES: { value: PermissionMode; label: string; hi
   { value: 'plan', label: 'Plan', hint: 'Read-only planning mode' },
 ];
 
-/** Codex headless mode is sandbox-level only: full-auto (workspace-write) vs read-only. */
+/** Codex headless mode is sandbox-level only: full-auto, read-only, or bypass. */
 export const CODEX_PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
   { value: 'default', label: 'Auto', hint: 'Sandboxed, auto-run (workspace-write)' },
   { value: 'plan', label: 'Plan', hint: 'Read-only planning mode' },
+  { value: 'bypassPermissions', label: 'Bypass', hint: 'YOLO mode, no sandbox (careful)' },
 ];
 
 export function permissionModesForAgent(agent: AgentKind): { value: PermissionMode; label: string; hint: string }[] {

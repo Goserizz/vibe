@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
-import { X, FolderGit2, Folder, Loader2, Check, AlertCircle } from 'lucide-react';
+import { X, FolderGit2, Folder, Loader2, Check, AlertCircle, ChevronDown } from 'lucide-react';
 import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
-import { basename, cn, AGENTS, MODELS, effortLevelsForAgent, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
+import { basename, cn, AGENTS, effortLevelsForAgent, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
 
 export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const projects = useStore((s) => s.projects);
@@ -28,10 +28,16 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const [creating, setCreating] = useState(false);
 
   const isRemote = host !== '';
-  // Cursor and Codex use a model dropdown + 2 permission modes and have no
-  // effort control; only Claude uses the segmented model/perms + effort gauge.
-  const isClaude = agent === 'claude';
   const effortLevels = effortLevelsForAgent(agent);
+  const machineOptions = useMemo(
+    () => [
+      { value: '', label: localName, hint: 'Local machine' },
+      ...hosts.map((h) => ({ value: h.name, label: h.name, hint: h.ssh })),
+    ],
+    [hosts, localName],
+  );
+  const modelOptions = useMemo(() => modelsForAgent(agent, cursorModels, codexModels), [agent, cursorModels, codexModels]);
+  const permissionOptions = useMemo(() => permissionModesForAgent(agent), [agent]);
 
   // Switching engine resets model + permission to that engine's sensible defaults.
   const onAgent = (a: AgentKind) => {
@@ -41,6 +47,14 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     setPermissionMode(custom ? 'default' : 'bypassPermissions');
     // Codex's model_reasoning_effort tops out at xhigh (its max); claude defaults to max.
     setEffort(a === 'codex' ? 'xhigh' : 'max');
+  };
+
+  const onHost = (next: string) => {
+    if (next === host) return;
+    setHost(next);
+    setCwd('');
+    setQuery('');
+    setPathState('idle');
   };
 
   // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
@@ -97,33 +111,21 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="glass w-full max-w-lg overflow-hidden rounded-2xl shadow-2xl animate-fade-in"
+        className="glass flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl shadow-2xl animate-fade-in"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-white/5 px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between border-b border-white/5 px-5 py-3.5">
           <h2 className="text-sm font-semibold text-slate-100">New session</h2>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="space-y-4 p-5">
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-400">Agent</label>
-            <Segmented options={AGENTS} value={agent} onChange={(v) => onAgent(v as AgentKind)} />
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+          <div className="grid grid-cols-2 gap-3">
+            <DropdownField label="Agent" value={agent} options={AGENTS} onChange={onAgent} />
+            <DropdownField label="Machine" value={host} options={machineOptions} onChange={onHost} />
           </div>
-
-          {hosts.length > 0 && (
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-slate-400">Machine</label>
-              <div className="flex flex-wrap gap-1.5">
-                <HostOption label={localName} active={host === ''} onClick={() => { setHost(''); setPathState('idle'); }} />
-                {hosts.map((h) => (
-                  <HostOption key={h.name} label={h.name} remote active={host === h.name} onClick={() => { setHost(h.name); setCwd(''); setQuery(''); setPathState('idle'); }} />
-                ))}
-              </div>
-            </div>
-          )}
 
           <div>
             <label className="mb-1.5 block text-xs font-medium text-slate-400">
@@ -172,22 +174,12 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           )}
 
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-slate-400">Model</label>
-              {isClaude ? (
-                <Segmented options={MODELS} value={model} onChange={setModel} />
-              ) : (
-                <select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-[13px] text-slate-200 outline-none transition focus:border-accent/60"
-                >
-                  {modelsForAgent(agent, cursorModels, codexModels).map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              )}
-            </div>
+            <DropdownField
+              label="Model"
+              value={model}
+              options={modelOptions}
+              onChange={setModel}
+            />
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Title</label>
               <input
@@ -199,52 +191,25 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-400">Permissions</label>
-            <div className={cn('grid gap-1.5', isClaude ? 'grid-cols-4' : 'grid-cols-2')}>
-              {permissionModesForAgent(agent).map((m) => (
-                <button
-                  key={m.value}
-                  onClick={() => setPermissionMode(m.value)}
-                  title={m.hint}
-                  className={cn(
-                    'rounded-lg border px-2 py-2 text-[12px] transition',
-                    permissionMode === m.value
-                      ? 'border-accent/50 bg-accent/15 text-accent-soft'
-                      : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
-                  )}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
+          <div className="grid grid-cols-2 gap-3">
+            <DropdownField
+              label="Permissions"
+              value={permissionMode}
+              options={permissionOptions}
+              onChange={(v) => setPermissionMode(v)}
+            />
+            {effortLevels.length > 0 && (
+              <DropdownField
+                label="Reasoning effort"
+                value={effort}
+                options={effortLevels}
+                onChange={(v) => setEffort(v)}
+              />
+            )}
           </div>
-
-          {effortLevels.length > 0 && (
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-slate-400">Reasoning effort</label>
-              <div className={cn('grid gap-1.5', effortLevels.length === 5 ? 'grid-cols-5' : 'grid-cols-4')}>
-                {effortLevels.map((e) => (
-                  <button
-                    key={e.value}
-                    onClick={() => setEffort(e.value)}
-                    title={e.hint}
-                    className={cn(
-                      'rounded-lg border px-2 py-2 text-[12px] transition',
-                      effort === e.value
-                        ? 'border-accent/50 bg-accent/15 text-accent-soft'
-                        : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
-                    )}
-                  >
-                    {e.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
-        <div className="flex justify-end gap-2 border-t border-white/5 px-5 py-3.5">
+        <div className="flex shrink-0 justify-end gap-2 border-t border-white/5 px-5 py-3.5">
           <button onClick={onClose} className="rounded-lg px-3.5 py-2 text-sm text-slate-400 transition hover:text-slate-200">
             Cancel
           </button>
@@ -262,36 +227,37 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function HostOption({ label, active, remote, onClick }: { label: string; active: boolean; remote?: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] transition',
-        active ? 'border-accent/50 bg-accent/15 text-accent-soft' : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
-      )}
-    >
-      <span className={cn('h-1.5 w-1.5 rounded-full', remote ? 'bg-accent/80' : 'bg-slate-500')} />
-      {label}
-    </button>
-  );
-}
+function DropdownField<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; label: string; hint?: string }[];
+  onChange: (value: T) => void;
+}) {
+  const selected = options.find((o) => o.value === value);
 
-function Segmented({ options, value, onChange }: { options: { value: string; label: string }[]; value: string; onChange: (v: string) => void }) {
   return (
-    <div className="flex gap-1 rounded-lg border border-ink-700 bg-ink-900 p-1">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          onClick={() => onChange(o.value)}
-          className={cn(
-            'flex-1 rounded-md py-1.5 text-[12px] transition',
-            value === o.value ? 'bg-ink-700 text-slate-100' : 'text-slate-500 hover:text-slate-300',
-          )}
+    <div className="min-w-0">
+      <label className="mb-1.5 block truncate text-xs font-medium text-slate-400">{label}</label>
+      <div className="relative">
+        <select
+          value={value}
+          title={selected?.hint}
+          onChange={(e) => onChange(e.target.value as T)}
+          className="h-9 w-full appearance-none truncate rounded-lg border border-ink-700 bg-ink-900 px-3 pr-8 text-[13px] text-slate-200 outline-none transition hover:border-ink-600 focus:border-accent/60"
         >
-          {o.label}
-        </button>
-      ))}
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+      </div>
     </div>
   );
 }
