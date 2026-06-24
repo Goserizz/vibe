@@ -20,9 +20,9 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   const Icon = meta.icon;
 
   return (
-    <div className="px-4 pb-2 md:px-6">
+    <div className="shrink-0 px-4 pb-2 md:px-6">
       <div className="mx-auto max-w-3xl">
-        <div className="glass overflow-hidden rounded-2xl border-amber-400/20 animate-fade-in">
+        <div className="glass grid max-h-[min(70dvh,calc(100dvh-11rem))] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-2xl border-amber-400/20 animate-fade-in">
           <div className="flex items-center gap-2.5 border-b border-white/5 bg-amber-400/5 px-4 py-2.5">
             <ShieldQuestion className="h-4 w-4 text-amber-400" />
             <span className="text-[13px] font-medium text-slate-200">Permission required</span>
@@ -30,17 +30,18 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
               <span className="ml-auto text-[11px] text-slate-500">+{pending.length - 1} more</span>
             )}
           </div>
-          <div className="px-4 py-3">
+          <div className="overflow-y-auto overscroll-contain px-4 py-3">
             <div className="flex items-center gap-2 text-[13px]">
               <Icon className="h-4 w-4 shrink-0 text-slate-400" />
               <span className="font-medium text-slate-200">{meta.label}</span>
             </div>
             {meta.detail && (
-              <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] text-slate-400">
+              <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] text-slate-400">
                 {meta.detail}
               </pre>
             )}
-            <div className="mt-3 flex flex-wrap gap-2">
+          </div>
+          <div className="flex flex-wrap gap-2 border-t border-white/5 px-4 py-3">
               <button
                 onClick={() => respond(req.requestId, { allow: true })}
                 className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft"
@@ -62,7 +63,6 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
                 <Ban className="h-3.5 w-3.5" />
                 Deny
               </button>
-            </div>
           </div>
         </div>
       </div>
@@ -138,15 +138,21 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
   };
 
   return (
-    <div className="px-4 pb-2 md:px-6">
-      <div className="mx-auto max-w-3xl">
-        <div className="glass overflow-hidden rounded-2xl border-accent/20 animate-fade-in">
-          <div className="flex items-center gap-2.5 border-b border-white/5 bg-accent/5 px-4 py-2.5">
-            <HelpCircle className="h-4 w-4 text-accent" />
-            <span className="text-[13px] font-medium text-slate-200">Claude has a question</span>
-          </div>
-          <div className="space-y-4 px-4 py-3.5">
-            {questions.map((q, i) => {
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="question-prompt-title"
+    >
+      <div className="glass grid max-h-[calc(100dvh-2rem)] w-full max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-2xl border border-accent/20 shadow-2xl animate-fade-in">
+        <div className="flex items-center gap-2.5 border-b border-white/5 bg-accent/5 px-4 py-2.5">
+          <HelpCircle className="h-4 w-4 text-accent" />
+          <span id="question-prompt-title" className="text-[13px] font-medium text-slate-200">
+            Claude has a question
+          </span>
+        </div>
+        <div className="space-y-4 overflow-y-auto overscroll-contain px-4 py-3.5">
+          {questions.map((q, i) => {
               const multi = !!q.multiSelect;
               return (
                 <div key={i}>
@@ -215,24 +221,23 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
                 </div>
               );
             })}
-          </div>
-          <div className="flex flex-wrap gap-2 border-t border-white/5 px-4 py-3">
-            <button
-              onClick={submit}
-              disabled={!canSubmit}
-              className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Check className="h-3.5 w-3.5" />
-              Submit
-            </button>
-            <button
-              onClick={() => respond(req.requestId, { allow: false })}
-              className="ml-auto flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] text-slate-400 transition hover:text-rose-400"
-            >
-              <Ban className="h-3.5 w-3.5" />
-              Cancel
-            </button>
-          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 border-t border-white/5 px-4 py-3">
+          <button
+            onClick={submit}
+            disabled={!canSubmit}
+            className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Check className="h-3.5 w-3.5" />
+            Submit
+          </button>
+          <button
+            onClick={() => respond(req.requestId, { allow: false })}
+            className="ml-auto flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] text-slate-400 transition hover:text-rose-400"
+          >
+            <Ban className="h-3.5 w-3.5" />
+            Cancel
+          </button>
         </div>
       </div>
     </div>

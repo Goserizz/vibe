@@ -37,7 +37,7 @@ export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTermin
   }
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-ink-950">
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-950">
       <Header onOpenSidebar={onOpenSidebar} rightTab={rightTab} onToggleTerminal={onToggleTerminal} onToggleFiles={onToggleFiles} />
       <MessageList sessionId={activeId} />
       <PermissionPrompt sessionId={activeId} />
