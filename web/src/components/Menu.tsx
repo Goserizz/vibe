@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, Search } from 'lucide-react';
 import { cn } from '../lib/format';
+import { Glass } from './LiquidGlass';
 
 export interface MenuItem {
   value: string;
@@ -73,12 +74,15 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
         {trigger}
       </button>
       {open && (
-        <div
+        <Glass
           className={cn(
-            'glass absolute z-50 mt-1.5 min-w-[200px] overflow-hidden rounded-xl p-1 shadow-2xl animate-fade-in',
+            'absolute z-50 mt-1.5 min-w-[200px] overflow-hidden rounded-xl shadow-2xl',
             align === 'right' ? 'right-0' : 'left-0',
           )}
+          cornerRadius={12}
+          thin
         >
+          <div className="overflow-hidden p-1">
           {searchable && (
             <div className="flex items-center gap-2 border-b border-white/5 px-2.5 py-1.5">
               <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
@@ -99,7 +103,7 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
                   onSelect(item.value);
                   close();
                 }}
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-ink-700"
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-ink-700/45"
               >
                 <span className="flex-1">
                   <span className="block text-[13px] text-slate-200">{item.label}</span>
@@ -114,7 +118,7 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
                   onSelect(trimmed);
                   close();
                 }}
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-ink-700"
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-ink-700/45"
               >
                 <span className="block flex-1 text-[13px] text-slate-200">
                   {customLabel ?? 'Use'} <span className="font-mono text-accent-soft">{trimmed}</span>
@@ -126,6 +130,7 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
             )}
           </div>
         </div>
+        </Glass>
       )}
     </div>
   );

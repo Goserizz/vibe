@@ -94,6 +94,19 @@
   input {
     @apply bg-transparent;
   }
+
+  /* Subtle, static "aurora" so the glass surfaces have contrast to refract.
+     Built from the theme's accent tokens, so it flips with dark/light. Static
+     (no animation) on purpose: a moving backdrop would re-sample every glass
+     panel's backdrop-filter every frame and fight the low-latency streamer. */
+  .app-bg {
+    background-color: rgb(var(--ink-950));
+    background-image:
+      radial-gradient(65% 55% at 8% -5%, rgb(var(--accent) / 0.1), transparent 60%),
+      radial-gradient(50% 45% at 96% 8%, rgb(var(--accent-soft) / 0.07), transparent 60%),
+      radial-gradient(75% 65% at 88% 105%, rgb(var(--accent-muted) / 0.09), transparent 65%);
+    background-attachment: fixed;
+  }
 }
 
 @layer components {
@@ -105,6 +118,144 @@
      for a crisp, bright panel. */
   .light .glass {
     @apply border-ink-700 bg-ink-850;
+  }
+
+  .new-session-panel {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgb(255 255 255 / 0.12);
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.025) 44%, rgb(255 255 255 / 0.055)),
+      rgb(var(--ink-850) / 0.24);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.28),
+      inset 0 0 0 1px rgb(255 255 255 / 0.06);
+    backdrop-filter: blur(16px) saturate(125%);
+    -webkit-backdrop-filter: blur(16px) saturate(125%);
+  }
+  .new-session-panel::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: linear-gradient(135deg, rgb(255 255 255 / 0.14), transparent 42%, rgb(255 255 255 / 0.06));
+  }
+  .new-session-panel > * {
+    position: relative;
+    z-index: 1;
+  }
+  .light .new-session-panel {
+    border-color: rgb(15 23 42 / 0.1);
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.52), rgb(255 255 255 / 0.2) 44%, rgb(255 255 255 / 0.34)),
+      rgb(var(--ink-850) / 0.42);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.72),
+      inset 0 0 0 1px rgb(15 23 42 / 0.06);
+  }
+  .dialog-titlebar {
+    position: relative;
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.015) 42%, rgb(255 255 255 / 0.045)),
+      rgb(var(--ink-900) / 0.06);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.26),
+      inset 0 -1px 0 rgb(255 255 255 / 0.08);
+    backdrop-filter: blur(16px) saturate(125%);
+    -webkit-backdrop-filter: blur(16px) saturate(125%);
+  }
+  .dialog-titlebar::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.1), transparent 65%);
+  }
+  .dialog-titlebar > * {
+    position: relative;
+    z-index: 1;
+  }
+  .light .dialog-titlebar {
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.36), rgb(255 255 255 / 0.08) 42%, rgb(255 255 255 / 0.2)),
+      rgb(var(--ink-900) / 0.12);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.62),
+      inset 0 -1px 0 rgb(15 23 42 / 0.05);
+  }
+
+  /* <Glass> — Vibe's frosted-glass surface. A plain-CSS backdrop-filter panel
+     (blur + saturate over a translucent fill with a top sheen) so it renders
+     IDENTICALLY in Chrome, Safari and Firefox — mirroring the dialog panels
+     (.new-session-panel) that already match across browsers.
+
+     It used to wrap rdev/liquid-glass-react, whose "liquid" refraction is a
+     `backdrop-filter: url(#svg)` displacement. That samples a real backdrop only
+     for viewport-`fixed` elements (the library's demo); for Vibe's in-flow
+     header/composer/menus Chrome sampled an empty backdrop and painted the
+     displacement map as a flat GREY blob, while Safari ignored the displacement
+     and showed plain blur — so the two browsers never matched. This plain blur
+     is exactly the look Safari already rendered, now consistent everywhere. */
+  .vglass {
+    position: relative;
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.02) 46%, rgb(255 255 255 / 0.05)),
+      rgb(var(--ink-850) / 0.55);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.16),
+      inset 0 0 0 1px rgb(255 255 255 / 0.05);
+    backdrop-filter: blur(18px) saturate(135%);
+    -webkit-backdrop-filter: blur(18px) saturate(135%);
+  }
+  /* thin: a lighter frost so the scrolling conversation reads through (header,
+     composer, menus). */
+  .vglass.vglass--thin {
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.05), rgb(255 255 255 / 0.014) 46%, rgb(255 255 255 / 0.035)),
+      rgb(var(--ink-850) / 0.3);
+    backdrop-filter: blur(7px) saturate(120%);
+    -webkit-backdrop-filter: blur(7px) saturate(120%);
+  }
+  /* strong: denser fill, deeper blur and a drop shadow for free-floating
+     dialogs/popovers over the low-contrast workspace. */
+  .vglass.vglass--strong {
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.12), rgb(255 255 255 / 0.03) 44%, rgb(255 255 255 / 0.07)),
+      rgb(var(--ink-850) / 0.62);
+    box-shadow:
+      0 24px 70px rgb(0 0 0 / 0.34),
+      inset 0 1px 0 rgb(255 255 255 / 0.3),
+      inset 0 0 0 1px rgb(255 255 255 / 0.12);
+    backdrop-filter: blur(22px) saturate(140%);
+    -webkit-backdrop-filter: blur(22px) saturate(140%);
+  }
+
+  /* Light theme: brighten the fill and flip hairlines to a subtle dark so panels
+     read as crisp, bright glass (no muddy grey or yellow cast). */
+  .light .vglass {
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.18) 46%, rgb(255 255 255 / 0.32)),
+      rgb(var(--ink-850) / 0.6);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.7),
+      inset 0 0 0 1px rgb(15 23 42 / 0.05);
+  }
+  .light .vglass.vglass--thin {
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.32), rgb(255 255 255 / 0.09) 46%, rgb(255 255 255 / 0.18)),
+      rgb(var(--ink-900) / 0.42);
+  }
+  .light .vglass.vglass--strong {
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.6), rgb(255 255 255 / 0.24) 44%, rgb(255 255 255 / 0.4)),
+      rgb(var(--ink-850) / 0.7);
+    box-shadow:
+      0 24px 70px rgb(15 23 42 / 0.18),
+      inset 0 1px 0 rgb(255 255 255 / 0.85),
+      inset 0 0 0 1px rgb(15 23 42 / 0.08);
   }
 
   /* Markdown prose used in assistant/user messages. */

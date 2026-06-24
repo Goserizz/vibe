@@ -3,6 +3,7 @@ import { X, SquareTerminal, FolderOpen, Loader2 } from 'lucide-react';
 import { useStore } from '../store/store';
 import { cn } from '../lib/format';
 import { TerminalPane } from './TerminalPane';
+import { Glass } from './LiquidGlass';
 
 // CodeMirror is heavy — only load it when the Files tab is first opened.
 const FilesPane = lazy(() => import('./FilesPane').then((m) => ({ default: m.FilesPane })));
@@ -62,15 +63,18 @@ export function RightPanel({
   return (
     <aside
       style={{ ['--panel-w' as string]: `${width}px` } as React.CSSProperties}
-      className="relative z-40 flex h-full w-full shrink-0 flex-col border-l border-white/5 bg-ink-950 max-md:fixed max-md:inset-0 md:w-[var(--panel-w)]"
+      className="relative z-40 h-full w-full shrink-0 max-md:fixed max-md:inset-0 md:w-[var(--panel-w)]"
     >
-      {/* Drag handle to resize the panel (desktop only). */}
+      {/* Drag handle to resize the panel (desktop only). Sits OUTSIDE <Glass>
+          (relative to the <aside>) so it keeps its absolute placement — the
+          glass content-lift forces direct children to position:relative. */}
       <div
         onMouseDown={startDrag}
         title="Drag to resize"
         className="absolute inset-y-0 -left-1 z-20 hidden w-2 cursor-col-resize transition-colors hover:bg-accent/30 md:block"
       />
 
+      <Glass className="flex h-full w-full flex-col border-l border-white/5" cornerRadius={0}>
       <div className="flex shrink-0 items-center gap-1 border-b border-white/5 px-2 py-2">
         <TabButton active={tab === 'terminal'} onClick={() => onTab('terminal')} icon={<SquareTerminal className="h-3.5 w-3.5" />} label="Terminal" />
         <TabButton active={tab === 'files'} onClick={() => onTab('files')} icon={<FolderOpen className="h-3.5 w-3.5" />} label="Files" />
@@ -103,6 +107,7 @@ export function RightPanel({
           </Suspense>
         )}
       </div>
+      </Glass>
     </aside>
   );
 }

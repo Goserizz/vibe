@@ -19,6 +19,7 @@ import {
   permissionModesForAgent,
   shortenPath,
 } from '../lib/format';
+import { Glass } from './LiquidGlass';
 
 interface ChatViewProps {
   onOpenSidebar: () => void;
@@ -37,11 +38,17 @@ export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTermin
   }
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-950">
+    <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-950">
       <Header onOpenSidebar={onOpenSidebar} rightTab={rightTab} onToggleTerminal={onToggleTerminal} onToggleFiles={onToggleFiles} />
       <MessageList sessionId={activeId} />
-      <PermissionPrompt sessionId={activeId} />
-      <Composer sessionId={activeId} />
+      {/* Composer (+ permission prompts) float over the message list so the
+          frosted glass shows the scrolling conversation bleeding through. */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+        <div className="pointer-events-auto">
+          <PermissionPrompt sessionId={activeId} />
+          <Composer sessionId={activeId} />
+        </div>
+      </div>
     </main>
   );
 }
@@ -50,7 +57,8 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
 
   return (
-    <header className="flex shrink-0 items-center gap-3 border-b border-white/5 bg-ink-900/40 px-3 py-2.5 backdrop-blur-md md:px-5">
+    <header className="absolute inset-x-0 top-0 z-30">
+      <Glass className="flex items-center gap-3 border-b border-white/5 px-3 py-2.5 md:px-5" cornerRadius={0} thin>
       <button onClick={onOpenSidebar} className="rounded-lg p-1.5 text-slate-400 hover:bg-ink-800 md:hidden">
         <MenuIcon className="h-5 w-5" />
       </button>
@@ -109,6 +117,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
       >
         <FolderOpen className="h-4 w-4" />
       </button>
+      </Glass>
     </header>
   );
 }

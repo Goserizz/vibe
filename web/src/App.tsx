@@ -7,6 +7,7 @@ import { NewSessionDialog } from './components/NewSessionDialog';
 import { RightPanel } from './components/RightPanel';
 import { Toast } from './components/Toast';
 import { Logo } from './components/Logo';
+import { Glass } from './components/LiquidGlass';
 
 export default function App() {
   const phase = useStore((s) => s.phase);
@@ -25,7 +26,7 @@ export default function App() {
   if (phase === 'unauthorized') return <TokenGate />;
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-ink-950">
+    <div className="app-bg flex h-full w-full overflow-hidden">
       <Sidebar
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -47,7 +48,7 @@ export default function App() {
 
 function SplashScreen() {
   return (
-    <div className="flex h-full w-full items-center justify-center bg-ink-950">
+    <div className="app-bg flex h-full w-full items-center justify-center">
       <div className="flex flex-col items-center gap-4">
         <Logo className="h-10 w-10 animate-pulse-dot text-accent" />
         <div className="text-sm text-slate-500">Connecting…</div>
@@ -72,8 +73,10 @@ function TokenGate() {
   };
 
   return (
-    <div className="flex h-full w-full items-center justify-center bg-ink-950 px-6">
-      <form onSubmit={submit} className="glass w-full max-w-sm rounded-2xl p-7 shadow-2xl animate-fade-in">
+    <div className="app-bg flex h-full w-full items-center justify-center px-6">
+      <form onSubmit={submit} className="w-full max-w-sm">
+        <Glass className="rounded-2xl" cornerRadius={16}>
+        <div className="p-7">
         <div className="mb-5 flex items-center gap-3">
           <Logo className="h-8 w-8 text-accent" />
           <div>
@@ -99,6 +102,8 @@ function TokenGate() {
         <p className="mt-4 text-center text-[11px] leading-relaxed text-slate-600">
           The server prints a ready-to-use link with the token on startup.
         </p>
+        </div>
+        </Glass>
       </form>
     </div>
   );

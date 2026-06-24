@@ -4,6 +4,7 @@ import type { PermissionDecision, PermissionRequest } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { toolMeta } from './blocks';
 import { cn } from '../lib/format';
+import { Glass } from './LiquidGlass';
 
 export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   const pending = useStore((s) => s.pending[sessionId]);
@@ -22,7 +23,8 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   return (
     <div className="shrink-0 px-4 pb-2 md:px-6">
       <div className="mx-auto max-w-3xl">
-        <div className="glass grid max-h-[min(70dvh,calc(100dvh-11rem))] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-2xl border-amber-400/20 animate-fade-in">
+        <Glass className="rounded-2xl border border-amber-400/20" cornerRadius={16}>
+          <div className="grid max-h-[min(70dvh,calc(100dvh-11rem))] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
           <div className="flex items-center gap-2.5 border-b border-white/5 bg-amber-400/5 px-4 py-2.5">
             <ShieldQuestion className="h-4 w-4 text-amber-400" />
             <span className="text-[13px] font-medium text-slate-200">Permission required</span>
@@ -65,6 +67,7 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
               </button>
           </div>
         </div>
+        </Glass>
       </div>
     </div>
   );
@@ -144,7 +147,8 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
       aria-modal="true"
       aria-labelledby="question-prompt-title"
     >
-      <div className="glass grid max-h-[calc(100dvh-2rem)] w-full max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-2xl border border-accent/20 shadow-2xl animate-fade-in">
+      <Glass className="w-full max-w-3xl rounded-2xl border border-accent/20" cornerRadius={16}>
+        <div className="grid max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <div className="flex items-center gap-2.5 border-b border-white/5 bg-accent/5 px-4 py-2.5">
           <HelpCircle className="h-4 w-4 text-accent" />
           <span id="question-prompt-title" className="text-[13px] font-medium text-slate-200">
@@ -240,6 +244,7 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
           </button>
         </div>
       </div>
+      </Glass>
     </div>
   );
 }

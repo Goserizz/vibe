@@ -109,12 +109,14 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div
-        className="glass flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl shadow-2xl animate-fade-in"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex shrink-0 items-center justify-between border-b border-white/5 px-5 py-3.5">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent p-4"
+      style={{ background: 'transparent', backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
+      onClick={onClose}
+    >
+      <div className="new-session-panel w-full max-w-lg rounded-2xl">
+        <div className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-titlebar flex shrink-0 items-center justify-between border-b border-white/5 px-5 py-3.5">
           <h2 className="text-sm font-semibold text-slate-100">New session</h2>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
             <X className="h-4 w-4" />
@@ -141,7 +143,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                 }}
                 onBlur={(e) => void checkPath(e.target.value)}
                 placeholder={isRemote ? '/remote/path/to/project' : '/path/to/project or ~/code/app'}
-                className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2.5 pr-9 font-mono text-[13px] text-slate-200 outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+                className="w-full rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2.5 pr-9 font-mono text-[13px] text-slate-200 outline-none backdrop-blur-md transition focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
               />
               <span className="absolute right-3 top-1/2 -translate-y-1/2">
                 {pathState === 'checking' && <Loader2 className="h-4 w-4 animate-spin text-slate-500" />}
@@ -153,13 +155,13 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           </div>
 
           {filtered.length > 0 && (
-            <div className="max-h-44 overflow-y-auto rounded-lg border border-white/5 bg-ink-900/50">
+            <div className="max-h-44 overflow-y-auto rounded-lg border border-white/5 bg-ink-900/20 backdrop-blur-md">
               {filtered.map((p) => (
                 <button
                   key={p.path}
                   onClick={() => pickProject(p.path)}
                   className={cn(
-                    'flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-ink-800',
+                    'flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-ink-800/45',
                     cwd === p.path && 'bg-accent/10',
                   )}
                 >
@@ -186,7 +188,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Optional"
-                className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-[13px] text-slate-200 outline-none transition focus:border-accent/60"
+                className="w-full rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 text-[13px] text-slate-200 outline-none backdrop-blur-md transition focus:border-accent/60"
               />
             </div>
           </div>
@@ -223,6 +225,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+      </div>
     </div>
   );
 }
@@ -248,7 +251,7 @@ function DropdownField<T extends string>({
           value={value}
           title={selected?.hint}
           onChange={(e) => onChange(e.target.value as T)}
-          className="h-9 w-full appearance-none truncate rounded-lg border border-ink-700 bg-ink-900 px-3 pr-8 text-[13px] text-slate-200 outline-none transition hover:border-ink-600 focus:border-accent/60"
+          className="h-9 w-full appearance-none truncate rounded-lg border border-ink-700 bg-ink-900/35 px-3 pr-8 text-[13px] text-slate-200 outline-none backdrop-blur-md transition hover:border-ink-600 focus:border-accent/60"
         >
           {options.map((option) => (
             <option key={option.value} value={option.value}>

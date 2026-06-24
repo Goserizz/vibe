@@ -6,6 +6,7 @@ import { Logo } from './Logo';
 import { ConnectionBadge } from './ConnectionBadge';
 import { HostsDialog } from './HostsDialog';
 import { basename, cn, relativeTime } from '../lib/format';
+import { Glass } from './LiquidGlass';
 
 interface SidebarProps {
   open: boolean;
@@ -31,11 +32,11 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
       {open && <div className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm md:hidden" onClick={onClose} />}
       <aside
         className={cn(
-          'z-40 flex h-full w-72 shrink-0 flex-col border-r border-white/5 bg-ink-900',
-          'max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:transition-transform',
+          'z-40 h-full w-72 shrink-0 max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:transition-transform',
           !open && 'max-md:-translate-x-full',
         )}
       >
+        <Glass className="flex h-full w-full flex-col border-r border-white/5" cornerRadius={0}>
         <div className="flex items-center justify-between px-4 pb-3 pt-4">
           <div className="flex items-center gap-2.5">
             <Logo className="h-6 w-6 text-accent" />
@@ -115,6 +116,7 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
             <LogOut className="h-3.5 w-3.5" />
           </button>
         </div>
+        </Glass>
       </aside>
       {hostsOpen && <HostsDialog onClose={() => setHostsOpen(false)} />}
     </>

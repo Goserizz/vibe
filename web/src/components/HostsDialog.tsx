@@ -43,9 +43,14 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className="glass w-full max-w-lg overflow-hidden rounded-2xl shadow-2xl animate-fade-in" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-white/5 px-5 py-3.5">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent p-4"
+      style={{ background: 'transparent', backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
+      onClick={onClose}
+    >
+      <div className="new-session-panel w-full max-w-lg rounded-2xl">
+        <div className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-titlebar flex shrink-0 items-center justify-between border-b border-white/5 px-5 py-3.5">
           <div className="flex items-center gap-2">
             <Server className="h-4 w-4 text-accent" />
             <h2 className="text-sm font-semibold text-slate-100">SSH hosts</h2>
@@ -55,7 +60,7 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <div className="space-y-4 p-5">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
           <p className="text-xs leading-relaxed text-slate-500">
             Add machines you reach over SSH (an <code className="text-slate-400">~/.ssh/config</code> alias or{' '}
             <code className="text-slate-400">user@host</code>). Their Claude Code sessions show up in the sidebar
@@ -67,7 +72,7 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
             {hosts.map((h) => {
               const st = status[h.name];
               return (
-                <div key={h.name} className="flex items-center gap-2.5 rounded-lg border border-white/5 bg-ink-900/50 px-3 py-2">
+                <div key={h.name} className="flex items-center gap-2.5 rounded-lg border border-white/5 bg-ink-900/20 px-3 py-2 backdrop-blur-md">
                   <StatusDot status={st} />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] text-slate-200">{h.name}</div>
@@ -88,30 +93,31 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
             })}
           </div>
 
-          <div className="grid grid-cols-[1fr_1.4fr_auto] gap-2 border-t border-white/5 pt-4">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-2 border-t border-white/5 pt-4">
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Name"
-              className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-accent/60"
+              className="h-10 min-w-0 rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 text-[13px] text-slate-200 outline-none backdrop-blur-md focus:border-accent/60"
             />
             <input
               value={ssh}
               onChange={(e) => setSsh(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && void submit()}
               placeholder="user@host or ssh alias"
-              className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 font-mono text-[13px] text-slate-200 outline-none focus:border-accent/60"
+              className="h-10 min-w-0 rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 font-mono text-[13px] text-slate-200 outline-none backdrop-blur-md focus:border-accent/60"
             />
             <button
               onClick={() => void submit()}
               disabled={adding || !name.trim() || !ssh.trim()}
-              className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 text-sm font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
+              className="flex h-10 min-w-[84px] items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-accent px-3.5 text-sm font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
             >
               {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
               Add
             </button>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
