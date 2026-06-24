@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import { useStore } from '../store/store';
-import { cn } from '../lib/format';
+import { agentLabel, cn } from '../lib/format';
 
 export function Composer({ sessionId }: { sessionId: string }) {
   const running = useStore((s) => s.views[sessionId]?.running ?? false);
+  const agentName = useStore((s) => agentLabel(s.sessions.find((session) => session.id === sessionId)?.agent ?? 'claude'));
   const sendMessage = useStore((s) => s.sendMessage);
   const abort = useStore((s) => s.abort);
   const [text, setText] = useState('');
@@ -53,7 +54,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder={running ? 'Claude is working…' : 'Message Claude — Enter to send, Shift+Enter for newline'}
+            placeholder={running ? `${agentName} is working…` : `Message ${agentName} — Enter to send, Shift+Enter for newline`}
             className="max-h-[220px] flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none"
           />
           {running ? (
