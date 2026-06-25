@@ -52,6 +52,10 @@ interface StoreState {
   views: Record<string, SessionView>;
   usage: Record<string, TokenUsage | undefined>;
   pending: Record<string, PermissionRequest[]>;
+  // Per-session right-panel state: which tab (if any) each session has open.
+  // Keyed by sessionId so opening/closing the Terminal or Files panel in one
+  // session never affects another.
+  rightTabs: Record<string, 'terminal' | 'files' | null>;
   toast: string | null;
 
   searchQuery: string;
@@ -76,6 +80,7 @@ interface StoreState {
   abort: () => void;
   respondPermission: (requestId: string, decision: PermissionDecision) => void;
   setToast: (msg: string | null) => void;
+  setRightTab: (id: string, tab: 'terminal' | 'files' | null) => void;
 }
 
 export const useStore = create<StoreState>((set, get) => {
@@ -210,6 +215,7 @@ export const useStore = create<StoreState>((set, get) => {
     views: {},
     usage: {},
     pending: {},
+    rightTabs: {},
     toast: null,
     searchQuery: '',
     searchResults: [],
@@ -242,7 +248,7 @@ export const useStore = create<StoreState>((set, get) => {
       socket?.close();
       socket = null;
       clearToken();
-      set({ phase: 'unauthorized', sessions: [], views: {}, activeId: null, searchQuery: '', searchResults: [], searchLoading: false });
+      set({ phase: 'unauthorized', sessions: [], views: {}, rightTabs: {}, activeId: null, searchQuery: '', searchResults: [], searchLoading: false });
     },
 
     async refreshSessions() {
@@ -363,8 +369,10 @@ export const useStore = create<StoreState>((set, get) => {
         const sessions = s.sessions.filter((x) => x.id !== id);
         const views = { ...s.views };
         delete views[id];
+        const rightTabs = { ...s.rightTabs };
+        delete rightTabs[id];
         const activeId = s.activeId === id ? (sessions[0]?.id ?? null) : s.activeId;
-        return { sessions, views, activeId };
+        return { sessions, views, rightTabs, activeId };
       });
       const next = get().activeId;
       if (next) void get().openSession(next);
@@ -404,6 +412,10 @@ export const useStore = create<StoreState>((set, get) => {
 
     setToast(msg) {
       set({ toast: msg });
+    },
+
+    setRightTab(id, tab) {
+      set((s) => ({ rightTabs: { ...s.rightTabs, [id]: tab } }));
     },
 
     setSearchQuery(q) {

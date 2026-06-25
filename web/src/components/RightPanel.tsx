@@ -14,10 +14,12 @@ const maxWidth = () => Math.max(MIN_WIDTH, Math.min(960, window.innerWidth - 360
 
 export function RightPanel({
   tab,
+  shown,
   onTab,
   onClose,
 }: {
   tab: 'terminal' | 'files';
+  shown: boolean;
   onTab: (t: 'terminal' | 'files') => void;
   onClose: () => void;
 }) {
@@ -25,10 +27,10 @@ export function RightPanel({
 
   // Load the Files pane (and its CodeMirror chunk) on first visit, then keep it
   // mounted so editor state survives tab switches.
-  const [filesEverOpened, setFilesEverOpened] = useState(tab === 'files');
+  const [filesEverOpened, setFilesEverOpened] = useState(shown && tab === 'files');
   useEffect(() => {
-    if (tab === 'files') setFilesEverOpened(true);
-  }, [tab]);
+    if (shown && tab === 'files') setFilesEverOpened(true);
+  }, [shown, tab]);
 
   const [width, setWidth] = useState(() => {
     const saved = Number(localStorage.getItem('vibe.termWidth'));
@@ -63,7 +65,10 @@ export function RightPanel({
   return (
     <aside
       style={{ ['--panel-w' as string]: `${width}px` } as React.CSSProperties}
-      className="relative z-40 h-full w-full shrink-0 max-md:fixed max-md:inset-0 md:w-[var(--panel-w)]"
+      className={cn(
+        'relative z-40 h-full w-full shrink-0 max-md:fixed max-md:inset-0 md:w-[var(--panel-w)]',
+        shown ? '' : 'hidden',
+      )}
     >
       {/* Drag handle to resize the panel (desktop only). Sits OUTSIDE <Glass>
           (relative to the <aside>) so it keeps its absolute placement — the
@@ -92,7 +97,7 @@ export function RightPanel({
           toggles, so a live terminal and any in-progress edits survive tab
           switches. */}
       <div className={cn('min-h-0 flex-1 flex-col', tab === 'terminal' ? 'flex' : 'hidden')}>
-        <TerminalPane active={tab === 'terminal'} />
+        <TerminalPane active={shown && tab === 'terminal'} />
       </div>
       <div className={cn('min-h-0 flex-1 flex-col', tab === 'files' ? 'flex' : 'hidden')}>
         {filesEverOpened && (

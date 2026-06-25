@@ -14,7 +14,12 @@ export default function App() {
   const init = useStore((s) => s.init);
   const [newOpen, setNewOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [rightTab, setRightTab] = useState<'terminal' | 'files' | null>(null);
+  const activeId = useStore((s) => s.activeId);
+  const activeTab = useStore((s) => (s.activeId ? s.rightTabs[s.activeId] ?? null : null));
+  // The panel stays mounted while ANY session has it open (so a live terminal
+  // in another session survives a switch); it's shown only for the active one.
+  const anyOpen = useStore((s) => Object.values(s.rightTabs).some((t) => t === 'terminal' || t === 'files'));
+  const setRightTab = useStore((s) => s.setRightTab);
 
   useEffect(() => {
     const token = resolveToken();
@@ -63,11 +68,18 @@ export default function App() {
       <ChatView
         onOpenSidebar={() => setSidebarOpen(true)}
         onNewSession={() => setNewOpen(true)}
-        rightTab={rightTab}
-        onToggleTerminal={() => setRightTab((v) => (v === 'terminal' ? null : 'terminal'))}
-        onToggleFiles={() => setRightTab((v) => (v === 'files' ? null : 'files'))}
+        rightTab={activeTab}
+        onToggleTerminal={() => activeId && setRightTab(activeId, activeTab === 'terminal' ? null : 'terminal')}
+        onToggleFiles={() => activeId && setRightTab(activeId, activeTab === 'files' ? null : 'files')}
       />
-      {rightTab && <RightPanel tab={rightTab} onTab={(t) => setRightTab(t)} onClose={() => setRightTab(null)} />}
+      {anyOpen && (
+        <RightPanel
+          tab={activeTab ?? 'terminal'}
+          shown={!!activeTab}
+          onTab={(t) => activeId && setRightTab(activeId, t)}
+          onClose={() => activeId && setRightTab(activeId, null)}
+        />
+      )}
       {newOpen && <NewSessionDialog onClose={() => setNewOpen(false)} />}
       <Toast />
     </div>
