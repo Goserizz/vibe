@@ -12,6 +12,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const [text, setText] = useState('');
   const [isDesktop, setIsDesktop] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
+  // CJK IME (e.g. pinyin) handling. KeyboardEvent.isComposing is unreliable on
+  // macOS: the Enter that confirms a candidate fires *after* compositionend with
+  // isComposing === false (by then our composing flag is already clear too), so
+  // that Enter would wrongly send. We record when a composition ended and also
+  // ignore Enter for a short window after — that rogue Enter always lands within
+  // milliseconds of compositionend, whereas a real send comes much later.
+  const composingRef = useRef(false);
+  const endedAtRef = useRef(0);
 
   // Auto-grow up to a sensible cap.
   useEffect(() => {
@@ -44,10 +52,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      submit();
-    }
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    // Ignore the Enter that confirms an IME candidate (see composingRef comment).
+    const justEnded = endedAtRef.current > 0 && Date.now() - endedAtRef.current < 100;
+    if (composingRef.current || e.nativeEvent.isComposing || e.keyCode === 229 || justEnded) return;
+    e.preventDefault();
+    submit();
   };
 
   return (
@@ -60,6 +70,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={onKeyDown}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+                endedAtRef.current = Date.now();
+              }}
               rows={1}
               placeholder={running ? `${agentName} is working…` : isDesktop ? `Message ${agentName} — Enter to send, Shift+Enter for newline` : `Message ${agentName}`}
               className="max-h-[220px] flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none"
