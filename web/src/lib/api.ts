@@ -61,6 +61,12 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
+  completeDir: ({ path, host }: { path: string; host?: string }) =>
+    request<{ path: string; entries: { name: string; full: string; dir: boolean }[] }>('/projects/complete', {
+      method: 'POST',
+      body: JSON.stringify({ path, host }),
+    }),
+
   listSessions: () => request<{ sessions: SessionMeta[] }>('/sessions').then((r) => r.sessions),
 
   createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) =>

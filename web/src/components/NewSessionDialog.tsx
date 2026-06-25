@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { X, FolderGit2, Folder, Loader2, Check, AlertCircle, ChevronDown } from 'lucide-react';
 import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { useStore } from '../store/store';
@@ -26,6 +26,11 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState('');
   const [pathState, setPathState] = useState<'idle' | 'checking' | 'ok' | 'bad'>('idle');
   const [creating, setCreating] = useState(false);
+  const [completions, setCompletions] = useState<{ name: string; full: string; dir: boolean }[]>([]);
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const reqIdRef = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const isRemote = host !== '';
   const effortLevels = effortLevelsForAgent(agent);
@@ -99,6 +104,69 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const pickCompletion = (full: string) => {
+    // Append a trailing slash so the user can keep drilling; the effect below
+    // lists the chosen directory's children next.
+    setQuery(full.endsWith('/') ? full : `${full}/`);
+    setCwd(full);
+    setPathState('ok');
+    setCompletions([]);
+    setOpen(false);
+    setActiveIdx(-1);
+  };
+
+  const onInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.nativeEvent.isComposing || !open || completions.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveIdx((i) => (i + 1) % completions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIdx((i) => (i - 1 + completions.length) % completions.length);
+    } else if (e.key === 'Enter') {
+      const sel = completions[activeIdx];
+      if (sel) {
+        e.preventDefault();
+        pickCompletion(sel.full);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setOpen(false);
+    }
+  };
+
+  // Live filesystem completion: when the input looks like a path, list matching
+  // sub-directories. Debounced + stale-response guarded so fast typing stays snappy.
+  useEffect(() => {
+    const looksPath = query.includes('/') || query.startsWith('~');
+    if (!looksPath) {
+      setCompletions([]);
+      setOpen(false);
+      return;
+    }
+    const id = ++reqIdRef.current;
+    const handle = setTimeout(async () => {
+      try {
+        const r = await api.completeDir({ path: query, host: host || undefined });
+        if (id !== reqIdRef.current) return;
+        setCompletions(r.entries);
+        setActiveIdx(r.entries.length ? 0 : -1);
+        setOpen(r.entries.length > 0);
+      } catch {
+        if (id !== reqIdRef.current) return;
+        setCompletions([]);
+        setOpen(false);
+      }
+    }, 130);
+    return () => clearTimeout(handle);
+  }, [query, host]);
+
+  // Keep the keyboard-highlighted item scrolled into view.
+  useEffect(() => {
+    if (!open || activeIdx < 0) return;
+    listRef.current?.querySelector(`[data-idx="${activeIdx}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [activeIdx, open]);
+
   const submit = async () => {
     const dir = cwd.trim() || query.trim();
     if (!dir) return;
@@ -141,7 +209,14 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                   setCwd('');
                   setPathState('idle');
                 }}
-                onBlur={(e) => void checkPath(e.target.value)}
+                onKeyDown={onInputKeyDown}
+                onFocus={() => {
+                  if (completions.length) setOpen(true);
+                }}
+                onBlur={(e) => {
+                  setOpen(false);
+                  void checkPath(e.target.value);
+                }}
                 placeholder={isRemote ? '/remote/path/to/project' : '/path/to/project or ~/code/app'}
                 className="w-full rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2.5 pr-9 font-mono text-[13px] text-slate-200 outline-none backdrop-blur-md transition focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
               />
@@ -150,11 +225,36 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                 {pathState === 'ok' && <Check className="h-4 w-4 text-emerald-400" />}
                 {pathState === 'bad' && <AlertCircle className="h-4 w-4 text-rose-400" />}
               </span>
+              {open && completions.length > 0 && (
+                <div
+                  ref={listRef}
+                  onMouseDown={(e) => e.preventDefault()}
+                  className="absolute left-0 right-0 top-full z-20 mt-1 max-h-52 overflow-y-auto rounded-lg border border-white/10 bg-ink-900/95 py-1 shadow-2xl backdrop-blur-md"
+                >
+                  {completions.map((c, i) => (
+                    <button
+                      key={c.full}
+                      type="button"
+                      data-idx={i}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onMouseEnter={() => setActiveIdx(i)}
+                      onClick={() => pickCompletion(c.full)}
+                      className={cn(
+                        'flex w-full items-center gap-2 px-3 py-1.5 text-left transition',
+                        i === activeIdx ? 'bg-accent/15 text-slate-100' : 'text-slate-300 hover:bg-ink-800/50',
+                      )}
+                    >
+                      <Folder className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                      <span className="truncate font-mono text-[12.5px]">{c.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             {pathState === 'bad' && <p className="mt-1 text-[11px] text-rose-400">Directory not found on the server.</p>}
           </div>
 
-          {filtered.length > 0 && (
+          {!open && filtered.length > 0 && (
             <div className="max-h-44 overflow-y-auto rounded-lg border border-white/5 bg-ink-900/20 backdrop-blur-md">
               {filtered.map((p) => (
                 <button

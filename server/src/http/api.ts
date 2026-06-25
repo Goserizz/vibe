@@ -125,6 +125,20 @@ function resolveFileTarget(host?: string): { remote: boolean; target: string } {
   return { remote: true, target: h?.ssh ?? host };
 }
 
+/**
+ * Split a path being typed in the "Working directory" field into the directory
+ * to list (`stem`) and the prefix to match (`prefix`). `stem` keeps its literal
+ * form (including a leading `~`) so the chosen entry can be filled back verbatim
+ * — important for remote hosts, where the server can't resolve `~` to an
+ * absolute path. Examples: `/root/vi`→(`/root`,`vi`), `/root/`→(`/root`,``),
+ * `/`→(`/`,``), `~/co`→(`~`,`co`).
+ */
+function splitCompletionInput(input: string): { stem: string; prefix: string } {
+  const lastSlash = input.lastIndexOf('/');
+  if (lastSlash < 0) return { stem: '~', prefix: input };
+  return { stem: input.slice(0, lastSlash) || '/', prefix: input.slice(lastSlash + 1) };
+}
+
 const filesQuerySchema = z.object({
   host: z.string().optional(),
   path: z.string().min(1),
@@ -134,6 +148,11 @@ const fileWriteSchema = z.object({
   host: z.string().optional(),
   path: z.string().min(1),
   content: z.string(),
+});
+
+const completeSchema = z.object({
+  path: z.string(),
+  host: z.string().optional(),
 });
 
 export function createApiRouter(): Router {
@@ -163,6 +182,63 @@ export function createApiRouter(): Router {
   router.post('/projects/validate', (req, res) => {
     const path = typeof req.body?.path === 'string' ? req.body.path : '';
     res.json(validateDir(path));
+  });
+
+  // Live directory completion for the "Working directory" field. Lists the
+  // directory named by the input's stem and returns sub-directories whose name
+  // starts with the trailing prefix. Local uses readdir; remote shells out over
+  // SSH (same `ls -1Ap` as /files). Unreadable/missing dirs ⇒ empty entries.
+  router.post('/projects/complete', async (req, res) => {
+    const parsed = completeSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid body' });
+      return;
+    }
+    const { remote, target } = resolveFileTarget(parsed.data.host);
+    const { stem, prefix } = splitCompletionInput(parsed.data.path);
+    const pfx = prefix.toLowerCase();
+    const keep = (name: string, dir: boolean) => dir && (!pfx || name.toLowerCase().startsWith(pfx));
+    const matches: { name: string; full: string; dir: boolean }[] = [];
+    try {
+      if (remote) {
+        const r = await sshExec(target, loginShellCommand(`ls -1Ap ${shQuote(stem)}`), { timeoutMs: 8_000 });
+        if (r.timedOut) {
+          res.status(504).json({ error: 'list timed out' });
+          return;
+        }
+        if (r.code === 0) {
+          const stemNorm = stem === '/' ? '/' : stem.replace(/\/+$/, '');
+          for (const line of r.stdout.split('\n')) {
+            const t = line.trim();
+            if (!t) continue;
+            const dir = t.endsWith('/'); // `-p` appends `/` only to directories
+            const name = dir ? t.slice(0, -1) : t;
+            if (!keep(name, dir)) continue;
+            const full = stemNorm.endsWith('/') ? `${stemNorm}${name}` : `${stemNorm}/${name}`;
+            matches.push({ name, full, dir });
+          }
+        }
+      } else {
+        const resolved = resolveLocalPath(stem);
+        let stat: fs.Stats | undefined;
+        try {
+          stat = fs.statSync(resolved);
+        } catch {
+          /* not found — no suggestions */
+        }
+        if (stat?.isDirectory()) {
+          for (const e of fs.readdirSync(resolved, { withFileTypes: true })) {
+            const dir = e.isDirectory();
+            if (!keep(e.name, dir)) continue;
+            matches.push({ name: e.name, full: path.join(resolved, e.name), dir });
+          }
+        }
+      }
+      matches.sort((a, b) => a.name.localeCompare(b.name));
+      res.json({ path: stem, entries: matches.slice(0, 50) });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'complete failed' });
+    }
   });
 
   // -- Files: list / read / write (local + remote over SSH) ------------------
