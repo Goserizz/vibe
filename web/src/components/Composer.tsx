@@ -10,6 +10,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const sendMessage = useStore((s) => s.sendMessage);
   const abort = useStore((s) => s.abort);
   const [text, setText] = useState('');
+  const [isDesktop, setIsDesktop] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   // Auto-grow up to a sensible cap.
@@ -24,6 +25,15 @@ export function Composer({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     ref.current?.focus();
   }, [sessionId]);
+
+  // Desktop keeps the keyboard-shortcut hint in the placeholder; mobile is short.
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)');
+    const update = () => setIsDesktop(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
 
   const submit = () => {
     if (running) return;
@@ -41,17 +51,17 @@ export function Composer({ sessionId }: { sessionId: string }) {
   };
 
   return (
-    <div className="shrink-0 px-4 pb-0 pt-1 md:px-6 md:pb-4">
+    <div className="shrink-0 px-4 pb-6 pt-1 md:px-6">
       <div className="mx-auto max-w-3xl">
         <Glass className="rounded-2xl focus-within:ring-2 focus-within:ring-accent/15" cornerRadius={16} thin>
-          <div className="flex items-end gap-2 px-3 py-2.5">
+          <div className="flex items-center gap-2 px-3 py-2.5">
             <textarea
               ref={ref}
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={onKeyDown}
               rows={1}
-              placeholder={running ? `${agentName} is working…` : `Message ${agentName} — Enter to send, Shift+Enter for newline`}
+              placeholder={running ? `${agentName} is working…` : isDesktop ? `Message ${agentName} — Enter to send, Shift+Enter for newline` : `Message ${agentName}`}
               className="max-h-[220px] flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none"
             />
             {running ? (

@@ -22,11 +22,39 @@ export default function App() {
     else useStore.setState({ phase: 'unauthorized' });
   }, [init]);
 
+  // App shell follows the VisualViewport: keyboard open → shell shrinks to the
+  // viewport (composer rises above the keyboard, page never scrolls); keyboard
+  // closed → shell is 100vh (full screen). Fixed, so the document itself never
+  // scrolls. The body's `app-bg` (attachment: scroll) paints the full screen
+  // including the tab bar area, so the Liquid Glass bar shows the app through.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const root = document.documentElement;
+    const update = () => {
+      const keyboard = Math.max(0, window.innerHeight - vv.offsetTop - vv.height);
+      if (keyboard > 8) {
+        root.style.setProperty('--shell-top', `${vv.offsetTop}px`);
+        root.style.setProperty('--shell-height', `${vv.height}px`);
+      } else {
+        root.style.setProperty('--shell-top', '0px');
+        root.style.setProperty('--shell-height', '100svh');
+      }
+    };
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    update();
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
+  }, []);
+
   if (phase === 'loading') return <SplashScreen />;
   if (phase === 'unauthorized') return <TokenGate />;
 
   return (
-    <div className="app-bg flex h-full w-full overflow-hidden">
+    <div className="app-shell flex w-full overflow-hidden">
       <Sidebar
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -48,7 +76,7 @@ export default function App() {
 
 function SplashScreen() {
   return (
-    <div className="app-bg flex h-full w-full items-center justify-center">
+    <div className="app-shell flex w-full items-center justify-center">
       <div className="flex flex-col items-center gap-4">
         <Logo className="h-10 w-10 animate-pulse-dot text-accent" />
         <div className="text-sm text-slate-500">Connecting…</div>
@@ -73,7 +101,7 @@ function TokenGate() {
   };
 
   return (
-    <div className="app-bg flex h-full w-full items-center justify-center px-6">
+    <div className="app-shell flex w-full items-center justify-center px-6">
       <form onSubmit={submit} className="w-full max-w-sm">
         <Glass className="rounded-2xl" cornerRadius={16}>
         <div className="p-7">

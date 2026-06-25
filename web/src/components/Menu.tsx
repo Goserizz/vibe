@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, Search } from 'lucide-react';
 import { cn } from '../lib/format';
 import { Glass } from './LiquidGlass';
@@ -26,17 +27,35 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const rootRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<CSSProperties>({});
 
   const close = useCallback(() => {
     setOpen(false);
     setQuery('');
   }, []);
 
+  // Position the popover relative to the trigger (it's portaled to <body> so it
+  // escapes the Header's backdrop-filter context, which is what lets its own
+  // backdrop blur work).
+  const openMenu = useCallback(() => {
+    const r = rootRef.current?.getBoundingClientRect();
+    if (r) {
+      setPos(
+        align === 'right'
+          ? { top: r.bottom + 6, right: window.innerWidth - r.right }
+          : { top: r.bottom + 6, left: r.left },
+      );
+    }
+    setOpen(true);
+  }, [align]);
+
   useEffect(() => {
     if (!open) return;
 
     const onPointerDown = (event: PointerEvent) => {
       if (rootRef.current?.contains(event.target as Node)) return;
+      if (popRef.current?.contains(event.target as Node)) return;
       close();
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -69,20 +88,15 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
         aria-expanded={open}
         title={triggerLabel}
         className="block"
-        onClick={() => (open ? close() : setOpen(true))}
+        onClick={() => (open ? close() : openMenu())}
       >
         {trigger}
       </button>
-      {open && (
-        <Glass
-          className={cn(
-            'absolute z-50 mt-1.5 min-w-[200px] overflow-hidden rounded-xl shadow-2xl',
-            align === 'right' ? 'right-0' : 'left-0',
-          )}
-          cornerRadius={12}
-          thin
-        >
-          <div className="overflow-hidden p-1">
+      {open &&
+        createPortal(
+          <div ref={popRef} style={{ position: 'fixed', zIndex: 50, ...pos }}>
+            <Glass className="min-w-[200px] overflow-hidden rounded-xl shadow-2xl" cornerRadius={12} thin>
+              <div className="overflow-hidden p-1">
           {searchable && (
             <div className="flex items-center gap-2 border-b border-white/5 px-2.5 py-1.5">
               <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
@@ -131,6 +145,8 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
           </div>
         </div>
         </Glass>
+        </div>,
+        document.body,
       )}
     </div>
   );
