@@ -21,6 +21,19 @@ Run it on the machine where your code lives, open the printed link from any brow
 </tr>
 </table>
 
+<br/>
+
+<table>
+<tr>
+<td align="center" width="50%"><img src="docs/screenshots/mobile-chat.png" alt="Vibe on mobile — streaming chat" height="460" /></td>
+<td align="center" width="50%"><img src="docs/screenshots/mobile-sessions.png" alt="Vibe on mobile — session drawer" height="460" /></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Streaming chat on mobile</b></sub></td>
+<td align="center"><sub><b>Sessions &amp; navigation</b></sub></td>
+</tr>
+</table>
+
 </div>
 
 ---

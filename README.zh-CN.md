@@ -21,6 +21,19 @@
 </tr>
 </table>
 
+<br/>
+
+<table>
+<tr>
+<td align="center" width="50%"><img src="docs/screenshots/mobile-chat.png" alt="Vibe 移动端 —— 流式聊天" height="460" /></td>
+<td align="center" width="50%"><img src="docs/screenshots/mobile-sessions.png" alt="Vibe 移动端 —— 会话抽屉" height="460" /></td>
+</tr>
+<tr>
+<td align="center"><sub><b>移动端流式聊天</b></sub></td>
+<td align="center"><sub><b>会话与导航</b></sub></td>
+</tr>
+</table>
+
 </div>
 
 ---
