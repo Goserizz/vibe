@@ -394,3 +394,14 @@
     box-shadow: none !important;
   }
 }
+
+/* Mobile (<768px): drop the aurora so the body is flat white up top. The
+   liquid-glass status bar samples the content behind it, and the aurora's
+   blue tint there was the gray line between it and the solid-white title
+   bar. With a flat white body, the status bar and title bar are the same
+   color and read as one surface. Desktop keeps the aurora. */
+@media (max-width: 767px) {
+  .app-bg {
+    background-image: none;
+  }
+}
