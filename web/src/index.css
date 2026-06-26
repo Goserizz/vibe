@@ -381,14 +381,15 @@
   animation: pulse-dot 1.1s ease-in-out infinite;
 }
 
-/* Mobile (<768px) title bar: a crisp solid white, no glass. The low-contrast
-   glass sheen/blur reads as dither noise on a small light surface, and a flat
-   white bar blends cleanly with the OS chrome. `!important` is required: the
-   production build strips `@layer`, so this must out-spec the shared
-   `.vglass--thin` / `.light .vglass--thin` rules the title bar reuses. */
+/* Mobile (<768px) title bar: a crisp solid fill (no glass), themed via
+   ink-950 so it matches the OS status bar in both modes — white in light,
+   near-black in dark (identical to the theme-color the status bar paints
+   from). The glass sheen/blur reads as dither noise on a small surface.
+   `!important` is required: the production build strips `@layer`, so this
+   must out-spec the shared `.vglass--thin` / `.light .vglass--thin` rules. */
 @media (max-width: 767px) {
   .app-titlebar {
-    background: #fff !important;
+    background: rgb(var(--ink-950)) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
     box-shadow: none !important;
