@@ -58,7 +58,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 
   return (
     <header className="absolute inset-x-0 top-0 z-30">
-      <Glass className="flex items-center gap-3 border-b border-white/5 px-3 py-2.5 md:px-5" cornerRadius={0} thin>
+      <Glass className="app-titlebar flex items-center gap-3 border-b border-white/5 px-3 py-2.5 md:px-5" cornerRadius={0} thin>
       <button onClick={onOpenSidebar} className="rounded-lg p-1.5 text-slate-400 hover:bg-ink-800 md:hidden">
         <MenuIcon className="h-5 w-5" />
       </button>
