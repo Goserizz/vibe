@@ -28,6 +28,18 @@
     --accent-soft: 157 180 255;
     --accent-muted: 91 111 158;
     --accent-glow: rgba(124, 156, 255, 0.18);
+    /* highlight.js token palette (github-dark). The code-block surface itself
+       uses ink tokens below; these color only the syntax tokens. */
+    --code-fg: 201 209 217;
+    --code-comment: 139 148 158;
+    --code-keyword: 255 123 114;
+    --code-string: 165 214 255;
+    --code-number: 121 192 255;
+    --code-title: 210 168 255;
+    --code-builtin: 255 166 87;
+    --code-attr: 121 192 255;
+    --code-meta: 139 148 158;
+    --code-tag: 126 231 135;
   }
 
   /* Light theme. Surfaces brighten, the text scale inverts (100 darkest …
@@ -53,6 +65,17 @@
     --accent-soft: 67 99 216;
     --accent-muted: 110 128 168;
     --accent-glow: rgba(59, 91, 219, 0.14);
+    /* highlight.js token palette (github-light). */
+    --code-fg: 36 41 47;
+    --code-comment: 110 119 129;
+    --code-keyword: 207 34 46;
+    --code-string: 10 48 105;
+    --code-number: 5 80 174;
+    --code-title: 130 80 223;
+    --code-builtin: 149 56 0;
+    --code-attr: 5 80 174;
+    --code-meta: 110 119 129;
+    --code-tag: 17 99 41;
   }
 
   html,
@@ -354,12 +377,115 @@
   .prose-vibe :not(pre) > code {
     @apply rounded bg-ink-750 px-1.5 py-0.5 font-mono text-[0.85em] text-accent-soft;
   }
-  /* Code blocks */
+  /* Code blocks — surface flips with the theme via ink tokens (near-black in
+     dark, light panel in light). */
   .prose-vibe pre {
-    @apply my-3 overflow-x-auto rounded-xl border border-white/5 bg-[#0b0e14] p-3.5 text-[13px] leading-relaxed;
+    @apply my-3 overflow-x-auto rounded-xl border border-ink-700 bg-ink-900 p-3.5 text-[13px] leading-relaxed;
   }
   .prose-vibe pre code {
     @apply bg-transparent p-0 font-mono;
+    color: rgb(var(--code-fg));
+  }
+
+  /* highlight.js syntax tokens, themed via the --code-* palette so they flip
+     with dark/light. Scoped under .prose-vibe so inline code keeps its own look. */
+  .prose-vibe .hljs-comment,
+  .prose-vibe .hljs-quote {
+    color: rgb(var(--code-comment));
+    font-style: italic;
+  }
+  .prose-vibe .hljs-keyword,
+  .prose-vibe .hljs-selector-tag,
+  .prose-vibe .hljs-deletion {
+    color: rgb(var(--code-keyword));
+  }
+  .prose-vibe .hljs-string,
+  .prose-vibe .hljs-regexp,
+  .prose-vibe .hljs-addition,
+  .prose-vibe .hljs-meta .hljs-string {
+    color: rgb(var(--code-string));
+  }
+  .prose-vibe .hljs-number,
+  .prose-vibe .hljs-literal,
+  .prose-vibe .hljs-symbol,
+  .prose-vibe .hljs-bullet,
+  .prose-vibe .hljs-constant,
+  .prose-vibe .hljs-template-variable,
+  .prose-vibe .hljs-template-tag {
+    color: rgb(var(--code-number));
+  }
+  .prose-vibe .hljs-title,
+  .prose-vibe .hljs-title.function_,
+  .prose-vibe .hljs-title.class_,
+  .prose-vibe .hljs-section {
+    color: rgb(var(--code-title));
+  }
+  .prose-vibe .hljs-built_in,
+  .prose-vibe .hljs-type {
+    color: rgb(var(--code-builtin));
+  }
+  .prose-vibe .hljs-attr,
+  .prose-vibe .hljs-attribute,
+  .prose-vibe .hljs-variable,
+  .prose-vibe .hljs-property {
+    color: rgb(var(--code-attr));
+  }
+  .prose-vibe .hljs-meta,
+  .prose-vibe .hljs-meta .hljs-keyword {
+    color: rgb(var(--code-meta));
+  }
+  .prose-vibe .hljs-tag,
+  .prose-vibe .hljs-name,
+  .prose-vibe .hljs-selector-id,
+  .prose-vibe .hljs-selector-class {
+    color: rgb(var(--code-tag));
+  }
+
+  /* Copy button on code blocks. */
+  .code-block {
+    position: relative;
+  }
+  .code-copy {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.5rem;
+    border: 1px solid rgb(var(--ink-600) / 0.6);
+    background: rgb(var(--ink-750) / 0.85);
+    color: rgb(var(--slate-400));
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.15s ease,
+      color 0.15s ease,
+      background-color 0.15s ease;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+  .code-block:hover .code-copy,
+  .code-block:focus-within .code-copy {
+    opacity: 1;
+  }
+  .code-copy:hover {
+    color: rgb(var(--slate-200));
+    background: rgb(var(--ink-700) / 0.9);
+  }
+  .code-copy--done {
+    color: rgb(var(--code-tag));
+    opacity: 1;
+  }
+  /* Touch devices have no hover to reveal it — always show. */
+  @media (hover: none) {
+    .code-copy {
+      opacity: 1;
+    }
   }
 
   /* Message-list bottom padding so the last message parks above the composer.
