@@ -42,6 +42,30 @@ function ensureWrapExec(): void {
   }
 }
 
+/** Lines the remote login+interactive shell emits over a non-pty SSH session —
+ *  pure noise that would bury the real error. */
+const REMOTE_STDERR_NOISE = /cannot set terminal process group|no job control in this shell|connection to .* closed/i;
+
+/** Append the remote SSH stderr (its tail, shell noise stripped) to the SDK's
+ *  generic "Claude Code process exited with code N" error so the user sees the
+ *  actual cause (auth, missing cwd, old claude, …). The wrapper writes stderr to
+ *  VIBE_ERR_LOG only on remote turns; locally this is a no-op. */
+function withRemoteDetail(message: string, errLog?: string): string {
+  if (!errLog) return message;
+  try {
+    const detail = fs
+      .readFileSync(errLog, 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !REMOTE_STDERR_NOISE.test(l))
+      .slice(-12)
+      .join('\n');
+    return detail ? `${message}\n\n${detail}` : message;
+  } catch {
+    return message;
+  }
+}
+
 /**
  * Drive one Claude turn on the local machine through the Agent SDK, normalizing
  * its stream into `LiveEvent`s and gating tool use through interactive prompts.
@@ -49,6 +73,9 @@ function ensureWrapExec(): void {
 export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
   const allowed = new Set(opts.allowedTools);
   const abortController = new AbortController();
+  /** Side-channel file the SSH wrapper writes remote stderr into (remote turns
+   *  only); read in the catch to enrich the error, removed in the finally. */
+  let remoteErrLog: string | undefined;
 
   const sdkOptions: Record<string, unknown> = {
     cwd: opts.cwd,
@@ -84,6 +111,10 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
     env.VIBE_REMOTE_CWD = opts.remote.cwd;
     env.VIBE_SSH_BIN = bin;
     env.VIBE_SSH_OPTS = sshOpts.join(' ');
+    // Stash remote stderr here on failure (see withRemoteDetail). Per-run unique
+    // path so concurrent remote turns never collide.
+    remoteErrLog = path.join(os.tmpdir(), `vibe-ssh-err-${crypto.randomUUID()}`);
+    env.VIBE_ERR_LOG = remoteErrLog;
     sdkOptions.env = env;
   }
 
@@ -121,7 +152,11 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
       }
       const text = err instanceof Error ? err.message : String(err);
       log.error('claude run error:', text);
-      cb.onEvent({ k: 'error', text });
+      cb.onEvent({ k: 'error', text: withRemoteDetail(text, remoteErrLog) });
+    } finally {
+      if (remoteErrLog) {
+        try { fs.rmSync(remoteErrLog, { force: true }); } catch { /* best effort */ }
+      }
     }
   })();
 
