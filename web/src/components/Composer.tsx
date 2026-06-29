@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import { useStore } from '../store/store';
-import { agentLabel } from '../lib/format';
+import { agentLabel, cn } from '../lib/format';
 import { Glass } from './LiquidGlass';
 
 export function Composer({ sessionId }: { sessionId: string }) {
@@ -63,7 +63,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   return (
     <div className="shrink-0 px-4 pb-6 pt-1 md:px-6">
       <div className="mx-auto max-w-3xl">
-        <Glass className="rounded-2xl focus-within:ring-2 focus-within:ring-accent/15" cornerRadius={16} thin>
+        <Glass
+          className={cn('rounded-2xl focus-within:ring-2 focus-within:ring-accent/15', running && 'composer-running')}
+          cornerRadius={16}
+          thin
+        >
           <div className="flex items-center gap-2 px-3 py-2.5">
             <textarea
               ref={ref}

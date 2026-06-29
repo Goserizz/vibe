@@ -532,3 +532,43 @@
     background-image: none;
   }
 }
+
+/* Composer "working" indicator: the whole border glows and breathes while a
+   turn is running (waiting for the response to finish). A solid accent ring
+   (masked to the border, so only the edge glows) plus a soft outer halo,
+   both faded in and out together via opacity. Sits on the .vglass element
+   (already position: relative). */
+.composer-running::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 2px;
+  background: rgb(var(--accent));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  box-shadow: 0 0 14px rgb(var(--accent) / 0.45);
+  animation: composer-breathe 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes composer-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-running::before {
+    animation: none;
+    opacity: 0.6;
+  }
+}
