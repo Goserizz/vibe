@@ -182,6 +182,10 @@ export interface PermissionRequest {
   toolName: string;
   input: unknown;
   ts: number;
+  /** Plan markdown for ExitPlanMode review. The tool's input only carries
+   *  `allowedPrompts`; the plan text lives in a file the server reads and
+   *  attaches here. Undefined for every other tool (and for remote turns). */
+  plan?: string;
 }
 
 export interface PermissionDecision {

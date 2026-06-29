@@ -46,6 +46,42 @@ function ensureWrapExec(): void {
  *  pure noise that would bury the real error. */
 const REMOTE_STDERR_NOISE = /cannot set terminal process group|no job control in this shell|connection to .* closed/i;
 
+/** Read the plan Claude just wrote, so ExitPlanMode can show it for review.
+ *  The ExitPlanMode tool input carries only `allowedPrompts` — the plan text
+ *  lives in a file under `~/.claude/plans` that the model writes immediately
+ *  before calling the tool. So the most-recently-modified plan file within a
+ *  short recency window is the current plan. Returns undefined if no recent
+ *  plan file can be found or read. */
+function readCurrentPlan(): string | undefined {
+  const dir = path.join(os.homedir(), '.claude', 'plans');
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  const now = Date.now();
+  const RECENT_MS = 5 * 60_000;
+  let best: { name: string; mtime: number } | undefined;
+  for (const name of names) {
+    if (!name.endsWith('.md')) continue;
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(path.join(dir, name));
+    } catch {
+      continue;
+    }
+    if (!st.isFile() || now - st.mtimeMs > RECENT_MS) continue;
+    if (!best || st.mtimeMs > best.mtime) best = { name, mtime: st.mtimeMs };
+  }
+  if (!best) return undefined;
+  try {
+    return fs.readFileSync(path.join(dir, best.name), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
 /** Append the remote SSH stderr (its tail, shell noise stripped) to the SDK's
  *  generic "Claude Code process exited with code N" error so the user sees the
  *  actual cause (auth, missing cwd, old claude, …). The wrapper writes stderr to
@@ -122,12 +158,23 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
   sdkOptions.canUseTool = async (toolName: string, input: unknown) => {
     // AskUserQuestion must always route through the interactive prompt so the
     // user's selections are collected; pre-approving it would skip the picker
-    // and the tool would receive an empty-answers result.
-    if (toolName !== 'AskUserQuestion' && allowed.has(toolName)) {
+    // and the tool would receive an empty-answers result. ExitPlanMode must
+    // always prompt too — it's the plan-review gate, and the plan text is
+    // surfaced separately via request.plan (pre-approving would skip the review).
+    const alwaysPrompt = toolName === 'AskUserQuestion' || toolName === 'ExitPlanMode';
+    if (!alwaysPrompt && allowed.has(toolName)) {
       return { behavior: 'allow', updatedInput: input };
     }
 
     const request: PermissionRequest = { requestId: crypto.randomUUID(), toolName, input, ts: Date.now() };
+    // ExitPlanMode's input has no plan text — it lives in a file on the host
+    // running claude. For local turns that's this machine; for remote turns the
+    // file is on the SSH host and unreadable here, so we leave it undefined and
+    // the prompt falls back to a generic message.
+    if (toolName === 'ExitPlanMode' && !opts.remote) {
+      const plan = readCurrentPlan();
+      if (plan) request.plan = plan;
+    }
     const decision = await cb.requestPermission(request);
     if (decision.allow) {
       if (decision.remember) allowed.add(toolName);

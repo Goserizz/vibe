@@ -12,6 +12,7 @@ import {
   Loader2,
   Check,
   ListTodo,
+  ClipboardList,
 } from 'lucide-react';
 import type {
   AssistantBlock,
@@ -116,6 +117,8 @@ export function toolMeta(name: string, input: unknown): ToolMeta {
       return { icon: Globe, label: 'Search', detail: i.query };
     case 'TodoWrite':
       return { icon: ListTodo, label: 'Update todos', detail: Array.isArray(i.todos) ? `${i.todos.length} items` : undefined };
+    case 'ExitPlanMode':
+      return { icon: ClipboardList, label: 'Plan', detail: Array.isArray(i.allowedPrompts) && i.allowedPrompts.length ? `${i.allowedPrompts.length} permissions` : undefined };
     case 'Task':
       return { icon: Wrench, label: `Task: ${i.subagent_type ?? ''}`.trim(), detail: i.description };
     default:

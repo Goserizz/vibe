@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { ShieldQuestion, Check, CheckCheck, Ban, HelpCircle, Circle, CheckCircle2, Square, CheckSquare } from 'lucide-react';
+import { ShieldQuestion, Check, CheckCheck, Ban, HelpCircle, Circle, CheckCircle2, Square, CheckSquare, ClipboardList } from 'lucide-react';
 import type { PermissionDecision, PermissionRequest } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { toolMeta } from './blocks';
+import { Markdown } from './Markdown';
 import { cn } from '../lib/format';
 import { Glass } from './LiquidGlass';
 
@@ -16,6 +17,10 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   // AskUserQuestion is a canUseTool tool whose "answer" is the user's selections,
   // so it needs a dedicated picker instead of the generic allow/deny card.
   if (req.toolName === 'AskUserQuestion') return <QuestionPrompt req={req} respond={respond} />;
+  // ExitPlanMode is the plan-review gate — show the plan in a modal instead of
+  // the generic allow/deny card. The plan text arrives via req.plan (read from
+  // the plan file server-side); the input only carries the needed permissions.
+  if (req.toolName === 'ExitPlanMode') return <PlanPrompt req={req} respond={respond} />;
 
   const meta = toolMeta(req.toolName, req.input);
   const Icon = meta.icon;
@@ -83,6 +88,82 @@ interface AskQuestion {
   header?: string;
   options: AskOption[];
   multiSelect?: boolean;
+}
+
+/**
+ * Plan-review modal for the ExitPlanMode tool. ExitPlanMode's input carries only
+ * the prompt-based permissions the plan needs (`allowedPrompts`); the plan text
+ * itself is read from the plan file server-side and attached as `req.plan`.
+ * Approve lets claude exit plan mode and implement; Reject keeps it planning.
+ */
+function PlanPrompt({ req, respond }: { req: PermissionRequest; respond: (id: string, decision: PermissionDecision) => void }) {
+  const input = (req.input ?? {}) as { allowedPrompts?: { tool: string; prompt: string }[] };
+  const prompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts : [];
+  const plan = typeof req.plan === 'string' && req.plan.trim() ? req.plan : '';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="plan-prompt-title"
+    >
+      <Glass className="w-full max-w-3xl rounded-2xl border border-accent/20" cornerRadius={16}>
+        <div className="grid max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
+          <div className="flex items-center gap-2.5 border-b border-white/5 bg-accent/5 px-4 py-2.5">
+            <ClipboardList className="h-4 w-4 text-accent" />
+            <span id="plan-prompt-title" className="text-[13px] font-medium text-slate-200">
+              Plan ready for review
+            </span>
+          </div>
+          <div className="overflow-y-auto overscroll-contain px-4 py-3.5">
+            {plan ? (
+              <div className="text-[13.5px] leading-relaxed text-slate-200">
+                <Markdown>{plan}</Markdown>
+              </div>
+            ) : (
+              <p className="text-[13px] text-slate-400">
+                Claude is ready to exit plan mode and start implementing.
+              </p>
+            )}
+            {prompts.length > 0 && (
+              <div className="mt-4 border-t border-white/5 pt-3">
+                <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                  Permissions needed
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {prompts.map((p, i) => (
+                    <span
+                      key={i}
+                      className="rounded-md border border-ink-700 bg-ink-900/60 px-2 py-1 text-[12px] text-slate-300"
+                    >
+                      {p.prompt}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2 border-t border-white/5 px-4 py-3">
+            <button
+              onClick={() => respond(req.requestId, { allow: true })}
+              className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft"
+            >
+              <Check className="h-3.5 w-3.5" />
+              Approve plan
+            </button>
+            <button
+              onClick={() => respond(req.requestId, { allow: false })}
+              className="ml-auto flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] text-slate-400 transition hover:text-rose-400"
+            >
+              <Ban className="h-3.5 w-3.5" />
+              Reject
+            </button>
+          </div>
+        </div>
+      </Glass>
+    </div>
+  );
 }
 
 /**
