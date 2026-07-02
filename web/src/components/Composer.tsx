@@ -54,7 +54,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key !== 'Enter' || e.shiftKey) return;
     // Ignore the Enter that confirms an IME candidate (see composingRef comment).
-    const justEnded = endedAtRef.current > 0 && Date.now() - endedAtRef.current < 100;
+    const justEnded = endedAtRef.current > 0 && Date.now() - endedAtRef.current < 10;
     if (composingRef.current || e.nativeEvent.isComposing || e.keyCode === 229 || justEnded) return;
     e.preventDefault();
     submit();

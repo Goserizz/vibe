@@ -500,13 +500,6 @@
   }
 }
 
-/* Soft caret pulse for the streaming cursor */
-.stream-caret::after {
-  content: '▍';
-  @apply ml-0.5 text-accent;
-  animation: pulse-dot 1.1s ease-in-out infinite;
-}
-
 /* Mobile (<768px) title bar: a crisp solid fill (no glass), themed via
    ink-950 so it matches the OS status bar in both modes — white in light,
    near-black in dark (identical to the theme-color the status bar paints
