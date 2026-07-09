@@ -65,6 +65,8 @@ export class CursorStreamNormalizer {
   private stream: { id: string; kind: 'assistant' | 'thinking'; text: string } | null = null;
   private counter = 0;
   private readonly prefix = crypto.randomUUID();
+  /** Whether any assistant text was emitted this turn — gates the result-text fallback. */
+  private producedAssistantText = false;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -82,6 +84,7 @@ export class CursorStreamNormalizer {
 
   private segment(kind: 'assistant' | 'thinking', text: string, partial: boolean): void {
     if (!text) return;
+    if (kind === 'assistant') this.producedAssistantText = true;
     if (this.stream && this.stream.kind !== kind) this.flushStream();
     if (partial) {
       if (!this.stream) {
@@ -89,8 +92,17 @@ export class CursorStreamNormalizer {
         this.stream = { id, kind, text };
         this.cb.onEvent({ k: 'block', block: { id, kind, text, streaming: true, ts: Date.now() } });
       } else {
-        this.stream.text += text;
-        this.cb.onEvent({ k: 'delta', id: this.stream.id, field: 'text', chunk: text });
+        // Cursor sometimes re-sends the segment's full text as a "partial"
+        // (still carrying timestamp_ms). Appending would duplicate it, so when
+        // the incoming text already contains what we've streamed, treat it as
+        // authoritative and finalize instead of appending a delta.
+        if (this.stream.text && text.startsWith(this.stream.text)) {
+          this.cb.onEvent({ k: 'block_end', id: this.stream.id, text });
+          this.stream = null;
+        } else {
+          this.stream.text += text;
+          this.cb.onEvent({ k: 'delta', id: this.stream.id, field: 'text', chunk: text });
+        }
       }
     } else if (this.stream) {
       // Authoritative full text for the current streaming segment.
@@ -179,6 +191,15 @@ export class CursorStreamNormalizer {
     const usage = extractCursorUsage(message.usage);
     if (usage) this.cb.onEvent({ k: 'token_usage', usage });
     const isError = Boolean(message.is_error) || message.subtype === 'error';
+    // Fallback: if no assistant text streamed this turn but the result carries
+    // the reply, surface it so the turn is never left visually empty.
+    if (!isError && !this.producedAssistantText) {
+      const r = message.result;
+      const t = typeof r === 'string' ? r : r && typeof r === 'object' ? String(r.text ?? r.content ?? '') : '';
+      if (t.trim()) {
+        this.cb.onEvent({ k: 'block', block: { id: `resulttext_${crypto.randomUUID()}`, kind: 'assistant', text: t.trim(), streaming: false, ts: Date.now() } });
+      }
+    }
     this.cb.onEvent({
       k: 'block',
       block: {

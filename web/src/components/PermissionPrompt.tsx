@@ -18,8 +18,9 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   // so it needs a dedicated picker instead of the generic allow/deny card.
   if (req.toolName === 'AskUserQuestion') return <QuestionPrompt req={req} respond={respond} />;
   // ExitPlanMode is the plan-review gate — show the plan in a modal instead of
-  // the generic allow/deny card. The plan text arrives via req.plan (read from
-  // the plan file server-side); the input only carries the needed permissions.
+  // the generic allow/deny card. Claude ≥2.1 injects the plan text into the
+  // tool input, which the server copies to req.plan; the input also carries the
+  // permissions the plan needs.
   if (req.toolName === 'ExitPlanMode') return <PlanPrompt req={req} respond={respond} />;
 
   const meta = toolMeta(req.toolName, req.input);
@@ -91,10 +92,11 @@ interface AskQuestion {
 }
 
 /**
- * Plan-review modal for the ExitPlanMode tool. ExitPlanMode's input carries only
- * the prompt-based permissions the plan needs (`allowedPrompts`); the plan text
- * itself is read from the plan file server-side and attached as `req.plan`.
- * Approve lets claude exit plan mode and implement; Reject keeps it planning.
+ * Plan-review modal for the ExitPlanMode tool. ExitPlanMode's input carries the
+ * prompt-based permissions the plan needs (`allowedPrompts`) plus the plan text
+ * itself (`plan`, injected by Claude ≥2.1), which the server attaches as
+ * `req.plan`. Approve lets claude exit plan mode and implement; Reject keeps it
+ * planning.
  */
 function PlanPrompt({ req, respond }: { req: PermissionRequest; respond: (id: string, decision: PermissionDecision) => void }) {
   const input = (req.input ?? {}) as { allowedPrompts?: { tool: string; prompt: string }[] };

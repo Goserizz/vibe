@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { X, Server, Trash2, Plus, Loader2, Check, AlertCircle, RefreshCw } from 'lucide-react';
-import type { HostStatus } from '@shared/protocol';
+import { X, Server, Trash2, Plus, Loader2, Check, AlertCircle, RefreshCw, Globe } from 'lucide-react';
+import type { HostStatus, RemoteHost } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
 
@@ -8,10 +8,12 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
   const hosts = useStore((s) => s.hosts);
   const localName = useStore((s) => s.localName);
   const addHost = useStore((s) => s.addHost);
+  const updateHost = useStore((s) => s.updateHost);
   const removeHost = useStore((s) => s.removeHost);
 
   const [name, setName] = useState('');
   const [ssh, setSsh] = useState('');
+  const [proxy, setProxy] = useState('');
   const [adding, setAdding] = useState(false);
   const [status, setStatus] = useState<Record<string, HostStatus | 'checking'>>({});
 
@@ -33,12 +35,13 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
   const submit = async () => {
     if (!name.trim() || !ssh.trim()) return;
     setAdding(true);
-    const ok = await addHost({ name: name.trim(), ssh: ssh.trim() });
+    const ok = await addHost({ name: name.trim(), ssh: ssh.trim(), proxy: proxy.trim() || undefined });
     setAdding(false);
     if (ok) {
       void check(name.trim());
       setName('');
       setSsh('');
+      setProxy('');
     }
   };
 
@@ -65,59 +68,128 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
             Add machines you reach over SSH (an <code className="text-slate-400">~/.ssh/config</code> alias or{' '}
             <code className="text-slate-400">user@host</code>). Their Claude Code sessions show up in the sidebar
             alongside <span className="text-slate-300">{localName}</span> (this machine). Key-based auth / ssh-agent is required.
+            Optionally set a per-host <span className="text-slate-400">proxy</span> so its agents route API traffic through it
+            (URL is resolved on that host — e.g. <code className="text-slate-400">http://localhost:11111</code> means a proxy listening there).
           </p>
 
           <div className="space-y-1.5">
             {hosts.length === 0 && <div className="rounded-lg border border-white/5 px-3 py-4 text-center text-xs text-slate-600">No remote hosts yet.</div>}
-            {hosts.map((h) => {
-              const st = status[h.name];
-              return (
-                <div key={h.name} className="flex items-center gap-2.5 rounded-lg border border-white/5 bg-ink-900/20 px-3 py-2 backdrop-blur-md">
-                  <StatusDot status={st} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px] text-slate-200">{h.name}</div>
-                    <div className="truncate font-mono text-[11px] text-slate-500">
-                      {h.ssh}
-                      {st && st !== 'checking' && !st.online && st.error ? ` — ${st.error}` : ''}
-                      {st && st !== 'checking' && st.online && !st.claude ? ' — claude not found' : ''}
-                    </div>
-                  </div>
-                  <button onClick={() => void check(h.name)} title="Re-check" className="rounded p-1.5 text-slate-500 hover:bg-ink-700 hover:text-slate-300">
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </button>
-                  <button onClick={() => void removeHost(h.name)} title="Remove" className="rounded p-1.5 text-slate-500 hover:bg-ink-700 hover:text-rose-400">
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              );
-            })}
+            {hosts.map((h) => (
+              <HostRow
+                key={h.name}
+                host={h}
+                status={status[h.name]}
+                onCheck={() => void check(h.name)}
+                onRemove={() => void removeHost(h.name)}
+                onSaveProxy={(p) => updateHost(h.name, { proxy: p })}
+              />
+            ))}
           </div>
 
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-2 border-t border-white/5 pt-4">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Name"
-              className="h-10 min-w-0 rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 text-[13px] text-slate-200 outline-none backdrop-blur-md focus:border-accent/60"
-            />
-            <input
-              value={ssh}
-              onChange={(e) => setSsh(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && void submit()}
-              placeholder="user@host or ssh alias"
-              className="h-10 min-w-0 rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 font-mono text-[13px] text-slate-200 outline-none backdrop-blur-md focus:border-accent/60"
-            />
-            <button
-              onClick={() => void submit()}
-              disabled={adding || !name.trim() || !ssh.trim()}
-              className="flex h-10 min-w-[84px] items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-accent px-3.5 text-sm font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
-            >
-              {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              Add
-            </button>
+          <div className="space-y-2 border-t border-white/5 pt-4">
+            <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-2">
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Name"
+                className="h-10 min-w-0 rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 text-[13px] text-slate-200 outline-none backdrop-blur-md focus:border-accent/60"
+              />
+              <input
+                value={ssh}
+                onChange={(e) => setSsh(e.target.value)}
+                placeholder="user@host or ssh alias"
+                className="h-10 min-w-0 rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 font-mono text-[13px] text-slate-200 outline-none backdrop-blur-md focus:border-accent/60"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Globe className="h-4 w-4 shrink-0 text-slate-600" />
+              <input
+                value={proxy}
+                onChange={(e) => setProxy(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void submit()}
+                placeholder="Proxy (optional, e.g. http://host:port)"
+                className="h-10 min-w-0 flex-1 rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 font-mono text-[13px] text-slate-200 outline-none backdrop-blur-md focus:border-accent/60"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => void submit()}
+                disabled={adding || !name.trim() || !ssh.trim()}
+                className="flex h-10 min-w-[84px] items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-accent px-3.5 text-sm font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
+              >
+                {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Add
+              </button>
+            </div>
           </div>
         </div>
       </div>
+      </div>
+    </div>
+  );
+}
+
+function HostRow({
+  host,
+  status,
+  onCheck,
+  onRemove,
+  onSaveProxy,
+}: {
+  host: RemoteHost;
+  status?: HostStatus | 'checking';
+  onCheck: () => void;
+  onRemove: () => void;
+  onSaveProxy: (proxy: string) => Promise<boolean>;
+}) {
+  const [proxy, setProxy] = useState(host.proxy ?? '');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setProxy(host.proxy ?? ''), [host.proxy]);
+
+  const save = async () => {
+    const trimmed = proxy.trim();
+    if (trimmed === (host.proxy ?? '').trim()) return;
+    setSaving(true);
+    await onSaveProxy(trimmed);
+    setSaving(false);
+  };
+
+  return (
+    <div className="rounded-lg border border-white/5 bg-ink-900/20 px-3 py-2 backdrop-blur-md">
+      <div className="flex items-center gap-2.5">
+        <StatusDot status={status} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] text-slate-200">{host.name}</div>
+          <div className="truncate font-mono text-[11px] text-slate-500">
+            {host.ssh}
+            {status && status !== 'checking' && !status.online && status.error ? ` — ${status.error}` : ''}
+            {status && status !== 'checking' && status.online && !status.claude ? ' — claude not found' : ''}
+          </div>
+        </div>
+        <button onClick={onCheck} title="Re-check" className="rounded p-1.5 text-slate-500 hover:bg-ink-700 hover:text-slate-300">
+          <RefreshCw className="h-3.5 w-3.5" />
+        </button>
+        <button onClick={onRemove} title="Remove" className="rounded p-1.5 text-slate-500 hover:bg-ink-700 hover:text-rose-400">
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <Globe className={`h-3.5 w-3.5 shrink-0 ${proxy.trim() ? 'text-accent/70' : 'text-slate-600'}`} />
+        <input
+          value={proxy}
+          onChange={(e) => setProxy(e.target.value)}
+          onBlur={() => void save()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            if (e.key === 'Escape') {
+              setProxy(host.proxy ?? '');
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          placeholder="proxy (optional)"
+          className="h-8 min-w-0 flex-1 rounded-md border border-ink-700/60 bg-ink-900/35 px-2.5 py-1.5 font-mono text-[11px] text-slate-300 outline-none backdrop-blur-md focus:border-accent/60"
+        />
+        {saving && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />}
       </div>
     </div>
   );

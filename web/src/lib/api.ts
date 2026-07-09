@@ -49,8 +49,10 @@ export const api = {
 
   listProjects: () => request<{ projects: ProjectDir[] }>('/projects').then((r) => r.projects),
 
-  listCursorModels: () =>
-    request<{ models: { value: string; label: string }[] }>('/cursor/models').then((r) => r.models),
+  listCursorModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: { value: string; label: string }[] }>(`/cursor/models${q}`).then((r) => r.models);
+  },
 
   listCodexModels: () =>
     request<{ models: { value: string; label: string }[] }>('/codex/models').then((r) => r.models),
@@ -79,6 +81,12 @@ export const api = {
 
   addHost: (host: RemoteHost) =>
     request<{ host: RemoteHost }>('/hosts', { method: 'POST', body: JSON.stringify(host) }).then((r) => r.host),
+
+  updateHost: (name: string, patch: { ssh?: string; proxy?: string }) =>
+    request<{ host: RemoteHost }>(`/hosts/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }).then((r) => r.host),
 
   removeHost: (name: string) => request<{ ok: boolean }>(`/hosts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
@@ -124,5 +132,38 @@ export const api = {
     const qs = new URLSearchParams({ path });
     if (host) qs.set('host', host);
     return `/api/files/raw?token=${encodeURIComponent(authToken)}&${qs.toString()}`;
+  },
+
+  // Direct URL for a Save-As download (server sets Content-Disposition: attachment).
+  // Like fileRawUrl, the token rides in the query so a plain <a href> works.
+  downloadFileUrl: ({ host, path }: { host?: string; path: string }) => {
+    const qs = new URLSearchParams({ path });
+    if (host) qs.set('host', host);
+    return `/api/files/download?token=${encodeURIComponent(authToken)}&${qs.toString()}`;
+  },
+
+  // Upload one file (raw bytes) into `dir`. Sends the File as the body — not
+  // JSON — so binary passes through untouched. Bypasses the JSON `request`
+  // helper on purpose (it forces Content-Type: application/json).
+  uploadFile: ({ host, dir, file }: { host?: string; dir: string; file: File }): Promise<{ ok: boolean; path: string }> => {
+    const qs = new URLSearchParams({ dir, name: file.name });
+    if (host) qs.set('host', host);
+    return fetch(`/api/files/upload?${qs.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${authToken}` },
+      body: file,
+    }).then(async (res) => {
+      if (!res.ok) {
+        let message = res.statusText;
+        try {
+          const body = await res.json();
+          message = body.error || message;
+        } catch {
+          /* keep statusText */
+        }
+        throw new ApiError(res.status, message);
+      }
+      return res.json();
+    });
   },
 };

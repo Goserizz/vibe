@@ -68,9 +68,11 @@ interface StoreState {
   refreshSessions: () => Promise<void>;
   loadProjects: () => Promise<void>;
   loadHosts: () => Promise<void>;
-  loadCursorModels: () => Promise<void>;
+  /** Load Cursor models for the local CLI, or for a remote host (with its proxy). */
+  loadCursorModels: (host?: string) => Promise<void>;
   loadCodexModels: () => Promise<void>;
   addHost: (host: RemoteHost) => Promise<boolean>;
+  updateHost: (name: string, patch: { ssh?: string; proxy?: string }) => Promise<boolean>;
   removeHost: (name: string) => Promise<void>;
   openSession: (id: string) => Promise<void>;
   createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<void>;
@@ -269,9 +271,9 @@ export const useStore = create<StoreState>((set, get) => {
       }
     },
 
-    async loadCursorModels() {
+    async loadCursorModels(host?: string) {
       try {
-        const cursorModels = await api.listCursorModels();
+        const cursorModels = await api.listCursorModels(host);
         set({ cursorModels });
       } catch {
         /* ignore — the picker falls back to a small static list */
@@ -304,6 +306,17 @@ export const useStore = create<StoreState>((set, get) => {
         return true;
       } catch (err) {
         set({ toast: err instanceof ApiError ? err.message : 'Failed to add host' });
+        return false;
+      }
+    },
+
+    async updateHost(name, patch) {
+      try {
+        const host = await api.updateHost(name, patch);
+        set((s) => ({ hosts: s.hosts.map((h) => (h.name === name ? host : h)) }));
+        return true;
+      } catch (err) {
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to update host' });
         return false;
       }
     },

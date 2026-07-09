@@ -19,7 +19,8 @@ class HostRegistry {
   private load(): void {
     try {
       const parsed = JSON.parse(fs.readFileSync(config.hostsFile, 'utf8')) as RemoteHost[];
-      for (const h of parsed) if (h?.name && h?.ssh) this.hosts.set(h.name, { name: h.name, ssh: h.ssh });
+      for (const h of parsed)
+        if (h?.name && h?.ssh) this.hosts.set(h.name, { name: h.name, ssh: h.ssh, proxy: h.proxy?.trim() || undefined });
     } catch {
       /* first run */
     }
@@ -54,10 +55,20 @@ class HostRegistry {
   }
 
   add(host: RemoteHost): RemoteHost {
-    const clean: RemoteHost = { name: host.name.trim(), ssh: host.ssh.trim() };
+    const clean: RemoteHost = { name: host.name.trim(), ssh: host.ssh.trim(), proxy: host.proxy?.trim() || undefined };
     this.hosts.set(clean.name, clean);
     this.save();
     return clean;
+  }
+
+  /** Patch an existing host's ssh target and/or proxy. */
+  update(name: string, patch: Partial<Pick<RemoteHost, 'ssh' | 'proxy'>>): RemoteHost | undefined {
+    const h = this.hosts.get(name);
+    if (!h) return undefined;
+    if (patch.ssh != null) h.ssh = patch.ssh.trim();
+    if (patch.proxy != null) h.proxy = patch.proxy.trim() || undefined;
+    this.save();
+    return h;
   }
 
   remove(name: string): boolean {

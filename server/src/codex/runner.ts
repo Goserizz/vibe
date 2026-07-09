@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { CodexStreamNormalizer } from './normalize.js';
-import { sshConnectPrefix, shQuote, loginShellCommand } from '../remote/ssh.js';
+import { sshConnectPrefix, shQuote, loginShellCommand, proxyEnvPrefix, cleanRemoteStderr } from '../remote/ssh.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
 import type { EffortLevel, PermissionMode } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
@@ -17,17 +17,7 @@ export interface CodexRunOptions {
   /** Codex thread id to resume; omit for a fresh session. */
   resume?: string;
   /** When set, the turn runs on a remote host over SSH. `cwd` is the remote path. */
-  remote?: { sshTarget: string; cwd: string };
-}
-
-/** Drop ssh/job-control noise so a real error message survives. */
-function cleanStderr(s: string): string {
-  return s
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l && !/Pseudo-terminal|tcgetattr|bind: |Permanently added|Warning: Permanently|Connection to .* closed/i.test(l))
-    .join('\n')
-    .slice(0, 1000);
+  remote?: { sshTarget: string; cwd: string; proxy?: string };
 }
 
 /** Map a Vibe permission mode to a Codex sandbox/approval flag set. Headless codex
@@ -59,9 +49,10 @@ function buildSpawn(opts: CodexRunOptions): { bin?: string; args: string[]; remo
   const args = opts.resume ? ['exec', 'resume', opts.resume, ...base, '-'] : ['exec', ...base, '-'];
 
   if (opts.remote) {
-    // `cd` into the workspace on the remote host before launching codex.
+    // `cd` into the workspace on the remote host before launching codex. Prepend
+    // the per-host proxy (if any) so codex routes its API traffic through it.
     const inner = `cd ${shQuote(cwd)} && codex ${args.map(shQuote).join(' ')}`;
-    const remoteCmd = loginShellCommand(inner);
+    const remoteCmd = proxyEnvPrefix(opts.remote.proxy) + loginShellCommand(inner);
     const { bin, opts: sshOpts } = sshConnectPrefix();
     return { bin, args: [...sshOpts, '-T', opts.remote.sshTarget, remoteCmd], remote: true };
   }
@@ -121,7 +112,7 @@ function runOnce(opts: CodexRunOptions, normalizer: CodexStreamNormalizer, setCh
         resolve({ transient: false });
         return;
       }
-      resolve({ transient: sawTransient, error: cleanStderr(stderr) || `codex exited with code ${code}` });
+      resolve({ transient: sawTransient, error: cleanRemoteStderr(stderr) || `codex exited with code ${code}` });
     });
 
     // Feed the prompt over stdin (ssh forwards it to the remote agent).

@@ -13,6 +13,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const defaultModel = useStore((s) => s.defaultModel);
   const cursorModels = useStore((s) => s.cursorModels);
   const codexModels = useStore((s) => s.codexModels);
+  const loadCursorModels = useStore((s) => s.loadCursorModels);
   const createSession = useStore((s) => s.createSession);
 
   // '' = local machine; otherwise a remote host name.
@@ -61,6 +62,27 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     setQuery('');
     setPathState('idle');
   };
+
+  // Cursor's available models depend on the host's egress (and its proxy). Reload
+  // when the machine changes so region-gated ids aren't offered for that host.
+  // On unmount, restore the active session's host list (dialog shares the store).
+  const activeHost = useStore((s) => s.sessions.find((x) => x.id === s.activeId)?.host);
+  const activeHostRef = useRef(activeHost);
+  activeHostRef.current = activeHost;
+  useEffect(() => {
+    void loadCursorModels(host || undefined);
+  }, [host, loadCursorModels]);
+  useEffect(() => {
+    return () => {
+      void loadCursorModels(activeHostRef.current || undefined);
+    };
+  }, [loadCursorModels]);
+
+  // If the current model disappeared after a host switch, fall back to auto.
+  useEffect(() => {
+    if (agent !== 'cursor' || !modelOptions.length) return;
+    if (!modelOptions.some((m) => m.value === model)) setModel('auto');
+  }, [agent, model, modelOptions]);
 
   // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
   const suggestions = useMemo(() => {

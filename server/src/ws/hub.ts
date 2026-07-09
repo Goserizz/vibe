@@ -48,6 +48,8 @@ interface RuntimeInit {
   host?: string;
   /** SSH target for remote sessions; undefined runs locally via the SDK. */
   sshTarget?: string;
+  /** Per-host HTTP(S) proxy injected into the remote agent's env. */
+  proxy?: string;
 }
 
 /** Cached resolution for a remote session so the (sync) hub can build runtimes. */
@@ -58,6 +60,7 @@ interface RemoteSessionInfo {
   model: string;
   title: string;
   agent?: AgentKind;
+  proxy?: string;
 }
 
 /** Newer events are kept; older ones are evicted once the log passes this size. */
@@ -105,6 +108,7 @@ class SessionRuntime {
   readonly agent: AgentKind;
   readonly host?: string;
   readonly sshTarget?: string;
+  readonly proxy?: string;
   lastActivity = Date.now();
   readonly subscribers = new Set<Conn>();
   readonly allowedTools = new Set<string>();
@@ -132,6 +136,7 @@ class SessionRuntime {
     this.agent = init.agent;
     this.host = init.host;
     this.sshTarget = init.sshTarget;
+    this.proxy = init.proxy;
     // Cursor and Codex both self-persist via the shared LiveEvent→blocks accumulator.
     if (this.agent === 'cursor' || this.agent === 'codex') this.transcript = new CursorTranscriptBuilder();
   }
@@ -246,7 +251,7 @@ class SessionRuntime {
           model,
           permissionMode,
           resume: this.claudeSessionId,
-          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd } : undefined,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
         },
         cb,
       );
@@ -259,13 +264,13 @@ class SessionRuntime {
           permissionMode,
           effort,
           resume: this.claudeSessionId,
-          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd } : undefined,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
         },
         cb,
       );
     } else {
       this.run = this.sshTarget
-        ? startRun({ ...runOpts, remote: { sshTarget: this.sshTarget, cwd } }, cb)
+        ? startRun({ ...runOpts, remote: { sshTarget: this.sshTarget, cwd, proxy: this.proxy } }, cb)
         : startRun(runOpts, cb);
     }
 
@@ -382,14 +387,14 @@ export class Hub {
         return {
           cwd: stored.cwd, model: stored.model, permissionMode: stored.permissionMode,
           effort: stored.effort ?? defaultEffort, title: stored.title, claudeSessionId: stored.claudeSessionId,
-          agent: stored.agent ?? 'claude', host, sshTarget: remoteHost.ssh,
+          agent: stored.agent ?? 'claude', host, sshTarget: remoteHost.ssh, proxy: remoteHost.proxy,
         };
       }
       const cached = this.remoteCache.get(sessionId);
       if (!cached) return undefined;
       return {
         cwd: cached.cwd, model: cached.model, permissionMode: 'default', effort: defaultEffort,
-        title: cached.title, claudeSessionId, agent: cached.agent ?? 'claude', host, sshTarget: cached.sshTarget,
+        title: cached.title, claudeSessionId, agent: cached.agent ?? 'claude', host, sshTarget: cached.sshTarget, proxy: cached.proxy,
       };
     }
 

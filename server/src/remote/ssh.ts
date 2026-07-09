@@ -85,6 +85,35 @@ export function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Shell prefix that exports `proxy` as HTTP(S)_PROXY in both cases, so a remote
+ *  agent (claude / cursor-agent / codex — Node, Rust, …) routes its API traffic
+ *  through it regardless of which variable the library reads. Meant to prepend
+ *  to a remote command string (it ends in a trailing space). '' when no proxy.
+ *
+ *  The URL is evaluated on the *remote* host (e.g. `http://localhost:11111`
+ *  means a proxy listening on that host, not on the Vibe server). */
+export function proxyEnvPrefix(proxy?: string): string {
+  const p = (proxy ?? '').trim();
+  if (!p) return '';
+  const q = shQuote(p);
+  return `HTTP_PROXY=${q} HTTPS_PROXY=${q} http_proxy=${q} https_proxy=${q} `;
+}
+
+/** Lines a remote login+interactive shell emits over a non-pty SSH session —
+ *  pure noise that would bury the real error (e.g. "Cannot use this model"). */
+export const REMOTE_STDERR_NOISE =
+  /cannot set terminal process group|no job control in this shell|Pseudo-terminal|tcgetattr|bind: |Permanently added|Warning: Permanently|Connection to .* closed/i;
+
+/** Drop ssh/login-shell noise from remote stderr so the real error survives. */
+export function cleanRemoteStderr(s: string, maxLen = 1000): string {
+  return s
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !REMOTE_STDERR_NOISE.test(l))
+    .join('\n')
+    .slice(0, maxLen);
+}
+
 /**
  * Wrap a command so it runs through the user's login + interactive shell. This
  * is essential for finding `claude` (and the `node` it needs) on remote hosts:

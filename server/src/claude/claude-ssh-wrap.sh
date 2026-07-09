@@ -13,6 +13,8 @@
 #   VIBE_REMOTE_CWD   absolute path to `cd` into remotely   (optional)
 #   VIBE_SSH_BIN      ssh binary                             (default: ssh)
 #   VIBE_SSH_OPTS     ssh options, space-separated           (BatchMode, LogLevel=ERROR, …)
+#   VIBE_PROXY        HTTP(S) proxy URL for the remote agent  (optional; exported as
+#                     HTTP(S)_PROXY on the remote command so claude routes API traffic through it)
 #   VIBE_ERR_LOG      path to capture remote stderr into      (set by runner.ts on
 #                     remote turns; read on non-zero exit to surface why claude failed)
 set -u
@@ -56,7 +58,16 @@ fi
 # LOCAL wrapper leaves it literal, then the REMOTE shell expands it (mirrors
 # loginShellCommand in remote/ssh.ts — it must NOT be quoted, or the remote
 # shell would try to run a command literally named `${SHELL:-bash}`).
-remote="\${SHELL:-bash} -lic $(printf '%q' "$full")"
+#
+# Optional per-host proxy (VIBE_PROXY): prepend HTTP(S)_PROXY in both cases so
+# the remote login shell — and the claude it launches — inherit them and route
+# API traffic through the proxy. printf %q safely quotes the URL.
+proxy_prefix=""
+if [ -n "${VIBE_PROXY:-}" ]; then
+  q=$(printf '%q' "$VIBE_PROXY")
+  proxy_prefix="HTTP_PROXY=$q HTTPS_PROXY=$q http_proxy=$q https_proxy=$q "
+fi
+remote="${proxy_prefix}\${SHELL:-bash} -lic $(printf '%q' "$full")"
 
 # Capture remote stderr to a side-channel file when runner.ts provides one
 # (VIBE_ERR_LOG). The Agent SDK's thrown error on a non-zero exit carries only

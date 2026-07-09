@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { CursorStreamNormalizer } from './normalize.js';
-import { sshConnectPrefix, shQuote, loginShellCommand } from '../remote/ssh.js';
+import { sshConnectPrefix, shQuote, loginShellCommand, proxyEnvPrefix, cleanRemoteStderr } from '../remote/ssh.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
 import type { PermissionMode } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
@@ -15,17 +15,7 @@ export interface CursorRunOptions {
   /** Cursor chat id to resume; omit for a fresh chat. */
   resume?: string;
   /** When set, the turn runs on a remote host over SSH. `cwd` is the remote path. */
-  remote?: { sshTarget: string; cwd: string };
-}
-
-/** Drop ssh/job-control noise so a real error message survives. */
-function cleanStderr(s: string): string {
-  return s
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l && !/Pseudo-terminal|tcgetattr|bind: |Permanently added|Warning: Permanently|Connection to .* closed/i.test(l))
-    .join('\n')
-    .slice(0, 1000);
+  remote?: { sshTarget: string; cwd: string; proxy?: string };
 }
 
 /** Build the cursor-agent invocation (shared by local spawn and remote ssh). */
@@ -45,7 +35,7 @@ function buildSpawn(opts: CursorRunOptions): { bin?: string; args: string[]; rem
 
   if (opts.remote) {
     const inner = `cursor-agent ${cliArgs.map(shQuote).join(' ')}`;
-    const remoteCmd = loginShellCommand(inner);
+    const remoteCmd = proxyEnvPrefix(opts.remote.proxy) + loginShellCommand(inner);
     const { bin, opts: sshOpts } = sshConnectPrefix();
     return { bin, args: [...sshOpts, '-T', opts.remote.sshTarget, remoteCmd], remote: true };
   }
@@ -101,7 +91,7 @@ function runOnce(opts: CursorRunOptions, normalizer: CursorStreamNormalizer, set
         resolve({ transient: false });
         return;
       }
-      resolve({ transient: sawTransient, error: cleanStderr(stderr) || `cursor-agent exited with code ${code}` });
+      resolve({ transient: sawTransient, error: cleanRemoteStderr(stderr) || `cursor-agent exited with code ${code}` });
     });
 
     // Feed the prompt over stdin (ssh forwards it to the remote agent).

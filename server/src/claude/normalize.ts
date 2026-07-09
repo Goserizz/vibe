@@ -34,6 +34,9 @@ export function extractUsage(usage: Record<string, unknown> | undefined): TokenU
 export class StreamNormalizer {
   private currentMessageId = '';
   private readonly streamKindByIndex = new Map<number, 'assistant' | 'thinking'>();
+  /** Accumulated streamed text per block id, so `block_end` can carry the full
+   *  text and recover a block even if its deltas were dropped on the wire. */
+  private readonly streamTextById = new Map<string, string>();
   private readonly assistantOffset = new Map<string, number>();
 
   constructor(private readonly cb: NormalizerCallbacks) {}
@@ -72,13 +75,16 @@ export class StreamNormalizer {
         return;
       case 'content_block_start': {
         const idx = num(event.index);
+        const id = this.blockId(idx);
         const block = event.content_block;
         if (block?.type === 'text') {
           this.streamKindByIndex.set(idx, 'assistant');
-          this.cb.onEvent({ k: 'block', block: { id: this.blockId(idx), kind: 'assistant', text: '', streaming: true, ts: Date.now() } });
+          this.streamTextById.set(id, '');
+          this.cb.onEvent({ k: 'block', block: { id, kind: 'assistant', text: '', streaming: true, ts: Date.now() } });
         } else if (block?.type === 'thinking') {
           this.streamKindByIndex.set(idx, 'thinking');
-          this.cb.onEvent({ k: 'block', block: { id: this.blockId(idx), kind: 'thinking', text: '', streaming: true, ts: Date.now() } });
+          this.streamTextById.set(id, '');
+          this.cb.onEvent({ k: 'block', block: { id, kind: 'thinking', text: '', streaming: true, ts: Date.now() } });
         }
         return;
       }
@@ -86,18 +92,27 @@ export class StreamNormalizer {
         const idx = num(event.index);
         const kind = this.streamKindByIndex.get(idx);
         if (!kind) return;
+        const id = this.blockId(idx);
         const delta = event.delta;
         const chunk = delta?.type === 'text_delta' ? delta.text
           : delta?.type === 'thinking_delta' ? delta.thinking
           : '';
-        if (chunk) this.cb.onEvent({ k: 'delta', id: this.blockId(idx), field: 'text', chunk });
+        if (chunk) {
+          this.streamTextById.set(id, (this.streamTextById.get(id) ?? '') + chunk);
+          this.cb.onEvent({ k: 'delta', id, field: 'text', chunk });
+        }
         return;
       }
       case 'content_block_stop': {
         const idx = num(event.index);
         if (this.streamKindByIndex.has(idx)) {
-          this.cb.onEvent({ k: 'block_end', id: this.blockId(idx) });
+          const id = this.blockId(idx);
+          // Carry the accumulated text so a block whose deltas were dropped
+          // mid-stream still finalizes with its full content.
+          const text = this.streamTextById.get(id);
+          this.cb.onEvent({ k: 'block_end', id, ...(text != null ? { text } : {}) });
           this.streamKindByIndex.delete(idx);
+          this.streamTextById.delete(id);
         }
         return;
       }

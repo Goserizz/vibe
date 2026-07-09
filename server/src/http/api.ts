@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth.js';
 import { config } from '../config.js';
@@ -10,7 +10,7 @@ import { sessionStore, toMeta } from '../sessions/store.js';
 import { getRecentProjects, validateDir } from '../projects.js';
 import { getClaudeSessionInfo, listClaudeSessions, type DiscoveredSession } from '../sessions/discovery.js';
 import { listCursorSessions, resolveCursorSessionSync } from '../cursor/discovery.js';
-import { listCursorModels } from '../cursor/models.js';
+import { invalidateCursorModelsCache, listCursorModels, listRemoteCursorModels } from '../cursor/models.js';
 import { listCodexSessions, resolveCodexSessionSync } from '../codex/discovery.js';
 import { listCodexModels } from '../codex/models.js';
 import { searchConversations } from '../sessions/search.js';
@@ -55,7 +55,7 @@ async function ensureRemoteCached(sessionId: string): Promise<void> {
   if (!remoteHost) return;
   const info = await getRemoteSessionInfo(remoteHost, claudeSessionId);
   if (info) {
-    hub.cacheRemoteSession(sessionId, { host: remoteHost.name, sshTarget: remoteHost.ssh, cwd: info.cwd, model: info.model, title: info.title });
+    hub.cacheRemoteSession(sessionId, { host: remoteHost.name, sshTarget: remoteHost.ssh, cwd: info.cwd, model: info.model, title: info.title, proxy: remoteHost.proxy });
   }
 }
 
@@ -81,6 +81,12 @@ const updateSchema = z.object({
 const hostSchema = z.object({
   name: z.string().min(1).refine((n) => !n.includes('::'), 'name cannot contain "::"'),
   ssh: z.string().min(1),
+  proxy: z.string().optional(),
+});
+
+const hostPatchSchema = z.object({
+  ssh: z.string().min(1).optional(),
+  proxy: z.string().optional(),
 });
 
 // -- File browser/editor (local + remote) ------------------------------------
@@ -90,6 +96,9 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
 /** Max bytes for a raw (e.g. image) download. */
 const MAX_RAW_BYTES = 25 * 1024 * 1024;
+
+/** Max bytes for a single uploaded file (kept symmetric with downloads). */
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 /** Content-Type for image extensions served by /files/raw. */
 const imageMimes: Record<string, string> = {
@@ -125,6 +134,42 @@ function resolveFileTarget(host?: string): { remote: boolean; target: string } {
   return { remote: true, target: h?.ssh ?? host };
 }
 
+/** An error carrying an HTTP status, so shared helpers can signal e.g. 422/504
+ *  and the route handler maps it to the right response code. */
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+/** Read up to MAX_RAW_BYTES of a file into a Buffer — local fs, or remote over
+ *  SSH as base64 (sshExec accumulates text stdout, so raw bytes would corrupt).
+ *  Shared by /files/raw (inline display) and /files/download (attachment). */
+async function readFileBytes(filePath: string, remote: boolean, target: string): Promise<Buffer> {
+  if (remote) {
+    const sizeRes = await sshExec(target, loginShellCommand(`wc -c < ${shQuote(filePath)}`), { timeoutMs: 10_000 });
+    const size = Number((sizeRes.stdout || '').trim());
+    if (sizeRes.code === 0 && Number.isFinite(size) && size > MAX_RAW_BYTES) {
+      throw new HttpError(422, 'file too large (>25MB)');
+    }
+    const r = await sshExec(target, loginShellCommand(`base64 < ${shQuote(filePath)}`), { timeoutMs: 30_000 });
+    if (r.timedOut) throw new HttpError(504, 'read timed out');
+    if (r.code !== 0) throw new HttpError(400, (r.stderr.trim() || 'read failed').slice(0, 500));
+    return Buffer.from(r.stdout.replace(/\s+/g, ''), 'base64');
+  }
+  const resolved = resolveLocalPath(filePath);
+  const stat = fs.statSync(resolved);
+  if (stat.size > MAX_RAW_BYTES) throw new HttpError(422, 'file too large (>25MB)');
+  return fs.readFileSync(resolved);
+}
+
+/** `Content-Disposition: attachment` with an ASCII fallback plus a UTF-8
+ *  filename* so non-ASCII names download with the right name everywhere. */
+function attachmentDisposition(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7E]/g, '').replace(/["\\]/g, '') || 'download';
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
 /**
  * Split a path being typed in the "Working directory" field into the directory
  * to list (`stem`) and the prefix to match (`prefix`). `stem` keeps its literal
@@ -150,6 +195,12 @@ const fileWriteSchema = z.object({
   content: z.string(),
 });
 
+const filesUploadQuerySchema = z.object({
+  host: z.string().optional(),
+  dir: z.string().min(1),
+  name: z.string().min(1),
+});
+
 const completeSchema = z.object({
   path: z.string(),
   host: z.string().optional(),
@@ -168,9 +219,13 @@ export function createApiRouter(): Router {
   });
 
   // The Cursor CLI enumerates every model variant (effort/thinking/fast); list
-  // them dynamically so the picker always matches the installed CLI.
-  router.get('/cursor/models', async (_req, res) => {
-    res.json({ models: await listCursorModels() });
+  // them dynamically so the picker always matches the installed CLI. Optional
+  // `?host=` runs the listing on that remote (with its proxy) so region-gated
+  // models match what a turn on that host can actually use.
+  router.get('/cursor/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    const models = host ? await listRemoteCursorModels(host) : await listCursorModels();
+    res.json({ models });
   });
 
   // Codex has no `models` subcommand; its cached model list (~/.codex/models_cache.json)
@@ -353,38 +408,37 @@ export function createApiRouter(): Router {
     const filePath = parsed.data.path;
     const { remote, target } = resolveFileTarget(parsed.data.host);
     try {
-      let buf: Buffer;
-      if (remote) {
-        const sizeRes = await sshExec(target, loginShellCommand(`wc -c < ${shQuote(filePath)}`), { timeoutMs: 10_000 });
-        const size = Number((sizeRes.stdout || '').trim());
-        if (sizeRes.code === 0 && Number.isFinite(size) && size > MAX_RAW_BYTES) {
-          res.status(422).json({ error: 'file too large (>25MB)' });
-          return;
-        }
-        const r = await sshExec(target, loginShellCommand(`base64 < ${shQuote(filePath)}`), { timeoutMs: 30_000 });
-        if (r.timedOut) {
-          res.status(504).json({ error: 'read timed out' });
-          return;
-        }
-        if (r.code !== 0) {
-          res.status(400).json({ error: (r.stderr.trim() || 'read failed').slice(0, 500) });
-          return;
-        }
-        buf = Buffer.from(r.stdout.replace(/\s+/g, ''), 'base64');
-      } else {
-        const resolved = resolveLocalPath(filePath);
-        const stat = fs.statSync(resolved);
-        if (stat.size > MAX_RAW_BYTES) {
-          res.status(422).json({ error: 'file too large (>25MB)' });
-          return;
-        }
-        buf = fs.readFileSync(resolved);
-      }
+      const buf = await readFileBytes(filePath, remote, target);
       res.set('Content-Type', mimeForPath(filePath));
       res.set('Cache-Control', 'no-store');
       res.send(buf);
     } catch (err) {
-      res.status(400).json({ error: err instanceof Error ? err.message : 'read failed' });
+      const status = err instanceof HttpError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'read failed' });
+    }
+  });
+
+  // Download a file as an attachment (forces Save As in the browser). Same
+  // bytes as /files/raw via readFileBytes, but with Content-Disposition:
+  // attachment + the file's name. The token in ?token= lets an <a href> click
+  // download without a custom auth header.
+  router.get('/files/download', async (req, res) => {
+    const parsed = filesQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid query' });
+      return;
+    }
+    const filePath = parsed.data.path;
+    const { remote, target } = resolveFileTarget(parsed.data.host);
+    try {
+      const buf = await readFileBytes(filePath, remote, target);
+      res.set('Content-Type', mimeForPath(filePath));
+      res.set('Content-Disposition', attachmentDisposition(path.basename(filePath)));
+      res.set('Cache-Control', 'no-store');
+      res.send(buf);
+    } catch (err) {
+      const status = err instanceof HttpError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'download failed' });
     }
   });
 
@@ -422,6 +476,59 @@ export function createApiRouter(): Router {
     }
   });
 
+  // Upload a file into the listed directory. The request body is the file's raw
+  // bytes (Content-Type: application/octet-stream), parsed by a route-local
+  // express.raw() — the global express.json() only handles JSON, so it leaves
+  // this body untouched. `dir` + `name` come via the query; `name` is reduced to
+  // its basename so a crafted name can't escape `dir`. Remote writes pipe a
+  // base64 of the buffer through `base64 -d > file` (sshExec's stdin is
+  // text-only — the mirror of how /files/raw ships remote binary back).
+  router.post(
+    '/files/upload',
+    express.raw({ type: () => true, limit: 30 * 1024 * 1024 }),
+    async (req, res) => {
+      const parsed = filesUploadQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'invalid query' });
+        return;
+      }
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        res.status(400).json({ error: 'empty file' });
+        return;
+      }
+      if (body.length > MAX_UPLOAD_BYTES) {
+        res.status(413).json({ error: 'file too large (>25MB)' });
+        return;
+      }
+      const { dir, host } = parsed.data;
+      const name = path.basename(parsed.data.name) || 'upload';
+      const dest = path.posix.join(dir, name);
+      const { remote, target } = resolveFileTarget(host);
+      try {
+        if (remote) {
+          const r = await sshExec(target, loginShellCommand(`base64 -d > ${shQuote(dest)}`), {
+            input: body.toString('base64'),
+            timeoutMs: 60_000,
+          });
+          if (r.timedOut) {
+            res.status(504).json({ error: 'write timed out' });
+            return;
+          }
+          if (r.code !== 0) {
+            res.status(400).json({ error: (r.stderr.trim() || 'write failed').slice(0, 500) });
+            return;
+          }
+        } else {
+          fs.writeFileSync(resolveLocalPath(dest), body);
+        }
+        res.json({ ok: true, path: dest });
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'write failed' });
+      }
+    },
+  );
+
   // -- Remote hosts ---------------------------------------------------------
 
   router.get('/hosts', (_req, res) => {
@@ -435,6 +542,24 @@ export function createApiRouter(): Router {
       return;
     }
     res.json({ host: hostRegistry.add(parsed.data) });
+  });
+
+  // Patch an existing host's ssh target and/or proxy (e.g. set/clear the proxy
+  // a remote agent routes its API traffic through).
+  router.patch('/hosts/:name', (req, res) => {
+    const parsed = hostPatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid host' });
+      return;
+    }
+    const updated = hostRegistry.update(req.params.name, parsed.data);
+    if (!updated) {
+      res.status(404).json({ error: 'unknown host' });
+      return;
+    }
+    // Proxy/egress changes which models Cursor advertises for that host.
+    if (parsed.data.proxy !== undefined) invalidateCursorModelsCache(updated.name);
+    res.json({ host: updated });
   });
 
   router.delete('/hosts/:name', (req, res) => {
@@ -506,7 +631,7 @@ export function createApiRouter(): Router {
         try {
           for (const d of await listRemoteSessions(host)) {
             const id = encodeRemoteId(host.name, d.claudeSessionId);
-            hub.cacheRemoteSession(id, { host: host.name, sshTarget: host.ssh, cwd: d.cwd, model: d.model, title: d.title });
+            hub.cacheRemoteSession(id, { host: host.name, sshTarget: host.ssh, cwd: d.cwd, model: d.model, title: d.title, proxy: host.proxy });
             // Dedup by the conversation's Claude session id; the hide-list keys
             // on the host-namespaced id (what delete dismisses).
             if (!known.has(d.claudeSessionId) && !known.has(id) && !sessionStore.isHidden(id)) {

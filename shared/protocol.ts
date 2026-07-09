@@ -131,6 +131,10 @@ export interface RemoteHost {
   name: string;
   /** SSH target: an `~/.ssh/config` alias or `user@host[:port]`. */
   ssh: string;
+  /** Optional HTTP(S) proxy the remote agent (claude / cursor-agent / codex)
+   *  routes its API traffic through when launched on this host. Injected as
+   *  HTTP_PROXY / HTTPS_PROXY (both cases) into the remote process env. */
+  proxy?: string;
 }
 
 export interface HostStatus {
@@ -182,9 +186,10 @@ export interface PermissionRequest {
   toolName: string;
   input: unknown;
   ts: number;
-  /** Plan markdown for ExitPlanMode review. The tool's input only carries
-   *  `allowedPrompts`; the plan text lives in a file the server reads and
-   *  attaches here. Undefined for every other tool (and for remote turns). */
+  /** Plan markdown for ExitPlanMode review. Claude ≥2.1 injects the plan text
+   *  into the tool input (input.plan), which the server copies here. Older CLIs
+   *  omit it and the server falls back to reading ~/.claude/plans (local only).
+   *  Undefined for every other tool. */
   plan?: string;
 }
 

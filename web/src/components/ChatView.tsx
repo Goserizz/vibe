@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from 'lucide-react';
 import type { EffortLevel, PermissionMode } from '@shared/protocol';
 import { api } from '../lib/api';
@@ -126,9 +127,16 @@ function ModelControl() {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
   const cursorModels = useStore((s) => s.cursorModels);
   const codexModels = useStore((s) => s.codexModels);
+  const loadCursorModels = useStore((s) => s.loadCursorModels);
   // Cursor's model list is large (search it); Codex/Claude are short. Allow a
   // custom typed value for Cursor and Codex (both accept arbitrary model ids).
   const usePicker = session.agent !== 'claude';
+
+  // Reload Cursor models for this session's host (proxy/egress can hide models).
+  useEffect(() => {
+    if (session.agent !== 'cursor') return;
+    void loadCursorModels(session.host || undefined);
+  }, [session.agent, session.host, loadCursorModels]);
 
   return (
     <Menu

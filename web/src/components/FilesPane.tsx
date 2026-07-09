@@ -9,7 +9,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
-import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle } from 'lucide-react';
+import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle, Upload, Download } from 'lucide-react';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
 import { cn, basename } from '../lib/format';
@@ -64,6 +64,10 @@ export function FilesPane() {
   const [readError, setReadError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Refs to avoid stale closures inside the once-created CodeMirror view.
   const editorEl = useRef<HTMLDivElement>(null);
@@ -143,6 +147,48 @@ export function FilesPane() {
     [setToast],
   );
 
+  // Re-run the directory listing effect (e.g. after an upload adds a file).
+  const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  // Upload every chosen file into the currently listed directory. Runs them
+  // concurrently and reports a combined result; always re-lists at the end.
+  const uploadFiles = useCallback(
+    async (fileList: FileList | File[]) => {
+      const files = Array.from(fileList);
+      if (!files.length || !dir) return;
+      setUploading(true);
+      try {
+        const results = await Promise.allSettled(
+          files.map((file) => api.uploadFile({ host: hostRef.current, dir, file })),
+        );
+        const ok = results.filter((r) => r.status === 'fulfilled').length;
+        const failed = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+        if (failed.length) {
+          const first = failed[0]?.reason;
+          setToast(ok ? `Uploaded ${ok}, ${failed.length} failed` : first instanceof ApiError ? first.message : 'Upload failed');
+        } else {
+          setToast(`Uploaded ${ok} file${ok > 1 ? 's' : ''}`);
+        }
+        reload();
+      } finally {
+        setUploading(false);
+      }
+    },
+    [dir, reload, setToast],
+  );
+
+  // Trigger a Save-As download of the selected file via a hidden anchor. The
+  // token-in-query URL + Content-Disposition: attachment does the rest.
+  const downloadSelected = useCallback(() => {
+    const p = selectedRef.current;
+    if (!p) return;
+    const a = document.createElement('a');
+    a.href = api.downloadFileUrl({ host: hostRef.current, path: p });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, []);
+
   // Follow the active session: reset to its cwd when it changes. Warn if this
   // discards unsaved edits.
   useEffect(() => {
@@ -177,7 +223,7 @@ export function FilesPane() {
     return () => {
       cancelled = true;
     };
-  }, [dir, hostArg]);
+  }, [dir, hostArg, reloadKey]);
 
   // Create the CodeMirror view once (the editor div is always mounted, toggled
   // hidden, so this runs against a real element).
@@ -327,10 +373,67 @@ export function FilesPane() {
                 </span>
               ))}
             </div>
+            <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files) void uploadFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                title="Upload files to this folder"
+                className={cn(
+                  'shrink-0 rounded p-1 transition',
+                  uploading ? 'text-slate-500' : 'text-slate-400 hover:bg-ink-800 hover:text-slate-200',
+                )}
+              >
+                {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+              </button>
+              <button
+                onClick={downloadSelected}
+                disabled={!selected}
+                title={selected ? `Download ${basename(selected)}` : 'Select a file to download'}
+                className="shrink-0 rounded p-1 text-slate-400 transition hover:bg-ink-800 hover:text-slate-200 disabled:cursor-default disabled:opacity-40"
+              >
+                <Download className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
 
           {/* Directory listing (height set by the drag handle below) */}
-          <div className="shrink-0 overflow-y-auto" style={{ height: listH }}>
+          <div
+            className={cn(
+              'relative shrink-0 overflow-y-auto',
+              uploading ? 'pointer-events-none opacity-60' : '',
+              dragging ? 'ring-1 ring-inset ring-accent/60' : '',
+            )}
+            style={{ height: listH }}
+            onDragOver={(e) => {
+              if (Array.from(e.dataTransfer.types).includes('Files')) {
+                e.preventDefault();
+                if (!uploading) setDragging(true);
+              }
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              if (e.dataTransfer.files?.length) void uploadFiles(e.dataTransfer.files);
+            }}
+          >
+            {dragging && (
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-ink-900/70 text-[12px] text-accent-soft">
+                Drop files to upload to {basename(dir)}
+              </div>
+            )}
             {listLoading ? (
               <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-slate-500">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…

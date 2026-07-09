@@ -6,7 +6,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { StreamNormalizer } from './normalize.js';
-import { sshConnectPrefix } from '../remote/ssh.js';
+import { REMOTE_STDERR_NOISE, sshConnectPrefix } from '../remote/ssh.js';
 import type { EffortLevel, PermissionDecision, PermissionMode, PermissionRequest } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from './types.js';
 
@@ -24,7 +24,7 @@ export interface RunOptions {
   /** When set, the turn runs on a remote host over SSH via the tunnel wrapper
    *  (still through the Agent SDK, so interactive prompts work remotely).
    *  `cwd` is the remote path. */
-  remote?: { sshTarget: string; cwd: string };
+  remote?: { sshTarget: string; cwd: string; proxy?: string };
 }
 
 /** The SSH-tunnel wrapper the Agent SDK invokes as `claude` for remote turns. */
@@ -41,10 +41,6 @@ function ensureWrapExec(): void {
     try { fs.chmodSync(SSH_WRAP, 0o755); } catch { /* best effort */ }
   }
 }
-
-/** Lines the remote login+interactive shell emits over a non-pty SSH session —
- *  pure noise that would bury the real error. */
-const REMOTE_STDERR_NOISE = /cannot set terminal process group|no job control in this shell|connection to .* closed/i;
 
 /** Read the plan Claude just wrote, so ExitPlanMode can show it for review.
  *  The ExitPlanMode tool input carries only `allowedPrompts` — the plan text
@@ -147,6 +143,9 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
     env.VIBE_REMOTE_CWD = opts.remote.cwd;
     env.VIBE_SSH_BIN = bin;
     env.VIBE_SSH_OPTS = sshOpts.join(' ');
+    // Per-host proxy: the wrapper exports it as HTTP(S)_PROXY on the remote
+    // command so claude routes its API traffic through it.
+    if (opts.remote.proxy) env.VIBE_PROXY = opts.remote.proxy;
     // Stash remote stderr here on failure (see withRemoteDetail). Per-run unique
     // path so concurrent remote turns never collide.
     remoteErrLog = path.join(os.tmpdir(), `vibe-ssh-err-${crypto.randomUUID()}`);
@@ -167,12 +166,19 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
     }
 
     const request: PermissionRequest = { requestId: crypto.randomUUID(), toolName, input, ts: Date.now() };
-    // ExitPlanMode's input has no plan text — it lives in a file on the host
-    // running claude. For local turns that's this machine; for remote turns the
-    // file is on the SSH host and unreadable here, so we leave it undefined and
-    // the prompt falls back to a generic message.
-    if (toolName === 'ExitPlanMode' && !opts.remote) {
-      const plan = readCurrentPlan();
+    // ExitPlanMode: surface the plan for review. Claude ≥2.1 injects the plan
+    // text and its file path into the tool input itself (input.plan /
+    // input.planFilePath), which works for both local and remote (SSH) turns —
+    // the remote claude normalizes the input before it crosses the tunnel, so
+    // the plan is readable here even though the file lives on the remote host.
+    // Older CLIs omit it; fall back to the most-recent ~/.claude/plans file
+    // (local only — the file is unreadable from here on remote turns) so we
+    // still show something instead of the generic message.
+    if (toolName === 'ExitPlanMode') {
+      const inputPlan = typeof (input as { plan?: unknown })?.plan === 'string'
+        ? ((input as { plan?: string }).plan as string).trim()
+        : '';
+      const plan = inputPlan || (!opts.remote ? readCurrentPlan() : undefined);
       if (plan) request.plan = plan;
     }
     const decision = await cb.requestPermission(request);
