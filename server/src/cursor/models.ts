@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { log } from '../log.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { loginShellCommand, proxyEnvPrefix, shQuote, sshExec } from '../remote/ssh.js';
+import { createSwrCache } from '../util/swrCache.js';
 
 export interface CursorModel {
   value: string;
@@ -44,72 +45,61 @@ export function parseModels(out: string): CursorModel[] {
 
 const TTL_MS = 5 * 60_000;
 /** Cache key '' = local; otherwise the remote host name. */
-const caches = new Map<string, { at: number; models: CursorModel[] }>();
+const cache = createSwrCache<CursorModel[]>({
+  ttlMs: TTL_MS,
+  fallback: FALLBACK,
+  isEmpty: (m) => m.length === 0,
+  onError: (key, err) => log.debug('cursor models refresh failed', key || 'local', err),
+});
 
-function cachedOrFallback(key: string): CursorModel[] {
-  return caches.get(key)?.models ?? FALLBACK;
+async function fetchLocal(): Promise<CursorModel[] | null> {
+  const bin = config.cursorExecutable;
+  if (!bin) return null;
+  const out = await new Promise<string>((resolve, reject) => {
+    execFile(bin, ['models'], { timeout: 15_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout);
+    });
+  });
+  return parseModels(out);
 }
 
-function storeCache(key: string, models: CursorModel[]): CursorModel[] {
-  caches.set(key, { at: Date.now(), models });
+async function fetchRemote(hostName: string): Promise<CursorModel[] | null> {
+  const host = hostRegistry.get(hostName);
+  if (!host) return fetchLocal();
+  const remoteCmd = proxyEnvPrefix(proxyForAgent(host, 'cursor')) + loginShellCommand(`cursor-agent ${shQuote('models')}`);
+  const res = await sshExec(host.ssh, remoteCmd, { timeoutMs: 20_000 });
+  const models = parseModels(res.stdout);
+  if (!models.length) {
+    log.debug('remote cursor models empty', host.name, res.stderr.slice(0, 200));
+    return null;
+  }
   return models;
 }
 
-/** Drop a host's (or local '') cached model list — e.g. after its proxy changes. */
+/** Drop a host's (or local '') freshness — keep last value, refresh on next serve. */
 export function invalidateCursorModelsCache(hostName?: string): void {
-  caches.delete(hostName ?? '');
+  cache.invalidate(hostName ?? '');
 }
 
-/** List the Cursor models the installed CLI exposes (cached ~5 min). */
+/** List the Cursor models the installed CLI exposes. Never blocks on the CLI. */
 export async function listCursorModels(): Promise<CursorModel[]> {
-  const key = '';
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.models;
-  const bin = config.cursorExecutable;
-  if (!bin) return FALLBACK;
-  try {
-    const out = await new Promise<string>((resolve, reject) => {
-      execFile(bin, ['models'], { timeout: 15_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-        if (err) reject(err);
-        else resolve(stdout);
-      });
-    });
-    const models = parseModels(out);
-    if (!models.length) return cachedOrFallback(key);
-    return storeCache(key, models);
-  } catch (err) {
-    log.debug('cursor models list failed', err);
-    return cachedOrFallback(key);
-  }
+  return cache.serve('', fetchLocal);
 }
 
 /**
  * List Cursor models as seen from a remote host (over SSH), with that host's
  * per-host proxy injected — the same env the agent turn uses. Region-gated
  * models (e.g. grok behind some egress IPs) then disappear from the picker
- * instead of failing only at send time. Cached ~5 min per host name.
+ * instead of failing only at send time. Never blocks on SSH.
  */
 export async function listRemoteCursorModels(hostName: string): Promise<CursorModel[]> {
-  const host = hostRegistry.get(hostName);
-  if (!host) return listCursorModels();
+  if (!hostRegistry.get(hostName)) return listCursorModels();
+  return cache.serve(hostName, () => fetchRemote(hostName));
+}
 
-  const key = host.name;
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.models;
-
-  const remoteCmd = proxyEnvPrefix(proxyForAgent(host, 'cursor')) + loginShellCommand(`cursor-agent ${shQuote('models')}`);
-  try {
-    const res = await sshExec(host.ssh, remoteCmd, { timeoutMs: 20_000 });
-    // `cursor-agent models` prints the list on stdout even when some variants
-    // are filtered; a non-zero exit with empty stdout is a hard failure.
-    const models = parseModels(res.stdout);
-    if (!models.length) {
-      log.debug('remote cursor models empty', host.name, res.stderr.slice(0, 200));
-      return cachedOrFallback(key);
-    }
-    return storeCache(key, models);
-  } catch (err) {
-    log.debug('remote cursor models list failed', host.name, err);
-    return cachedOrFallback(key);
-  }
+/** Warm local (and optionally remote) caches in the background. */
+export function prefetchCursorModels(hostNames: string[] = []): void {
+  cache.refresh('', fetchLocal);
+  for (const name of hostNames) cache.refresh(name, () => fetchRemote(name));
 }

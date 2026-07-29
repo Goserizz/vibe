@@ -7,14 +7,28 @@ import { clearRemoteDiscoveryCache } from '../remote/discovery.js';
  *
  * No TTL: load once (or after host-registry change), then keep in sync via
  * upsert / patch / remove when sessions are created, updated, or deleted.
+ *
+ * Invalidate never drops the session list — it only clears per-host SSH
+ * discovery results and asks the refresher to rebuild in the background.
+ * `/sessions` always serves the last known list (or a sync store seed) so
+ * clients never wait on a cold SSH round-trip.
  */
 
 let cached: SessionMeta[] | null = null;
 let inflight: Promise<SessionMeta[]> | null = null;
 
+/** Optional hook installed by sessions/list.ts (avoids a hosts↔list cycle). */
+let onInvalidate: (() => void) | null = null;
+
+export function setSessionListInvalidateHook(fn: (() => void) | null): void {
+  onInvalidate = fn;
+}
+
+/** Drop remote discovery results and schedule a background rebuild. Keeps the
+ *  last session list so HTTP clients keep getting a warm response. */
 export function invalidateSessionListCache(): void {
-  cached = null;
   clearRemoteDiscoveryCache();
+  onInvalidate?.();
 }
 
 export function peekSessionListCache(): SessionMeta[] | null {

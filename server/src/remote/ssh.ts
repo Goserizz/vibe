@@ -1,4 +1,8 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { config } from '../config.js';
 
 /** Connection options: never block on prompts, fail fast, stay alive.
@@ -14,6 +18,31 @@ const CONNECT_OPTS = [
 ];
 /** For one-shot exec: no PTY (`-T`). */
 const COMMON_OPTS = ['-T', ...CONNECT_OPTS];
+
+// SSH connection multiplexing: reuse a single authenticated TCP connection per
+// host across calls. The first dial pays the full handshake (~2–6s on a remote
+// host); every subsequent sshExec to the same target within the persist window
+// is near-instant. This is what makes the 60s session-list background refresh
+// cheap instead of re-handshaking every host on each tick.
+const MUX_DIR = path.join(tmpdir(), 'vibe-ssh-mux');
+let muxDirReady = false;
+
+/** Per-target ControlMaster options. Deterministic socket path (sha1 of the
+ *  target) so masters are reused across calls and even across restarts. Returns
+ *  an empty list if the socket dir can't be created — ssh then just opens a
+ *  fresh connection, so discovery degrades gracefully to today's behavior. */
+function muxOpts(target: string): string[] {
+  if (!muxDirReady) {
+    try {
+      mkdirSync(MUX_DIR, { recursive: true, mode: 0o700 });
+      muxDirReady = true;
+    } catch {
+      return [];
+    }
+  }
+  const h = createHash('sha1').update(target).digest('hex').slice(0, 16);
+  return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${MUX_DIR}/mux-${h}`, '-o', 'ControlPersist=300'];
+}
 
 function sshBin(): { bin: string; base: string[] } {
   // `sshCommand` is usually just "ssh" but can be overridden (custom options/testing).
@@ -31,13 +60,13 @@ export function sshConnectPrefix(): { bin: string; opts: string[] } {
 
 function sshArgv(target: string, remoteCmd: string): { bin: string; args: string[] } {
   const { bin, base } = sshBin();
-  return { bin, args: [...base, ...COMMON_OPTS, target, remoteCmd] };
+  return { bin, args: [...base, ...COMMON_OPTS, ...muxOpts(target), target, remoteCmd] };
 }
 
 /** Argv for an interactive terminal: force a remote PTY (`-tt`). */
 export function sshTerminalArgv(target: string, remoteCmd: string): { bin: string; args: string[] } {
   const { bin, base } = sshBin();
-  return { bin, args: [...base, '-tt', ...CONNECT_OPTS, target, remoteCmd] };
+  return { bin, args: [...base, '-tt', ...CONNECT_OPTS, ...muxOpts(target), target, remoteCmd] };
 }
 
 export interface SshResult {

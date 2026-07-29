@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { log } from '../log.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, sshExec } from '../remote/ssh.js';
+import { createSwrCache } from '../util/swrCache.js';
 
 export interface CodexModel {
   value: string;
@@ -65,68 +66,63 @@ function parseCache(raw: string): CodexModel[] {
 
 const TTL_MS = 5 * 60_000;
 /** Cache key '' = local; otherwise the remote host name. */
-const caches = new Map<string, { at: number; models: CodexModel[] }>();
+const cache = createSwrCache<CodexModel[]>({
+  ttlMs: TTL_MS,
+  fallback: FALLBACK,
+  // Only `auto` ⇒ miss (fresh install / unreadable cache).
+  isEmpty: (m) => m.length <= 1,
+  onError: (key, err) => log.debug('codex models refresh failed', key || 'local', err),
+});
 
-function cachedOrFallback(key: string): CodexModel[] {
-  return caches.get(key)?.models ?? FALLBACK;
-}
-
-function storeCache(key: string, models: CodexModel[]): CodexModel[] {
-  caches.set(key, { at: Date.now(), models });
-  return models;
-}
-
-/** Drop a host's (or local '') cached model list — e.g. after its proxy changes. */
-export function invalidateCodexModelsCache(hostName?: string): void {
-  caches.delete(hostName ?? '');
-}
-
-/** List the Codex models the installed CLI advertises (cached ~5 min). Reads the
- *  local ~/.codex/models_cache.json — no `codex models` subcommand exists. */
-export function listCodexModels(): CodexModel[] {
-  const key = '';
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.models;
+function fetchLocal(): Promise<CodexModel[] | null> {
   try {
     const raw = fs.readFileSync(config.codexModelsCacheFile, 'utf8');
-    const models = parseCache(raw);
-    if (models.length > 1) return storeCache(key, models);
+    return Promise.resolve(parseCache(raw));
   } catch (err) {
     log.debug('codex models cache read failed', err);
+    return Promise.resolve(null);
   }
-  return cachedOrFallback(key);
 }
 
-/**
- * List Codex models as seen from a remote host (over SSH), reading that host's
- * ~/.codex/models_cache.json with its per-host proxy injected — the same egress
- * the agent turn uses. Codex only writes this cache after it has fetched from its
- * provider, so on a fresh remote install the picker falls back until `codex` has
- * been run there once. Cached ~5 min per host name.
- */
-export async function listRemoteCodexModels(hostName: string): Promise<CodexModel[]> {
+async function fetchRemote(hostName: string): Promise<CodexModel[] | null> {
   const host = hostRegistry.get(hostName);
-  if (!host) return listCodexModels();
-
-  const key = host.name;
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.models;
-
+  if (!host) return fetchLocal();
   // `cat` over a login shell so $HOME resolves; the proxy prefix matches the
   // agent turn's egress. Silence `cat`'s own "no such file" — an empty result is
   // handled below as a cache miss (fresh install that hasn't run codex yet).
   const inner = 'cat "$HOME/.codex/models_cache.json" 2>/dev/null';
   const remoteCmd = proxyEnvPrefix(proxyForAgent(host, 'codex')) + loginShellCommand(inner);
-  try {
-    const res = await sshExec(host.ssh, remoteCmd, { timeoutMs: 20_000 });
-    const models = parseCache(res.stdout);
-    if (models.length <= 1) {
-      log.debug('remote codex models empty', host.name, cleanRemoteStderr(res.stderr).slice(0, 200));
-      return cachedOrFallback(key);
-    }
-    return storeCache(key, models);
-  } catch (err) {
-    log.debug('remote codex models read failed', host.name, err);
-    return cachedOrFallback(key);
+  const res = await sshExec(host.ssh, remoteCmd, { timeoutMs: 20_000 });
+  const models = parseCache(res.stdout);
+  if (models.length <= 1) {
+    log.debug('remote codex models empty', host.name, cleanRemoteStderr(res.stderr).slice(0, 200));
+    return null;
   }
+  return models;
+}
+
+/** Drop a host's (or local '') freshness — keep last value, refresh on next serve. */
+export function invalidateCodexModelsCache(hostName?: string): void {
+  cache.invalidate(hostName ?? '');
+}
+
+/** List the Codex models the installed CLI advertises. Local file read is sync-fast;
+ *  still goes through SWR so callers share one code path. Never blocks on SSH. */
+export function listCodexModels(): CodexModel[] {
+  return cache.serve('', fetchLocal);
+}
+
+/**
+ * List Codex models as seen from a remote host (over SSH), reading that host's
+ * ~/.codex/models_cache.json with its per-host proxy injected. Never blocks on SSH.
+ */
+export async function listRemoteCodexModels(hostName: string): Promise<CodexModel[]> {
+  if (!hostRegistry.get(hostName)) return listCodexModels();
+  return cache.serve(hostName, () => fetchRemote(hostName));
+}
+
+/** Warm local (and optionally remote) caches in the background. */
+export function prefetchCodexModels(hostNames: string[] = []): void {
+  cache.refresh('', fetchLocal);
+  for (const name of hostNames) cache.refresh(name, () => fetchRemote(name));
 }

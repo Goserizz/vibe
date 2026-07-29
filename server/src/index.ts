@@ -8,7 +8,8 @@ import { log } from './log.js';
 import { createApiRouter } from './http/api.js';
 import { attachWsServer } from './ws/server.js';
 import { startTelegramBot } from './telegram/index.js';
-import { prefetchSessionList } from './sessions/list.js';
+import { prefetchSessionList, startSessionListRefresher, stopSessionListRefresher } from './sessions/list.js';
+import { prefetchAgentModels } from './agents/prefetchModels.js';
 
 function localIPs(): string[] {
   const out: string[] = [];
@@ -67,6 +68,8 @@ function main(): void {
   server.listen(config.port, config.host, () => {
     banner();
     prefetchSessionList();
+    startSessionListRefresher();
+    prefetchAgentModels();
     telegram = startTelegramBot();
   });
 
@@ -79,6 +82,7 @@ function main(): void {
   // systemd restart doesn't hang waiting for the old process.
   const shutdown = async (signal: string) => {
     log.info(`shutting down (${signal})…`);
+    stopSessionListRefresher();
     try {
       await telegram?.stop();
     } catch (err) {

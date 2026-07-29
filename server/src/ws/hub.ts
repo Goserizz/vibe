@@ -698,6 +698,12 @@ export class Hub {
     for (const conn of this.conns) conn.send({ t: 'session_removed', sessionId });
   }
 
+  /** Tell clients a row left the sidebar list (e.g. discovery refresh). Unlike
+   *  broadcastRemoved, this does not tear down an active runtime. */
+  broadcastSessionGone(sessionId: string): void {
+    for (const conn of this.conns) conn.send({ t: 'session_removed', sessionId });
+  }
+
   /** Drop idle runtimes that nobody is watching to bound memory. */
   private gc(): void {
     for (const [id, rt] of this.runtimes) {

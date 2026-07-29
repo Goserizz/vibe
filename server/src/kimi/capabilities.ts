@@ -4,6 +4,7 @@ import { log } from '../log.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, shQuote, sshExec } from '../remote/ssh.js';
 import type { PermissionMode } from '../../../shared/protocol.js';
+import { createSwrCache } from '../util/swrCache.js';
 
 export interface KimiModelOption {
   value: string;
@@ -30,12 +31,16 @@ const PROMPT_PERMISSION: KimiPermissionOption = {
   hint: 'Kimi prompt mode auto-runs allowed tools',
 };
 
-const TTL_MS = 5 * 60_000;
-const caches = new Map<string, { at: number; capabilities: KimiCapabilities }>();
-
 function fallback(): KimiCapabilities {
   return { models: [AUTO_MODEL], permissions: [PROMPT_PERMISSION], acp: false };
 }
+
+const TTL_MS = 5 * 60_000;
+const cache = createSwrCache<KimiCapabilities>({
+  ttlMs: TTL_MS,
+  fallback: fallback(),
+  onError: (key, err) => log.debug('kimi capabilities refresh failed', key || 'local', err),
+});
 
 /** Parse the credential-bearing `provider list --json` document without ever
  * returning/logging its provider table. Only configured model aliases escape. */
@@ -118,43 +123,26 @@ function mergeDiscovery(modelsRaw: string, help: string, previous?: KimiCapabili
   };
 }
 
-/** Drop a host's (or local '') cached capabilities after upgrades/config changes. */
-export function invalidateKimiCapabilitiesCache(hostName?: string): void {
-  caches.delete(hostName ?? '');
-}
-
-/** Models and permission modes advertised by the local Kimi installation. */
-export async function discoverKimiCapabilities(): Promise<KimiCapabilities> {
-  const key = '';
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.capabilities;
-  if (!config.kimiExecutable) return hit?.capabilities ?? fallback();
-
+async function fetchLocal(): Promise<KimiCapabilities | null> {
+  if (!config.kimiExecutable) return null;
+  const previous = cache.peek('');
   const [modelsResult, helpResult] = await Promise.allSettled([
     execKimi(['provider', 'list', '--json']),
     execKimi(['--help']),
   ]);
-  const capabilities = mergeDiscovery(
-    modelsResult.status === 'fulfilled' ? modelsResult.value : '',
-    helpResult.status === 'fulfilled' ? helpResult.value : '',
-    hit?.capabilities,
-  );
   if (modelsResult.status === 'rejected') log.debug('kimi model discovery failed', modelsResult.reason);
   if (helpResult.status === 'rejected') log.debug('kimi permission discovery failed', helpResult.reason);
-  caches.set(key, { at: Date.now(), capabilities });
-  return capabilities;
+  return mergeDiscovery(
+    modelsResult.status === 'fulfilled' ? modelsResult.value : '',
+    helpResult.status === 'fulfilled' ? helpResult.value : '',
+    previous,
+  );
 }
 
-/** Discover capabilities from the Kimi installation on an SSH host. */
-export async function discoverRemoteKimiCapabilities(hostName: string): Promise<KimiCapabilities> {
+async function fetchRemote(hostName: string): Promise<KimiCapabilities | null> {
   const host = hostRegistry.get(hostName);
-  if (!host) return discoverKimiCapabilities();
-  const key = host.name;
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.capabilities;
-
-  // Route discovery through Kimi's per-agent proxy (if set) — the same egress a
-  // Kimi turn uses, so configured aliases match what a turn can actually reach.
+  if (!host) return fetchLocal();
+  const previous = cache.peek(host.name);
   const proxyPrefix = proxyEnvPrefix(proxyForAgent(host, 'kimi'));
   const [modelsResult, helpResult] = await Promise.allSettled([
     sshExec(host.ssh, proxyPrefix + loginShellCommand(remoteInvocation(['provider', 'list', '--json'])), { timeoutMs: 20_000 }),
@@ -162,8 +150,6 @@ export async function discoverRemoteKimiCapabilities(hostName: string): Promise<
   ]);
   const modelsRaw = modelsResult.status === 'fulfilled' && modelsResult.value.code === 0 ? modelsResult.value.stdout : '';
   const help = helpResult.status === 'fulfilled' && helpResult.value.code === 0 ? helpResult.value.stdout : '';
-  const capabilities = mergeDiscovery(modelsRaw, help, hit?.capabilities);
-
   if (!modelsRaw) {
     const detail = modelsResult.status === 'fulfilled' ? cleanRemoteStderr(modelsResult.value.stderr) : String(modelsResult.reason);
     log.debug('remote kimi model discovery failed', host.name, detail.slice(0, 200));
@@ -172,6 +158,27 @@ export async function discoverRemoteKimiCapabilities(hostName: string): Promise<
     const detail = helpResult.status === 'fulfilled' ? cleanRemoteStderr(helpResult.value.stderr) : String(helpResult.reason);
     log.debug('remote kimi permission discovery failed', host.name, detail.slice(0, 200));
   }
-  caches.set(key, { at: Date.now(), capabilities });
-  return capabilities;
+  return mergeDiscovery(modelsRaw, help, previous);
+}
+
+/** Drop a host's (or local '') freshness — keep last value, refresh on next serve. */
+export function invalidateKimiCapabilitiesCache(hostName?: string): void {
+  cache.invalidate(hostName ?? '');
+}
+
+/** Models and permission modes advertised by the local Kimi installation. Never blocks. */
+export async function discoverKimiCapabilities(): Promise<KimiCapabilities> {
+  return cache.serve('', fetchLocal);
+}
+
+/** Discover capabilities from the Kimi installation on an SSH host. Never blocks. */
+export async function discoverRemoteKimiCapabilities(hostName: string): Promise<KimiCapabilities> {
+  if (!hostRegistry.get(hostName)) return discoverKimiCapabilities();
+  return cache.serve(hostName, () => fetchRemote(hostName));
+}
+
+/** Warm local (and optionally remote) caches in the background. */
+export function prefetchKimiCapabilities(hostNames: string[] = []): void {
+  cache.refresh('', fetchLocal);
+  for (const name of hostNames) cache.refresh(name, () => fetchRemote(name));
 }

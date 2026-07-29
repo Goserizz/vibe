@@ -4,6 +4,7 @@ import { log } from '../log.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, shQuote, sshExec } from '../remote/ssh.js';
 import type { PermissionMode } from '../../../shared/protocol.js';
+import { createSwrCache } from '../util/swrCache.js';
 
 export interface KiroModelOption {
   value: string;
@@ -29,7 +30,12 @@ export const KIRO_PERMISSIONS: KiroPermissionOption[] = [
 const FALLBACK: KiroModelOption[] = [AUTO_MODEL];
 
 const TTL_MS = 5 * 60_000;
-const caches = new Map<string, { at: number; models: KiroModelOption[] }>();
+const cache = createSwrCache<KiroModelOption[]>({
+  ttlMs: TTL_MS,
+  fallback: FALLBACK,
+  isEmpty: (m) => m.length === 0,
+  onError: (key, err) => log.debug('kiro models refresh failed', key || 'local', err),
+});
 
 /** Parse `kiro-cli chat --list-models --format json`. */
 export function parseKiroModels(raw: string): KiroModelOption[] {
@@ -61,19 +67,6 @@ export function parseKiroModels(raw: string): KiroModelOption[] {
   return models;
 }
 
-function cachedOrFallback(key: string): KiroModelOption[] {
-  return caches.get(key)?.models ?? FALLBACK;
-}
-
-function storeCache(key: string, models: KiroModelOption[]): KiroModelOption[] {
-  caches.set(key, { at: Date.now(), models });
-  return models;
-}
-
-export function invalidateKiroModelsCache(hostName?: string): void {
-  caches.delete(hostName ?? '');
-}
-
 function execKiro(args: string[]): Promise<string> {
   const bin = config.kiroExecutable;
   if (!bin) return Promise.reject(new Error('kiro-cli not found'));
@@ -96,47 +89,46 @@ function remoteInvocation(args: string[]): string {
   ].join('\n');
 }
 
-/** Models advertised by the local Kiro CLI (cached ~5 min). */
-export async function listKiroModels(): Promise<KiroModelOption[]> {
-  const key = '';
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.models;
-  if (!config.kiroExecutable) return FALLBACK;
-  try {
-    const out = await execKiro(['chat', '--list-models', '--format', 'json']);
-    const models = parseKiroModels(out);
-    if (!models.length) return cachedOrFallback(key);
-    return storeCache(key, models);
-  } catch (err) {
-    log.debug('kiro models list failed', err);
-    return cachedOrFallback(key);
-  }
+async function fetchLocal(): Promise<KiroModelOption[] | null> {
+  if (!config.kiroExecutable) return null;
+  const out = await execKiro(['chat', '--list-models', '--format', 'json']);
+  return parseKiroModels(out);
 }
 
-/** Models from a remote host's Kiro CLI (with that host's per-agent proxy). */
-export async function listRemoteKiroModels(hostName: string): Promise<KiroModelOption[]> {
+async function fetchRemote(hostName: string): Promise<KiroModelOption[] | null> {
   const host = hostRegistry.get(hostName);
-  if (!host) return listKiroModels();
-
-  const key = host.name;
-  const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.models;
-
+  if (!host) return fetchLocal();
   const proxyPrefix = proxyEnvPrefix(proxyForAgent(host, 'kiro'));
-  try {
-    const res = await sshExec(
-      host.ssh,
-      proxyPrefix + loginShellCommand(remoteInvocation(['chat', '--list-models', '--format', 'json'])),
-      { timeoutMs: 25_000 },
-    );
-    const models = parseKiroModels(res.stdout);
-    if (!models.length) {
-      log.debug('remote kiro models empty', host.name, cleanRemoteStderr(res.stderr).slice(0, 200));
-      return cachedOrFallback(key);
-    }
-    return storeCache(key, models);
-  } catch (err) {
-    log.debug('remote kiro models list failed', host.name, err);
-    return cachedOrFallback(key);
+  const res = await sshExec(
+    host.ssh,
+    proxyPrefix + loginShellCommand(remoteInvocation(['chat', '--list-models', '--format', 'json'])),
+    { timeoutMs: 25_000 },
+  );
+  const models = parseKiroModels(res.stdout);
+  if (!models.length) {
+    log.debug('remote kiro models empty', host.name, cleanRemoteStderr(res.stderr).slice(0, 200));
+    return null;
   }
+  return models;
+}
+
+export function invalidateKiroModelsCache(hostName?: string): void {
+  cache.invalidate(hostName ?? '');
+}
+
+/** Models advertised by the local Kiro CLI. Never blocks on the CLI. */
+export async function listKiroModels(): Promise<KiroModelOption[]> {
+  return cache.serve('', fetchLocal);
+}
+
+/** Models from a remote host's Kiro CLI. Never blocks on SSH. */
+export async function listRemoteKiroModels(hostName: string): Promise<KiroModelOption[]> {
+  if (!hostRegistry.get(hostName)) return listKiroModels();
+  return cache.serve(hostName, () => fetchRemote(hostName));
+}
+
+/** Warm local (and optionally remote) caches in the background. */
+export function prefetchKiroModels(hostNames: string[] = []): void {
+  cache.refresh('', fetchLocal);
+  for (const name of hostNames) cache.refresh(name, () => fetchRemote(name));
 }

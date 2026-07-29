@@ -3,7 +3,7 @@ import { autoRetry } from '@grammyjs/auto-retry';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
-import { listAllSessions, prefetchSessionList } from '../sessions/list.js';
+import { awaitFullSessionList, prefetchSessionList } from '../sessions/list.js';
 import { getRecentProjects } from '../projects.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { hub } from '../ws/hub.js';
@@ -127,7 +127,7 @@ function sessionsKeyboard(sessions: SessionMeta[], page: number, activeId?: stri
 async function replySessionList(ctx: BotContext, page = 0): Promise<void> {
   const chatId = ctx.chat?.id;
   if (chatId == null) return;
-  const sessions = await listAllSessions();
+  const sessions = await awaitFullSessionList();
   listCache.set(chatId, sessions);
   const activeId = telegramState.get(chatId).sessionId;
   if (sessions.length === 0) {
@@ -154,7 +154,7 @@ async function getActiveMeta(chatId: number): Promise<SessionMeta | undefined> {
   if (!id) return undefined;
   const stored = sessionStore.get(id);
   if (stored) return toMeta(stored, hub.isRunning(id));
-  const sessions = listCache.get(chatId) ?? (await listAllSessions());
+  const sessions = listCache.get(chatId) ?? (await awaitFullSessionList());
   listCache.set(chatId, sessions);
   return sessions.find((s) => s.id === id);
 }
@@ -238,7 +238,7 @@ export function startTelegramBot(): { stop: () => Promise<void> } | null {
       await replyHtml(ctx, 'Usage: /use &lt;n|id&gt; — see /sessions');
       return;
     }
-    if (!listCache.has(chatId)) listCache.set(chatId, await listAllSessions());
+    if (!listCache.has(chatId)) listCache.set(chatId, await awaitFullSessionList());
     const meta = resolveSessionRef(chatId, ref);
     if (!meta) {
       await replyPlain(ctx, 'Session not found. Run /sessions and try again.');
@@ -412,7 +412,7 @@ export function startTelegramBot(): { stop: () => Promise<void> } | null {
     const chatId = ctx.chat?.id;
     if (chatId == null) return;
     const n = Number(ctx.match![1]);
-    if (!listCache.has(chatId)) listCache.set(chatId, await listAllSessions());
+    if (!listCache.has(chatId)) listCache.set(chatId, await awaitFullSessionList());
     const meta = resolveSessionRef(chatId, String(n));
     if (!meta) {
       await ctx.answerCallbackQuery({ text: 'Stale list — run /sessions', show_alert: true });
@@ -436,7 +436,7 @@ export function startTelegramBot(): { stop: () => Promise<void> } | null {
     // Edit the original list message when possible.
     const chatId = ctx.chat?.id;
     if (chatId == null) return;
-    const sessions = listCache.get(chatId) ?? (await listAllSessions());
+    const sessions = listCache.get(chatId) ?? (await awaitFullSessionList());
     listCache.set(chatId, sessions);
     const activeId = telegramState.get(chatId).sessionId;
     const start = page * PAGE_SIZE;

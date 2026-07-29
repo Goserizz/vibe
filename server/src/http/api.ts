@@ -29,6 +29,7 @@ import {
   listKiroModels,
   listRemoteKiroModels,
 } from '../kiro/models.js';
+import { prefetchAgentModels } from '../agents/prefetchModels.js';
 import { deleteKiroTranscript } from '../kiro/transcript.js';
 import { searchConversations } from '../sessions/search.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
@@ -732,7 +733,10 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid host' });
       return;
     }
-    res.json({ host: hostRegistry.add(parsed.data) });
+    const host = hostRegistry.add(parsed.data);
+    // Warm remote model caches so the new-session picker never waits on SSH.
+    prefetchAgentModels([host.name]);
+    res.json({ host });
   });
 
   // Patch an existing host's ssh target and/or proxy (e.g. set/clear the proxy
@@ -760,6 +764,9 @@ export function createApiRouter(): Router {
     if (proxyChanged) {
       invalidateCursorModelsCache(updated.name);
       invalidateCodexModelsCache(updated.name);
+    }
+    if (parsed.data.ssh !== undefined || proxyChanged) {
+      prefetchAgentModels([updated.name]);
     }
     res.json({ host: updated });
   });
@@ -900,6 +907,8 @@ export function createApiRouter(): Router {
       }
       if (agentParam === 'kimi') invalidateKimiCapabilitiesCache(isLocal ? undefined : name);
       if (agentParam === 'kiro') invalidateKiroModelsCache(isLocal ? undefined : name);
+      // Re-warm in the background; the update response itself stays snappy.
+      prefetchAgentModels(isLocal ? [] : [name]);
       res.json(result);
     } catch (err) {
       log.warn('agent update failed', err);

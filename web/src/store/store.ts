@@ -31,6 +31,16 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toStr
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let searchReqId = 0;
 
+// Model discovery is stale-while-revalidate on the server: the first response
+// may be a fallback while a background CLI/SSH refresh runs. Generations discard
+// stale re-pulls when the user switches host quickly; a short follow-up fetch
+// picks up the warmed cache.
+let cursorModelsGen = 0;
+let codexModelsGen = 0;
+let kimiModelsGen = 0;
+let kiroModelsGen = 0;
+const MODEL_REPULL_MS = 2_500;
+
 // Sessions the user aborted this turn. Their end-of-turn chime is suppressed
 // (they stopped it themselves, so no need to notify). Consumed by the next
 // run_state for that session; cleared if a fresh turn starts instead.
@@ -324,14 +334,17 @@ export const useStore = create<StoreState>((set, get) => {
         get().refreshSessions(),
         get().loadProjects(),
         get().loadHosts(),
-        get().loadCursorModels(),
-        get().loadCodexModels(),
-        get().loadKimiCapabilities(),
-        get().loadKiroModels(),
         get().loadMcp(),
         get().loadPresets(),
       ]);
       set({ phase: 'ready' });
+
+      // Model lists never gate the splash — server serves cache/fallback instantly
+      // and refreshes CLIs in the background; these fill the pickers when ready.
+      void get().loadCursorModels();
+      void get().loadCodexModels();
+      void get().loadKimiCapabilities();
+      void get().loadKiroModels();
 
       const { sessions, activeId } = get();
       if (!activeId && sessions.length > 0) void get().openSession(sessions[0].id);
@@ -363,39 +376,79 @@ export const useStore = create<StoreState>((set, get) => {
     },
 
     async loadCursorModels(host?: string) {
+      const gen = ++cursorModelsGen;
       try {
         const cursorModels = await api.listCursorModels(host);
-        set({ cursorModels });
+        if (gen === cursorModelsGen) set({ cursorModels });
       } catch {
         /* ignore — the picker falls back to a small static list */
       }
+      window.setTimeout(() => {
+        if (gen !== cursorModelsGen) return;
+        void api
+          .listCursorModels(host)
+          .then((cursorModels) => {
+            if (gen === cursorModelsGen) set({ cursorModels });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
     },
 
     async loadCodexModels(host?: string) {
+      const gen = ++codexModelsGen;
       try {
         const codexModels = await api.listCodexModels(host);
-        set({ codexModels });
+        if (gen === codexModelsGen) set({ codexModels });
       } catch {
         /* ignore — the picker falls back to a small static list */
       }
+      window.setTimeout(() => {
+        if (gen !== codexModelsGen) return;
+        void api
+          .listCodexModels(host)
+          .then((codexModels) => {
+            if (gen === codexModelsGen) set({ codexModels });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
     },
 
     async loadKimiCapabilities(host?: string) {
+      const gen = ++kimiModelsGen;
       try {
         const { models, permissions } = await api.getKimiCapabilities(host);
-        set({ kimiModels: models, kimiPermissionModes: permissions });
+        if (gen === kimiModelsGen) set({ kimiModels: models, kimiPermissionModes: permissions });
       } catch {
         /* ignore — selectors retain their conservative prompt-mode fallback */
       }
+      window.setTimeout(() => {
+        if (gen !== kimiModelsGen) return;
+        void api
+          .getKimiCapabilities(host)
+          .then(({ models, permissions }) => {
+            if (gen === kimiModelsGen) set({ kimiModels: models, kimiPermissionModes: permissions });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
     },
 
     async loadKiroModels(host?: string) {
+      const gen = ++kiroModelsGen;
       try {
         const { models, permissions } = await api.listKiroModels(host);
-        set({ kiroModels: models, kiroPermissionModes: permissions });
+        if (gen === kiroModelsGen) set({ kiroModels: models, kiroPermissionModes: permissions });
       } catch {
         /* ignore — picker falls back to Auto + static permission modes */
       }
+      window.setTimeout(() => {
+        if (gen !== kiroModelsGen) return;
+        void api
+          .listKiroModels(host)
+          .then(({ models, permissions }) => {
+            if (gen === kiroModelsGen) set({ kiroModels: models, kiroPermissionModes: permissions });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
     },
 
     async loadHosts() {
