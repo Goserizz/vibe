@@ -18,10 +18,25 @@ import {
   readCodexRolloutTranscript,
   readCodexTranscript,
 } from '../codex/transcript.js';
+import { startKimiRun } from '../kimi/runner.js';
+import { resolveKimiSessionSync } from '../kimi/discovery.js';
+import {
+  appendKimiBlocks,
+  readKimiTranscript,
+  readKimiWireTranscript,
+} from '../kimi/transcript.js';
+import { startKiroRun } from '../kiro/runner.js';
+import { resolveKiroSessionSync } from '../kiro/discovery.js';
+import {
+  appendKiroBlocks,
+  readKiroNativeTranscript,
+  readKiroTranscript,
+} from '../kiro/transcript.js';
 import { readTranscriptBlocks } from '../sessions/transcript.js';
 import { resolveClaudeSessionSync } from '../sessions/discovery.js';
 import { readRemoteTranscript } from '../remote/discovery.js';
-import { hostRegistry } from '../remote/hosts.js';
+import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
+import { mcpRegistry } from '../mcp/registry.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import type {
@@ -29,10 +44,12 @@ import type {
   ChatBlock,
   EffortLevel,
   LiveEvent,
+  McpServerDef,
   PermissionDecision,
   PermissionMode,
   PermissionRequest,
   ServerEvent,
+  SessionMeta,
 } from '../../../shared/protocol.js';
 
 interface RuntimeInit {
@@ -69,19 +86,45 @@ const LOG_CAP = 5000;
  *  reconciled by the authoritative `block` event), but never structural ones. */
 const DELTA_BACKPRESSURE_BYTES = 512 * 1024;
 
-export class Conn {
+/**
+ * A live-event subscriber. Web clients use {@link WsConn}; in-process consumers
+ * (e.g. the Telegram bot) use {@link CallbackConn}.
+ */
+export abstract class Conn {
   readonly id = crypto.randomUUID();
   readonly subscriptions = new Set<string>();
 
-  constructor(readonly ws: WebSocket) {}
+  abstract send(msg: ServerEvent): void;
+
+  /** Outbound socket backlog; non-WS conns report 0 so deltas are never dropped. */
+  get bufferedAmount(): number {
+    return 0;
+  }
+}
+
+export class WsConn extends Conn {
+  constructor(readonly ws: WebSocket) {
+    super();
+  }
 
   send(msg: ServerEvent): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(msg));
   }
 
-  get bufferedAmount(): number {
+  override get bufferedAmount(): number {
     return this.ws.bufferedAmount;
+  }
+}
+
+/** In-process subscriber — used by the Telegram bot (and any future adapters). */
+export class CallbackConn extends Conn {
+  constructor(private readonly onMsg: (msg: ServerEvent) => void) {
+    super();
+  }
+
+  send(msg: ServerEvent): void {
+    this.onMsg(msg);
   }
 }
 
@@ -118,7 +161,7 @@ class SessionRuntime {
   private runBaseSeq = 0;
   private baselineClaudeSessionId?: string;
   private run?: RunHandle;
-  /** Cursor sessions persist their own transcript; this accumulates the turn. */
+  /** Headless CLI sessions persist normalized transcripts; this accumulates the turn. */
   private transcript?: CursorTranscriptBuilder;
   private turnStartBlocks = 0;
 
@@ -137,15 +180,25 @@ class SessionRuntime {
     this.host = init.host;
     this.sshTarget = init.sshTarget;
     this.proxy = init.proxy;
-    // Cursor and Codex both self-persist via the shared LiveEvent→blocks accumulator.
-    if (this.agent === 'cursor' || this.agent === 'codex') this.transcript = new CursorTranscriptBuilder();
+    // Headless CLI agents self-persist through the shared LiveEvent→blocks accumulator.
+    if (this.agent === 'cursor' || this.agent === 'codex' || this.agent === 'kimi' || this.agent === 'kiro') {
+      this.transcript = new CursorTranscriptBuilder();
+    }
+    // Preserve the existing history before a native Kimi/Kiro session is adopted:
+    // subsequent snapshots prefer Vibe's normalized transcript.
+    if (this.agent === 'kimi' && init.claudeSessionId && readKimiTranscript(this.sessionId).length === 0) {
+      appendKimiBlocks(this.sessionId, readKimiWireTranscript(init.claudeSessionId));
+    }
+    if (this.agent === 'kiro' && init.claudeSessionId && readKiroTranscript(this.sessionId).length === 0) {
+      appendKiroBlocks(this.sessionId, readKiroNativeTranscript(init.claudeSessionId));
+    }
   }
 
   private emit(ev: LiveEvent): void {
     this.seq += 1;
     const entry: LoggedEvent = { seq: this.seq, ev };
     this.logBuf.push(entry);
-    // Mirror events into the Cursor transcript accumulator (before pruning).
+    // Mirror events into the normalized transcript accumulator (before pruning).
     this.transcript?.apply(ev);
     this.pruneFinalized(ev);
     if (this.logBuf.length > LOG_CAP) this.logBuf.splice(0, this.logBuf.length - LOG_CAP);
@@ -235,6 +288,9 @@ class SessionRuntime {
       resume: this.claudeSessionId,
       allowedTools: [...this.allowedTools],
     };
+    // Resolve MCP servers fresh per turn from the registry, scoped to this
+    // session's host (or 'local'). Editing MCP config applies to the next turn.
+    const mcpServers: McpServerDef[] = mcpRegistry.resolveForScope(this.host ?? 'local');
     const cb = {
       onEvent: (ev: LiveEvent) => this.emit(ev),
       onClaudeSessionId: (id: string) => {
@@ -251,6 +307,7 @@ class SessionRuntime {
           model,
           permissionMode,
           resume: this.claudeSessionId,
+          mcpServers,
           remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
         },
         cb,
@@ -264,14 +321,42 @@ class SessionRuntime {
           permissionMode,
           effort,
           resume: this.claudeSessionId,
+          mcpServers,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
+        },
+        cb,
+      );
+    } else if (this.agent === 'kimi') {
+      this.run = startKimiRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          resume: this.claudeSessionId,
+          mcpServers,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
+        },
+        cb,
+      );
+    } else if (this.agent === 'kiro') {
+      this.run = startKiroRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          effort,
+          resume: this.claudeSessionId,
+          mcpServers,
           remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
         },
         cb,
       );
     } else {
       this.run = this.sshTarget
-        ? startRun({ ...runOpts, remote: { sshTarget: this.sshTarget, cwd, proxy: this.proxy } }, cb)
-        : startRun(runOpts, cb);
+        ? startRun({ ...runOpts, mcpServers, remote: { sshTarget: this.sshTarget, cwd, proxy: this.proxy } }, cb)
+        : startRun({ ...runOpts, mcpServers }, cb);
     }
 
     void this.run.done.then(() => this.finishTurn());
@@ -287,10 +372,12 @@ class SessionRuntime {
     this.pending.clear();
     this.emit({ k: 'run_state', running: false });
 
-    // Cursor/Codex sessions self-persist: append this turn's blocks to the Vibe JSONL.
+    // Headless CLI sessions self-persist: append this turn's blocks to Vibe JSONL.
     if (this.transcript) {
       const blocks = this.transcript.blocks.slice(this.turnStartBlocks);
       if (this.agent === 'codex') appendCodexBlocks(this.sessionId, blocks);
+      else if (this.agent === 'kimi') appendKimiBlocks(this.sessionId, blocks);
+      else if (this.agent === 'kiro') appendKiroBlocks(this.sessionId, blocks);
       else appendCursorBlocks(this.sessionId, blocks);
     }
 
@@ -384,10 +471,11 @@ export class Hub {
         // Use only the real Claude session id we've captured (undefined for a
         // brand-new session → fresh turn). Never fall back to the app id, which
         // isn't a real Claude session and would make `--resume` fail.
+        const agent = stored.agent ?? 'claude';
         return {
           cwd: stored.cwd, model: stored.model, permissionMode: stored.permissionMode,
           effort: stored.effort ?? defaultEffort, title: stored.title, claudeSessionId: stored.claudeSessionId,
-          agent: stored.agent ?? 'claude', host, sshTarget: remoteHost.ssh, proxy: remoteHost.proxy,
+          agent, host, sshTarget: remoteHost.ssh, proxy: proxyForAgent(remoteHost, agent),
         };
       }
       const cached = this.remoteCache.get(sessionId);
@@ -420,6 +508,16 @@ export class Hub {
     const codexInfo = resolveCodexSessionSync(sessionId);
     if (codexInfo) {
       return { cwd: codexInfo.cwd, model: codexInfo.model, permissionMode: 'default', effort: defaultEffort, title: codexInfo.title, claudeSessionId: sessionId, agent: 'codex' };
+    }
+    // …or from ~/.kimi-code (Kimi Code).
+    const kimiInfo = resolveKimiSessionSync(sessionId);
+    if (kimiInfo) {
+      return { cwd: kimiInfo.cwd, model: kimiInfo.model, permissionMode: 'default', effort: defaultEffort, title: kimiInfo.title, claudeSessionId: sessionId, agent: 'kimi' };
+    }
+    // …or from ~/.kiro/sessions/cli (Kiro CLI).
+    const kiroInfo = resolveKiroSessionSync(sessionId);
+    if (kiroInfo) {
+      return { cwd: kiroInfo.cwd, model: kiroInfo.model, permissionMode: 'default', effort: defaultEffort, title: kiroInfo.title, claudeSessionId: sessionId, agent: 'kiro' };
     }
     return undefined;
   }
@@ -547,6 +645,24 @@ export class Hub {
       return { blocks: [], seq: plan.seq };
     }
 
+    if (agent === 'kimi') {
+      const own = readKimiTranscript(sessionId);
+      if (own.length) return { blocks: own, seq: plan.seq };
+      if (!host && !rt?.running && sid) {
+        return { blocks: readKimiWireTranscript(sid), seq: plan.seq };
+      }
+      return { blocks: [], seq: plan.seq };
+    }
+
+    if (agent === 'kiro') {
+      const own = readKiroTranscript(sessionId);
+      if (own.length) return { blocks: own, seq: plan.seq };
+      if (!host && !rt?.running && sid) {
+        return { blocks: readKiroNativeTranscript(sid), seq: plan.seq };
+      }
+      return { blocks: [], seq: plan.seq };
+    }
+
     if (host) {
       const remoteHost = hostRegistry.get(host);
       const blocks = remoteHost && sid ? await readRemoteTranscript(remoteHost, sid) : [];
@@ -568,6 +684,13 @@ export class Hub {
     }
     const meta = toMeta(stored, this.isRunning(sessionId));
     for (const conn of this.conns) conn.send({ t: 'session_meta', session: meta });
+  }
+
+  /** Broadcast an already-built meta to every client. Used for changes that
+   *  affect discovered (non-stored) sessions — e.g. a pin toggle — where
+   *  broadcastMeta(id) can't build the meta from the store. */
+  broadcastMetaObject(session: SessionMeta): void {
+    for (const conn of this.conns) conn.send({ t: 'session_meta', session });
   }
 
   broadcastRemoved(sessionId: string): void {

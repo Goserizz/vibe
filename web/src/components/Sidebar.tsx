@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from 'react';
-import { Plus, MessageSquareText, Trash2, Check, X, Pencil, LogOut, Server, Search } from 'lucide-react';
+import { Plus, MessageSquareText, Trash2, Check, X, Pencil, LogOut, Server, Search, Settings, Star } from 'lucide-react';
 import type { SearchResult, SessionMeta } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { Logo } from './Logo';
 import { ConnectionBadge } from './ConnectionBadge';
 import { HostsDialog } from './HostsDialog';
+import { SettingsDialog } from './SettingsDialog';
 import { basename, cn, relativeTime } from '../lib/format';
 import { Glass } from './LiquidGlass';
 
@@ -24,6 +25,7 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
   const searchLoading = useStore((s) => s.searchLoading);
   const setSearchQuery = useStore((s) => s.setSearchQuery);
   const [hostsOpen, setHostsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const searching = searchQuery.trim().length >= 2;
 
@@ -109,6 +111,13 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
             {hosts.length > 0 && <span className="rounded bg-ink-700 px-1.5 text-[10px] text-slate-400">{hosts.length}</span>}
           </button>
           <button
+            onClick={() => setSettingsOpen(true)}
+            title="Settings"
+            className="flex items-center gap-2 rounded-lg px-2 py-2 text-xs text-slate-500 transition hover:bg-ink-800 hover:text-slate-300"
+          >
+            <Settings className="h-3.5 w-3.5" />
+          </button>
+          <button
             onClick={signOut}
             title="Sign out"
             className="flex items-center gap-2 rounded-lg px-2 py-2 text-xs text-slate-500 transition hover:bg-ink-800 hover:text-slate-300"
@@ -119,6 +128,7 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
         </Glass>
       </aside>
       {hostsOpen && <HostsDialog onClose={() => setHostsOpen(false)} />}
+      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
     </>
   );
 }
@@ -235,6 +245,8 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
   const openSession = useStore((s) => s.openSession);
   const renameSession = useStore((s) => s.renameSession);
   const deleteSession = useStore((s) => s.deleteSession);
+  const togglePin = useStore((s) => s.togglePin);
+  const unread = useStore((s) => !!s.unread[session.id]);
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [title, setTitle] = useState(session.title);
@@ -264,12 +276,18 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
             <span className="block h-4 w-4">
               <span className="block h-2 w-2 translate-x-1 translate-y-1 animate-pulse-dot rounded-full bg-accent" />
             </span>
+          ) : unread ? (
+            // Turn finished but not yet opened — a steady accent dot (no pulse)
+            // signals "new reply", distinct from the pulsing dot of an active run.
+            <span className="block h-4 w-4" title="New reply — click to view">
+              <span className="block h-2 w-2 translate-x-1 translate-y-1 rounded-full bg-accent" />
+            </span>
           ) : (
             <MessageSquareText className={cn('h-4 w-4', active ? 'text-accent-soft' : 'text-slate-600')} />
           )}
         </div>
 
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 pr-6">
           {editing ? (
             <input
               autoFocus
@@ -288,7 +306,12 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
             />
           ) : (
             <div className="flex items-center gap-1.5">
-              <span className={cn('truncate text-[13px]', active ? 'text-slate-100' : 'text-slate-300')}>
+              <span
+                className={cn(
+                  'truncate text-[13px]',
+                  active ? 'text-slate-100' : unread ? 'font-medium text-slate-100' : 'text-slate-300',
+                )}
+              >
                 {session.title}
               </span>
               {session.agent === 'cursor' ? (
@@ -298,6 +321,14 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
               ) : session.agent === 'codex' ? (
                 <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-emerald-300">
                   Codex
+                </span>
+              ) : session.agent === 'kimi' ? (
+                <span className="shrink-0 rounded bg-sky-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-sky-300">
+                  Kimi
+                </span>
+              ) : session.agent === 'kiro' ? (
+                <span className="shrink-0 rounded bg-violet-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-violet-300">
+                  Kiro
                 </span>
               ) : (
                 <span className="shrink-0 rounded bg-amber-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-amber-500">
@@ -317,30 +348,48 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
         {!editing && (
           <div
             className={cn(
-              'absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md bg-ink-750/90 px-0.5 opacity-0 transition group-hover:opacity-100',
-              confirming && 'opacity-100',
+              'absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md px-0.5 group-hover:bg-ink-750/90',
+              confirming && 'bg-ink-750/90',
             )}
             onClick={(e) => e.stopPropagation()}
           >
-            {confirming ? (
-              <>
-                <button onClick={() => void deleteSession(session.id)} className="rounded p-1 text-rose-400 hover:bg-rose-500/15" title="Confirm delete">
-                  <Check className="h-3.5 w-3.5" />
-                </button>
-                <button onClick={() => setConfirming(false)} className="rounded p-1 text-slate-400 hover:bg-ink-700">
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </>
-            ) : (
-              <>
-                <button onClick={() => setEditing(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-slate-200" title="Rename">
-                  <Pencil className="h-3.5 w-3.5" />
-                </button>
-                <button onClick={() => setConfirming(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-rose-400" title="Delete">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </>
-            )}
+            {/* Rename / delete — collapsed (display:none) at rest so the pill
+                shrinks to just the star; revealed on hover or while confirming. */}
+            <div className={cn('items-center gap-0.5', confirming ? 'flex' : 'hidden group-hover:flex')}>
+              {confirming ? (
+                <>
+                  <button onClick={() => void deleteSession(session.id)} className="rounded p-1 text-rose-400 hover:bg-rose-500/15" title="Confirm delete">
+                    <Check className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => setConfirming(false)} className="rounded p-1 text-slate-400 hover:bg-ink-700">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => setEditing(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-slate-200" title="Rename">
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => setConfirming(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-rose-400" title="Delete">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )}
+            </div>
+            {/* Favorite — rightmost, so it docks to the far-right edge. Filled
+                accent + always visible when pinned; outline + hover-only otherwise. */}
+            <button
+              onClick={() => void togglePin(session.id)}
+              title={session.pinned ? 'Remove favorite' : 'Favorite'}
+              className={cn(
+                'rounded p-1 hover:bg-ink-700',
+                session.pinned
+                  ? 'pointer-events-auto text-accent opacity-100'
+                  : 'pointer-events-none text-slate-400 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 hover:text-slate-200',
+              )}
+            >
+              <Star className="h-3.5 w-3.5" fill={session.pinned ? 'currentColor' : 'none'} />
+            </button>
           </div>
         )}
       </div>

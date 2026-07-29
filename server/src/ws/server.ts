@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { log } from '../log.js';
 import { config } from '../config.js';
 import { tokenMatches } from '../auth.js';
-import { Conn, hub } from './hub.js';
+import { WsConn, hub } from './hub.js';
 import { spawnTerminal } from '../terminal/pty.js';
 import { PROTOCOL_VERSION } from '../../../shared/protocol.js';
 
@@ -50,7 +50,7 @@ export function attachWsServer(server: Server): void {
   attachTerminalWs(termWss);
 
   wss.on('connection', (ws) => {
-    const conn = new Conn(ws);
+    const conn = new WsConn(ws);
     hub.addConn(conn);
     conn.send({ t: 'hello', protocolVersion: PROTOCOL_VERSION, serverVersion: config.serverVersion });
 

@@ -1,15 +1,21 @@
 import type {
   AgentKind,
+  AgentLatestVersions,
+  AgentUpdateResult,
   ChatBlock,
   EffortLevel,
   FileEntry,
   HostStatus,
+  McpConfigSnapshot,
+  McpServerDef,
   PermissionMode,
   ProjectDir,
   RemoteHost,
   SearchResult,
   SessionMeta,
+  SessionPreset,
 } from '@shared/protocol';
+import type { ModelOption, PermissionOption } from './format';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -54,8 +60,20 @@ export const api = {
     return request<{ models: { value: string; label: string }[] }>(`/cursor/models${q}`).then((r) => r.models);
   },
 
-  listCodexModels: () =>
-    request<{ models: { value: string; label: string }[] }>('/codex/models').then((r) => r.models),
+  listCodexModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[] }>(`/codex/models${q}`).then((r) => r.models);
+  },
+
+  getKimiCapabilities: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[]; permissions: PermissionOption[]; acp: boolean }>(`/kimi/capabilities${q}`);
+  },
+
+  listKiroModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/kiro/models${q}`);
+  },
 
   validateDir: (path: string) =>
     request<{ ok: boolean; path: string; error?: string }>('/projects/validate', {
@@ -71,7 +89,7 @@ export const api = {
 
   listSessions: () => request<{ sessions: SessionMeta[] }>('/sessions').then((r) => r.sessions),
 
-  createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) =>
+  createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) =>
     request<{ session: SessionMeta }>('/sessions', {
       method: 'POST',
       body: JSON.stringify(input),
@@ -82,7 +100,7 @@ export const api = {
   addHost: (host: RemoteHost) =>
     request<{ host: RemoteHost }>('/hosts', { method: 'POST', body: JSON.stringify(host) }).then((r) => r.host),
 
-  updateHost: (name: string, patch: { ssh?: string; proxy?: string }) =>
+  updateHost: (name: string, patch: { ssh?: string; proxy?: string; proxyByAgent?: Partial<Record<AgentKind, string>> }) =>
     request<{ host: RemoteHost }>(`/hosts/${encodeURIComponent(name)}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
@@ -92,6 +110,47 @@ export const api = {
 
   checkHost: (name: string) => request<HostStatus>(`/hosts/${encodeURIComponent(name)}/check`),
 
+  // -- MCP servers (global registry + per-scope enable) ---------------------
+
+  listMcp: () => request<McpConfigSnapshot>('/mcp'),
+
+  upsertMcpServer: (def: McpServerDef) =>
+    request<{ server: McpServerDef }>('/mcp/servers', { method: 'POST', body: JSON.stringify(def) }).then((r) => r.server),
+
+  deleteMcpServer: (name: string) =>
+    request<{ ok: boolean }>(`/mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  setMcpEnabled: (scope: string, names: string[]) =>
+    request<{ enabled: string[]}>(`/mcp/enabled/${encodeURIComponent(scope)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ names }),
+    }).then((r) => r.enabled),
+
+  startMcpOAuth: (name: string) =>
+    request<{ authUrl: string }>('/mcp/oauth/start', { method: 'POST', body: JSON.stringify({ name }) }).then((r) => r.authUrl),
+
+  disconnectMcpOAuth: (name: string) =>
+    request<{ ok: boolean; oauth: Record<string, unknown> }>(`/mcp/oauth/disconnect/${encodeURIComponent(name)}`, {
+      method: 'POST',
+    }).then((r) => r.oauth),
+
+  // -- Saved New-session presets (agent + model + permission + effort) --------
+
+  listPresets: () => request<{ presets: SessionPreset[] }>('/presets').then((r) => r.presets),
+
+  upsertPreset: (preset: SessionPreset) =>
+    request<{ preset: SessionPreset }>('/presets', { method: 'POST', body: JSON.stringify(preset) }).then((r) => r.preset),
+
+  deletePreset: (name: string) => request<{ ok: boolean }>(`/presets/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  latestAgentVersions: () =>
+    request<{ versions: AgentLatestVersions }>('/agents/latest').then((r) => r.versions),
+
+  updateHostAgent: (name: string, agent: AgentKind) =>
+    request<AgentUpdateResult>(`/hosts/${encodeURIComponent(name)}/agents/${agent}/update`, {
+      method: 'POST',
+    }),
+
   updateSession: (id: string, patch: { title?: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel }) =>
     request<{ session: SessionMeta }>(`/sessions/${id}`, {
       method: 'PATCH',
@@ -99,6 +158,12 @@ export const api = {
     }).then((r) => r.session),
 
   deleteSession: (id: string) => request<{ ok: boolean }>(`/sessions/${id}`, { method: 'DELETE' }),
+
+  setSessionPinned: (id: string, pinned: boolean) =>
+    request<{ ok: boolean; pinned: boolean }>(`/sessions/${id}/pin`, {
+      method: 'PUT',
+      body: JSON.stringify({ pinned }),
+    }),
 
   getMessages: (id: string) => request<{ blocks: ChatBlock[]; seq: number }>(`/sessions/${id}/messages`),
 
@@ -149,6 +214,31 @@ export const api = {
     const qs = new URLSearchParams({ dir, name: file.name });
     if (host) qs.set('host', host);
     return fetch(`/api/files/upload?${qs.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${authToken}` },
+      body: file,
+    }).then(async (res) => {
+      if (!res.ok) {
+        let message = res.statusText;
+        try {
+          const body = await res.json();
+          message = body.error || message;
+        } catch {
+          /* keep statusText */
+        }
+        throw new ApiError(res.status, message);
+      }
+      return res.json();
+    });
+  },
+
+  // Attach a file to a chat message in `sessionId`. The server stages it in a
+  // per-session temp dir on the session's host and returns the absolute path,
+  // which the composer folds into the prompt so the agent reads it with its own
+  // tools. Raw bytes body — bypasses the JSON `request` helper on purpose.
+  uploadAttachment: ({ sessionId, file }: { sessionId: string; file: File }): Promise<{ ok: boolean; path: string }> => {
+    const qs = new URLSearchParams({ name: file.name });
+    return fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments?${qs.toString()}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${authToken}` },
       body: file,

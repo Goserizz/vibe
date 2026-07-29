@@ -37,6 +37,8 @@ export const AGENTS: { value: AgentKind; label: string }[] = [
   { value: 'claude', label: 'Claude' },
   { value: 'cursor', label: 'Cursor' },
   { value: 'codex', label: 'Codex' },
+  { value: 'kimi', label: 'Kimi' },
+  { value: 'kiro', label: 'Kiro' },
 ];
 
 export const MODELS: { value: string; label: string }[] = [
@@ -49,6 +51,17 @@ export const MODELS: { value: string; label: string }[] = [
 export interface ModelOption {
   value: string;
   label: string;
+  /** Codex only: the `model_reasoning_effort` values this model advertises (from
+   *  its cache). Drives the effort picker per-model. */
+  efforts?: string[];
+  /** Codex only: the model's default reasoning level. */
+  defaultEffort?: string;
+}
+
+export interface PermissionOption {
+  value: PermissionMode;
+  label: string;
+  hint: string;
 }
 
 /**
@@ -75,15 +88,28 @@ export const CODEX_MODELS: ModelOption[] = [
   { value: 'gpt-5.4-mini', label: 'GPT-5.4-Mini' },
 ];
 
-/** Model options for an agent. Cursor/Codex use their live CLI lists when
- *  available (fetched from the server); Claude uses the built-in set. */
-export function modelsForAgent(agent: AgentKind, cursorModels?: ModelOption[], codexModels?: ModelOption[]): ModelOption[] {
+/** Kimi accepts configured model aliases; `auto` preserves its own default. */
+export const KIMI_MODELS: ModelOption[] = [{ value: 'auto', label: 'Auto' }];
+
+/** Fallback Kiro models until `kiro-cli chat --list-models` loads. */
+export const KIRO_MODELS: ModelOption[] = [{ value: 'auto', label: 'Auto' }];
+
+/** Model options for an agent. */
+export function modelsForAgent(
+  agent: AgentKind,
+  cursorModels?: ModelOption[],
+  codexModels?: ModelOption[],
+  kimiModels?: ModelOption[],
+  kiroModels?: ModelOption[],
+): ModelOption[] {
   if (agent === 'cursor') return cursorModels && cursorModels.length ? cursorModels : CURSOR_MODELS;
   if (agent === 'codex') return codexModels && codexModels.length ? codexModels : CODEX_MODELS;
+  if (agent === 'kimi') return kimiModels && kimiModels.length ? kimiModels : KIMI_MODELS;
+  if (agent === 'kiro') return kiroModels && kiroModels.length ? kiroModels : KIRO_MODELS;
   return MODELS;
 }
 
-export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
+export const PERMISSION_MODES: PermissionOption[] = [
   { value: 'default', label: 'Ask', hint: 'Prompt before risky tools' },
   { value: 'acceptEdits', label: 'Auto-edit', hint: 'Auto-accept file edits' },
   { value: 'plan', label: 'Plan', hint: 'Read-only planning mode' },
@@ -91,21 +117,40 @@ export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: str
 ];
 
 /** Cursor headless mode has only coarse, mode-level permissions. */
-export const CURSOR_PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
+export const CURSOR_PERMISSION_MODES: PermissionOption[] = [
   { value: 'default', label: 'Agent', hint: 'Run tools automatically' },
   { value: 'plan', label: 'Plan', hint: 'Read-only planning mode' },
 ];
 
 /** Codex headless mode is sandbox-level only: full-auto, read-only, or bypass. */
-export const CODEX_PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
+export const CODEX_PERMISSION_MODES: PermissionOption[] = [
   { value: 'default', label: 'Auto', hint: 'Sandboxed, auto-run (workspace-write)' },
   { value: 'plan', label: 'Plan', hint: 'Read-only planning mode' },
   { value: 'bypassPermissions', label: 'Bypass', hint: 'YOLO mode, no sandbox (careful)' },
 ];
 
-export function permissionModesForAgent(agent: AgentKind): { value: PermissionMode; label: string; hint: string }[] {
+/** Conservative fallback while discovery loads (and for pre-ACP Kimi builds). */
+export const KIMI_PERMISSION_MODES: PermissionOption[] = [
+  { value: 'default', label: 'Auto', hint: 'Kimi prompt mode auto-runs allowed tools' },
+];
+
+/** Kiro ACP: spawn trust flags + planner mode. */
+export const KIRO_PERMISSION_MODES: PermissionOption[] = [
+  { value: 'default', label: 'Ask', hint: 'Prompt before tool use' },
+  { value: 'plan', label: 'Plan', hint: 'Kiro planner agent' },
+  { value: 'acceptEdits', label: 'Auto-edit', hint: 'Trust filesystem read/write tools' },
+  { value: 'bypassPermissions', label: 'Bypass', hint: 'Trust all tools (careful)' },
+];
+
+export function permissionModesForAgent(
+  agent: AgentKind,
+  kimiPermissions?: PermissionOption[],
+  kiroPermissions?: PermissionOption[],
+): PermissionOption[] {
   if (agent === 'cursor') return CURSOR_PERMISSION_MODES;
   if (agent === 'codex') return CODEX_PERMISSION_MODES;
+  if (agent === 'kimi') return kimiPermissions && kimiPermissions.length ? kimiPermissions : KIMI_PERMISSION_MODES;
+  if (agent === 'kiro') return kiroPermissions && kiroPermissions.length ? kiroPermissions : KIRO_PERMISSION_MODES;
   return PERMISSION_MODES;
 }
 
@@ -118,32 +163,64 @@ export const EFFORT_LEVELS: { value: EffortLevel; label: string; hint: string }[
   { value: 'medium', label: 'Medium', hint: 'Moderate thinking' },
   { value: 'high', label: 'High', hint: 'Deep reasoning' },
   { value: 'xhigh', label: 'X-High', hint: 'Deeper than high' },
-  { value: 'max', label: 'Max', hint: 'Maximum effort (default)' },
+  { value: 'max', label: 'Max', hint: 'Maximum effort (Claude default)' },
+  { value: 'ultra', label: 'Ultra', hint: 'Beyond max — gpt-5.6 models' },
 ];
 
-export function modelLabel(value: string, cursorModels?: ModelOption[], codexModels?: ModelOption[]): string {
+export function modelLabel(
+  value: string,
+  cursorModels?: ModelOption[],
+  codexModels?: ModelOption[],
+  kimiModels?: ModelOption[],
+  kiroModels?: ModelOption[],
+): string {
   return (
     MODELS.find((m) => m.value === value)?.label ??
     cursorModels?.find((m) => m.value === value)?.label ??
     codexModels?.find((m) => m.value === value)?.label ??
+    kimiModels?.find((m) => m.value === value)?.label ??
+    kiroModels?.find((m) => m.value === value)?.label ??
     CURSOR_MODELS.find((m) => m.value === value)?.label ??
     CODEX_MODELS.find((m) => m.value === value)?.label ??
+    KIMI_MODELS.find((m) => m.value === value)?.label ??
+    KIRO_MODELS.find((m) => m.value === value)?.label ??
     value
   );
 }
 
-export function permissionModeLabel(value: PermissionMode): string {
-  return PERMISSION_MODES.find((m) => m.value === value)?.label ?? value;
+export function permissionModeLabel(
+  value: PermissionMode,
+  agent?: AgentKind,
+  kimiPermissions?: PermissionOption[],
+  kiroPermissions?: PermissionOption[],
+): string {
+  const modes = agent ? permissionModesForAgent(agent, kimiPermissions, kiroPermissions) : PERMISSION_MODES;
+  return modes.find((m) => m.value === value)?.label ?? value;
 }
 
 export function effortLabel(value: EffortLevel): string {
   return EFFORT_LEVELS.find((e) => e.value === value)?.label ?? value;
 }
 
-/** Effort levels an agent exposes. Codex's `model_reasoning_effort` tops out at
- *  `xhigh` (no `max`); Cursor has effort baked into its model ids (hidden). */
-export function effortLevelsForAgent(agent: AgentKind): { value: EffortLevel; label: string; hint: string }[] {
-  if (agent === 'cursor') return [];
-  if (agent === 'codex') return EFFORT_LEVELS.filter((e) => e.value !== 'max');
+/** Effort levels an agent exposes. For Codex these are per-model — each model's
+ *  cached `supported_reasoning_levels` (5.6 models add `max`/`ultra`); pass the
+ *  selected model so the picker matches what the CLI offers for it. Cursor and
+ *  Kimi do not expose a separate effort switch here. Kiro supports the Claude ladder. */
+export function effortLevelsForAgent(
+  agent: AgentKind,
+  codexModel?: ModelOption | null,
+): { value: EffortLevel; label: string; hint: string }[] {
+  if (agent === 'cursor' || agent === 'kimi') return [];
+  if (agent === 'codex') {
+    const efforts = codexModel?.efforts;
+    if (efforts?.length) {
+      // Preserve the cache's order; drop anything we can't label.
+      return efforts
+        .map((e) => EFFORT_LEVELS.find((x) => x.value === e))
+        .filter((x): x is { value: EffortLevel; label: string; hint: string } => Boolean(x));
+    }
+    // No model chosen (`auto`) or cache missing: the ladder common to all known models.
+    return EFFORT_LEVELS.filter((e) => e.value !== 'max' && e.value !== 'ultra');
+  }
   return EFFORT_LEVELS;
 }

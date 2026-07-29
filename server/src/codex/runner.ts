@@ -4,7 +4,8 @@ import { log } from '../log.js';
 import { CodexStreamNormalizer } from './normalize.js';
 import { sshConnectPrefix, shQuote, loginShellCommand, proxyEnvPrefix, cleanRemoteStderr } from '../remote/ssh.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
-import type { EffortLevel, PermissionMode } from '../../../shared/protocol.js';
+import { applyCodexMcp } from '../mcp/apply.js';
+import type { EffortLevel, McpServerDef, PermissionMode } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
 
 export interface CodexRunOptions {
@@ -12,10 +13,15 @@ export interface CodexRunOptions {
   cwd: string;
   model: string;
   permissionMode: PermissionMode;
-  /** Reasoning effort → codex `model_reasoning_effort` (max clamps to xhigh). */
+  /** Reasoning effort → codex `model_reasoning_effort`. Per-model: the 5.6 models
+   *  accept `max`/`ultra` beyond the low..xhigh ladder, so this is passed through
+   *  verbatim (the picker only offers levels the selected model advertises). */
   effort: EffortLevel;
   /** Codex thread id to resume; omit for a fresh session. */
   resume?: string;
+  /** MCP servers enabled for this session's host; merged into ~/.codex/config.toml
+   *  (on the host the session runs on) before the turn. */
+  mcpServers?: McpServerDef[];
   /** When set, the turn runs on a remote host over SSH. `cwd` is the remote path. */
   remote?: { sshTarget: string; cwd: string; proxy?: string };
 }
@@ -29,12 +35,6 @@ function sandboxArgs(mode: PermissionMode): string[] {
   return ['--full-auto'];
 }
 
-/** Vibe effort → codex `model_reasoning_effort`. Codex tops out at `xhigh`
- *  (no `max`), so clamp it. */
-function codexReasoningEffort(e: EffortLevel): 'low' | 'medium' | 'high' | 'xhigh' {
-  return e === 'max' ? 'xhigh' : e;
-}
-
 /** Build the codex invocation (shared by local spawn and remote ssh). The prompt
  *  is fed via stdin (positional `-` tells codex to read it there). We deliberately
  *  do NOT pass `-C/--cd`: `codex exec resume` rejects it (only fresh `exec` takes
@@ -43,7 +43,11 @@ function codexReasoningEffort(e: EffortLevel): 'low' | 'medium' | 'high' | 'xhig
 function buildSpawn(opts: CodexRunOptions): { bin?: string; args: string[]; remote: boolean } {
   const cwd = opts.remote ? opts.remote.cwd : opts.cwd;
   const base = ['--json', '--skip-git-repo-check', ...sandboxArgs(opts.permissionMode)];
-  base.push('-c', `model_reasoning_effort=${codexReasoningEffort(opts.effort)}`);
+  base.push('-c', `model_reasoning_effort=${opts.effort}`);
+  // `model_reasoning_effort` controls how much reasoning the model performs, but
+  // it does not make that reasoning visible. Ask Codex for a readable summary so
+  // the JSON stream can contain reasoning items for Vibe to render.
+  base.push('-c', 'model_reasoning_summary=detailed');
   if (opts.model) base.push('-m', opts.model);
 
   const args = opts.resume ? ['exec', 'resume', opts.resume, ...base, '-'] : ['exec', ...base, '-'];
@@ -144,6 +148,10 @@ export function startCodexRun(opts: CodexRunOptions, cb: RunCallbacks): RunHandl
   };
 
   const done = (async () => {
+    // Reconcile Vibe's MCP servers into ~/.codex/config.toml (local or remote)
+    // before the first attempt. Best-effort: a failure logs and continues.
+    await applyCodexMcp(opts.mcpServers ?? [], opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined);
+
     for (let attempt = 0; ; attempt++) {
       // Fresh normalizer per attempt so state from a failed run can't leak in.
       const normalizer = new CodexStreamNormalizer(wrappedCb);

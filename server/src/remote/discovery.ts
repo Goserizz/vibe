@@ -2,7 +2,7 @@ import { log } from '../log.js';
 import { parseTranscriptBlocks } from '../sessions/transcript.js';
 import { isClaudeSessionId, parseSessionMeta, type DiscoveredSession } from '../sessions/discovery.js';
 import type { ChatBlock, RemoteHost } from '../../../shared/protocol.js';
-import { sshExec } from './ssh.js';
+import { loginShellCommand, sshExec } from './ssh.js';
 
 // Record/field separators (control chars) keep the bundle unambiguous vs JSON.
 const RS = '\x1e';
@@ -21,22 +21,22 @@ const BUNDLE_CMD = [
   'done',
 ].join('\n');
 
-interface CacheEntry {
-  at: number;
-  sessions: DiscoveredSession[];
+const cache = new Map<string, DiscoveredSession[]>();
+
+/** Drop per-host SSH discovery results (e.g. when hosts change). */
+export function clearRemoteDiscoveryCache(): void {
+  cache.clear();
 }
-const cache = new Map<string, CacheEntry>();
-const CACHE_MS = 8_000;
 
 /** Discover Claude sessions on a remote host (most-recent first). */
 export async function listRemoteSessions(host: RemoteHost): Promise<DiscoveredSession[]> {
-  const cached = cache.get(host.name);
-  if (cached && Date.now() - cached.at < CACHE_MS) return cached.sessions;
+  const hit = cache.get(host.name);
+  if (hit) return hit;
 
-  const res = await sshExec(host.ssh, BUNDLE_CMD, { timeoutMs: 20_000 });
+  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), { timeoutMs: 20_000 });
   if (res.code !== 0) {
     log.debug(`remote discovery failed for ${host.name}: ${res.stderr.trim().slice(0, 120)}`);
-    return cached?.sessions ?? [];
+    return [];
   }
 
   // Each file emits: RS <relpath> FS <mtime> RS <head...>. Splitting on RS
@@ -54,7 +54,7 @@ export async function listRemoteSessions(host: RemoteHost): Promise<DiscoveredSe
     if (meta) sessions.push(meta);
   }
 
-  cache.set(host.name, { at: Date.now(), sessions });
+  cache.set(host.name, sessions);
   return sessions;
 }
 
@@ -62,7 +62,7 @@ export async function listRemoteSessions(host: RemoteHost): Promise<DiscoveredSe
 export async function getRemoteSessionInfo(host: RemoteHost, claudeSessionId: string): Promise<DiscoveredSession | null> {
   if (!isClaudeSessionId(claudeSessionId)) return null;
   const cmd = `f=$(ls -1 ~/.claude/projects/*/${claudeSessionId}.jsonl 2>/dev/null | head -1); [ -n "$f" ] && head -n 80 "$f"`;
-  const res = await sshExec(host.ssh, cmd, { timeoutMs: 15_000 });
+  const res = await sshExec(host.ssh, loginShellCommand(cmd), { timeoutMs: 15_000 });
   if (res.code !== 0 || !res.stdout.trim()) return null;
   const now = Date.now();
   return parseSessionMeta(res.stdout.split('\n'), claudeSessionId, { createdFallback: now, updatedAt: now });
@@ -72,7 +72,7 @@ export async function getRemoteSessionInfo(host: RemoteHost, claudeSessionId: st
 export async function readRemoteTranscript(host: RemoteHost, claudeSessionId: string): Promise<ChatBlock[]> {
   if (!isClaudeSessionId(claudeSessionId)) return [];
   const cmd = `cat ~/.claude/projects/*/${claudeSessionId}.jsonl 2>/dev/null`;
-  const res = await sshExec(host.ssh, cmd, { timeoutMs: 25_000 });
+  const res = await sshExec(host.ssh, loginShellCommand(cmd), { timeoutMs: 25_000 });
   if (res.code !== 0 || !res.stdout) return [];
   return parseTranscriptBlocks(res.stdout).blocks;
 }

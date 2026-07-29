@@ -173,8 +173,16 @@ function PlanPrompt({ req, respond }: { req: PermissionRequest; respond: (id: st
  * the user's selections are returned as `updatedInput = { questions, answers }`.
  */
 function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id: string, decision: PermissionDecision) => void }) {
-  const input = (req.input ?? {}) as { questions?: AskQuestion[] };
+  const input = (req.input ?? {}) as { questions?: AskQuestion[]; source?: string };
   const questions = Array.isArray(input.questions) ? input.questions : [];
+  // Free-text "Other" only exists for Claude; ACP agents (Cursor, Kimi) can
+  // only return one of the fixed options, so an Other answer couldn't round-trip.
+  const allowOther = !input.source;
+  const title = input.source === 'kimi'
+    ? 'Kimi has a question'
+    : input.source === 'cursor'
+      ? 'Cursor has a question'
+      : 'Claude has a question';
 
   const [selected, setSelected] = useState<Record<number, Set<string>>>({});
   const [otherActive, setOtherActive] = useState<Record<number, boolean>>({});
@@ -235,7 +243,7 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
         <div className="flex items-center gap-2.5 border-b border-white/5 bg-accent/5 px-4 py-2.5">
           <HelpCircle className="h-4 w-4 text-accent" />
           <span id="question-prompt-title" className="text-[13px] font-medium text-slate-200">
-            Claude has a question
+            {title}
           </span>
         </div>
         <div className="space-y-4 overflow-y-auto overscroll-contain px-4 py-3.5">
@@ -273,7 +281,8 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
                         </button>
                       );
                     })}
-                    {/* "Other" free-text choice — the schema says the host provides this. */}
+                    {/* "Other" free-text — Claude only; ACP (Cursor/Kimi) has fixed options. */}
+                    {allowOther && (
                     <div
                       className={cn(
                         'flex items-start gap-2.5 rounded-lg border px-3 py-2 transition',
@@ -304,6 +313,7 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
                         )}
                       </div>
                     </div>
+                    )}
                   </div>
                 </div>
               );

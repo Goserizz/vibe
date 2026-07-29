@@ -19,11 +19,12 @@ export type Role = 'user' | 'assistant';
 
 export type PermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 
-/** Reasoning/thinking effort Claude applies to a turn. */
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+/** Reasoning/thinking effort applied to a turn. Claude tops out at `max`; Codex's
+ *  newer models (gpt-5.6-*) also accept `ultra` (per their cached levels). */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
-/** Which CLI engine drives a session: Claude Code, the Cursor agent, or Codex. */
-export type AgentKind = 'claude' | 'cursor' | 'codex';
+/** Which CLI engine drives a session. */
+export type AgentKind = 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro';
 
 export interface TokenUsage {
   inputTokens: number;
@@ -97,6 +98,21 @@ export type ChatBlock =
   | ResultBlock
   | ErrorBlock;
 
+/** Status of a single task in an agent's todo list. */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+/** A single task in an agent's todo list. Claude's `TodoWrite` carries the full
+ *  list on every call (a snapshot, not incremental), so the most recent todo-kind
+ *  tool block is the source of truth for the current state. */
+export interface Todo {
+  /** Imperative label (e.g. "Fix the login bug"). */
+  content: string;
+  status: TodoStatus;
+  /** Present-tense label some agents include (Claude's `activeForm`), shown while
+   *  the task is in progress. */
+  activeForm?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Sessions & projects
 // ---------------------------------------------------------------------------
@@ -106,7 +122,7 @@ export interface SessionMeta {
    *  Claude session id itself. */
   id: string;
   /** Native engine session id used to resume the conversation (Claude session
-   *  id, Cursor chat id, or Codex thread id — all UUIDs). */
+   *  id, Cursor chat id, Codex thread id, Kimi session id, or Kiro session id). */
   claudeSessionId?: string;
   title: string;
   cwd: string;
@@ -119,10 +135,27 @@ export interface SessionMeta {
   updatedAt: number;
   messageCount: number;
   running: boolean;
-  /** 'vibe' = created/managed in Vibe; 'claude'/'cursor'/'codex' = discovered from that CLI. */
-  source: 'vibe' | 'claude' | 'cursor' | 'codex';
+  /** 'vibe' = managed in Vibe; otherwise discovered from that CLI. */
+  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro';
   /** Which machine the project lives on (local machine name, or an SSH host). */
   host: string;
+  /** True when the cwd is an auto-created throwaway folder under the fixed
+   *  workdirs base. These never surface in the "common directories" list. */
+  ephemeral?: boolean;
+  /** User-favorited/pinned session. Pinned sessions sort to the top of the
+   *  sidebar ahead of recency. Stored as an id set on the server, so it applies
+   *  to discovered (non-adopted) sessions too. */
+  pinned?: boolean;
+}
+
+/** Sidebar display order: favorited (pinned) sessions first, then most-recently-
+ *  updated. The single comparator shared by the server (list output + cache) and
+ *  the web client (live session_meta re-sort) so the two always agree on order. */
+export function compareSessions(a: SessionMeta, b: SessionMeta): number {
+  const pa = a.pinned ? 1 : 0;
+  const pb = b.pinned ? 1 : 0;
+  if (pa !== pb) return pb - pa;
+  return b.updatedAt - a.updatedAt;
 }
 
 /** A remote machine reachable over SSH whose Claude sessions Vibe surfaces. */
@@ -131,20 +164,116 @@ export interface RemoteHost {
   name: string;
   /** SSH target: an `~/.ssh/config` alias or `user@host[:port]`. */
   ssh: string;
-  /** Optional HTTP(S) proxy the remote agent (claude / cursor-agent / codex)
-   *  routes its API traffic through when launched on this host. Injected as
-   *  HTTP_PROXY / HTTPS_PROXY (both cases) into the remote process env. */
+  /** Optional HTTP(S) proxy the remote agent (claude / cursor-agent / codex /
+   *  kimi / kiro-cli) routes its API traffic through when launched on this host.
+   *  Injected as HTTP_PROXY / HTTPS_PROXY (both cases) into the remote process
+   *  env. This is the default for every agent; a value in `proxyByAgent`
+   *  overrides it. */
   proxy?: string;
+  /** Per-agent proxy overrides — an entry here beats `proxy` for that agent's API
+   *  traffic. Empty/absent entries fall back to `proxy`. Lets one host route, say,
+   *  Cursor and Claude through different proxies. */
+  proxyByAgent?: Partial<Record<AgentKind, string>>;
 }
+
+/** Transport for an MCP server managed by Vibe. */
+export type McpTransport = 'stdio' | 'sse' | 'http';
+
+/**
+ * A Model Context Protocol server definition. Stdio servers run a command;
+ * sse/http servers point at a URL. The command/path/env are interpreted on the
+ * host the session runs on — i.e. on the remote machine for SSH sessions — so a
+ * server enabled for a remote host must reference executables that exist there.
+ */
+export interface McpServerDef {
+  /** Unique name; also the namespace the agent exposes the server's tools under. */
+  name: string;
+  transport: McpTransport;
+  /** stdio: the executable to launch. */
+  command?: string;
+  /** stdio: argv passed to the command. */
+  args?: string[];
+  /** stdio: extra environment variables for the spawned process. */
+  env?: Record<string, string>;
+  /** sse | http: the server endpoint. */
+  url?: string;
+  /** sse | http: request headers. */
+  headers?: Record<string, string>;
+  /** http | sse only. `oauth` = Vibe runs the standard MCP-OAuth flow (RFC 9728
+   *  → RFC 8414 → RFC 7591 DCR → PKCE), stores + refreshes tokens, and injects
+   *  `Authorization: Bearer` for every turn. Default/`none` = use static headers. */
+  auth?: 'none' | 'oauth';
+}
+
+/** Connection status for an OAuth-managed MCP server. */
+export interface McpOAuthStatus {
+  connected: boolean;
+  /** Epoch ms when the access token expires (if connected). */
+  expiresAt?: number;
+}
+
+/**
+ * Full MCP configuration surfaced to the UI: the global registry of server
+ * definitions plus the per-scope enable lists. A scope is either `'local'`
+ * (sessions running on this machine) or a remote host name.
+ */
+export interface McpConfigSnapshot {
+  servers: McpServerDef[];
+  /** Scope -> enabled server names. The `'local'` scope covers non-remote sessions. */
+  enabled: Record<string, string[]>;
+  /** OAuth connection status, keyed by server name (oauth-managed servers only). */
+  oauth: Record<string, McpOAuthStatus>;
+}
+
+/**
+ * A saved New-session engine configuration. Host-agnostic: the four fields a
+ * user tends to re-pick each time. Selecting a preset in the New Session dialog
+ * fills these in; the dialog's host-aware fallbacks reconcile anything that
+ * isn't valid for the chosen machine (e.g. a Codex model absent on a remote box).
+ */
+export interface SessionPreset {
+  /** Unique display name; also the key. */
+  name: string;
+  agent: AgentKind;
+  model: string;
+  permissionMode: PermissionMode;
+  effort: EffortLevel;
+}
+
+/** Install + version info for one agent CLI on a host. */
+export interface AgentInstallInfo {
+  installed: boolean;
+  /** Parsed version string when the CLI reported one (e.g. `2.1.191`). */
+  version?: string;
+}
+
+/** Per-agent install state discovered on a host. */
+export type HostAgentsStatus = Record<AgentKind, AgentInstallInfo>;
 
 export interface HostStatus {
   name: string;
   ssh: string;
   /** Whether the last reachability check succeeded. */
   online: boolean;
-  /** Whether `claude` is installed on the host. */
+  /** Whether `claude` is installed on the host (kept for older clients). */
   claude: boolean;
+  /** Per-agent install + version probe. */
+  agents?: HostAgentsStatus;
   error?: string;
+}
+
+/** Latest published versions for each agent CLI (server-side cache). */
+export type AgentLatestVersions = Partial<Record<AgentKind, string>>;
+
+/** Result of updating (or installing) an agent CLI on a host. */
+export interface AgentUpdateResult {
+  ok: boolean;
+  agent: AgentKind;
+  /** Version after the update, when we could re-probe it. */
+  version?: string;
+  error?: string;
+  /** Truncated command output for debugging. */
+  log?: string;
 }
 
 export interface ProjectDir {

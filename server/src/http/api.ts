@@ -7,45 +7,51 @@ import { requireAuth } from '../auth.js';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
-import { getRecentProjects, validateDir } from '../projects.js';
-import { getClaudeSessionInfo, listClaudeSessions, type DiscoveredSession } from '../sessions/discovery.js';
-import { listCursorSessions, resolveCursorSessionSync } from '../cursor/discovery.js';
+import { createLocalWorkdir, getRecentProjects, validateDir } from '../projects.js';
+import { getClaudeSessionInfo, type DiscoveredSession } from '../sessions/discovery.js';
+import { listAllSessions } from '../sessions/list.js';
+import { peekSessionListCache } from '../sessions/listCache.js';
+import { resolveCursorSessionSync } from '../cursor/discovery.js';
 import { invalidateCursorModelsCache, listCursorModels, listRemoteCursorModels } from '../cursor/models.js';
-import { listCodexSessions, resolveCodexSessionSync } from '../codex/discovery.js';
-import { listCodexModels } from '../codex/models.js';
+import { resolveCodexSessionSync } from '../codex/discovery.js';
+import { invalidateCodexModelsCache, listCodexModels, listRemoteCodexModels } from '../codex/models.js';
+import {
+  discoverKimiCapabilities,
+  discoverRemoteKimiCapabilities,
+  invalidateKimiCapabilitiesCache,
+} from '../kimi/capabilities.js';
+import { resolveKimiSessionSync } from '../kimi/discovery.js';
+import { deleteKimiTranscript } from '../kimi/transcript.js';
+import { resolveKiroSessionSync } from '../kiro/discovery.js';
+import {
+  invalidateKiroModelsCache,
+  KIRO_PERMISSIONS,
+  listKiroModels,
+  listRemoteKiroModels,
+} from '../kiro/models.js';
+import { deleteKiroTranscript } from '../kiro/transcript.js';
 import { searchConversations } from '../sessions/search.js';
-import { hostRegistry } from '../remote/hosts.js';
-import { listRemoteSessions, getRemoteSessionInfo } from '../remote/discovery.js';
-import { sshExec, loginShellCommand, shQuote, sshCheck } from '../remote/ssh.js';
-import { encodeRemoteId, parseSessionId } from '../remote/sessionId.js';
+import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
+import { mcpRegistry } from '../mcp/registry.js';
+import { oauthStore } from '../mcp/oauth.js';
+import { presetRegistry } from '../presets/registry.js';
+import { getRemoteSessionInfo } from '../remote/discovery.js';
+import { sshExec, loginShellCommand, shQuote } from '../remote/ssh.js';
+import { createRemoteWorkdir } from '../remote/workdir.js';
+import {
+  getLatestAgentVersions,
+  isAgentKind,
+  localProbeAgents,
+  localUpdateAgent,
+  sshProbeAgents,
+  sshUpdateAgent,
+} from '../remote/agents.js';
+import { parseSessionId } from '../remote/sessionId.js';
 import { hub } from '../ws/hub.js';
-import type { AgentKind, EffortLevel, FileEntry, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
+import type { AgentKind, EffortLevel, FileEntry, PermissionMode } from '../../../shared/protocol.js';
 
 const permissionModes: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
-const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
-
-/**
- * Present a CLI-discovered session as session metadata. For remote hosts the id
- * is namespaced (`host::sessionId`) and tagged with the host name.
- */
-function discoveredToMeta(d: DiscoveredSession, host: string, remote: boolean, agent: AgentKind = 'claude'): SessionMeta {
-  return {
-    id: remote ? encodeRemoteId(host, d.claudeSessionId) : d.claudeSessionId,
-    claudeSessionId: d.claudeSessionId,
-    title: d.title,
-    cwd: d.cwd,
-    model: d.model,
-    permissionMode: 'default',
-    effort: config.defaultEffort as EffortLevel,
-    agent,
-    createdAt: d.createdAt,
-    updatedAt: d.updatedAt,
-    messageCount: d.messageCount,
-    running: false,
-    source: agent === 'cursor' ? 'cursor' : agent === 'codex' ? 'codex' : 'claude',
-    host,
-  };
-}
+const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 
 /** Cache a remote session's resolution so the WS hub can build a runtime for it. */
 async function ensureRemoteCached(sessionId: string): Promise<void> {
@@ -55,21 +61,25 @@ async function ensureRemoteCached(sessionId: string): Promise<void> {
   if (!remoteHost) return;
   const info = await getRemoteSessionInfo(remoteHost, claudeSessionId);
   if (info) {
-    hub.cacheRemoteSession(sessionId, { host: remoteHost.name, sshTarget: remoteHost.ssh, cwd: info.cwd, model: info.model, title: info.title, proxy: remoteHost.proxy });
+    hub.cacheRemoteSession(sessionId, { host: remoteHost.name, sshTarget: remoteHost.ssh, cwd: info.cwd, model: info.model, title: info.title, proxy: proxyForAgent(remoteHost, 'claude') });
   }
 }
 
-const createSchema = z.object({
-  cwd: z.string().min(1),
-  model: z.string().min(1).optional(),
-  permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']).optional(),
-  effort: z.enum(effortLevels).optional(),
-  /** Engine to drive the session; defaults to the server's default agent. */
-  agent: z.enum(['claude', 'cursor', 'codex']).optional(),
-  title: z.string().optional(),
-  /** Remote host name to create the session on; omit for local. */
-  host: z.string().optional(),
-});
+const createSchema = z
+  .object({
+    cwd: z.string().min(1).optional(),
+    /** Skip the working-directory picker: Vibe creates a throwaway folder for the session. */
+    autoCwd: z.boolean().optional(),
+    model: z.string().min(1).optional(),
+    permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']).optional(),
+    effort: z.enum(effortLevels).optional(),
+    /** Engine to drive the session; defaults to the server's default agent. */
+    agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro']).optional(),
+    title: z.string().optional(),
+    /** Remote host name to create the session on; omit for local. */
+    host: z.string().optional(),
+  })
+  .refine((d) => d.autoCwd || (d.cwd && d.cwd.trim() !== ''), { message: 'cwd or autoCwd is required' });
 
 const updateSchema = z.object({
   title: z.string().min(1).optional(),
@@ -78,15 +88,48 @@ const updateSchema = z.object({
   effort: z.enum(effortLevels).optional(),
 });
 
+const pinSchema = z.object({ pinned: z.boolean() });
+
+// Per-agent proxy overrides: a sparse map keyed by AgentKind. Zod 4's
+// `z.record(enumKeys, value)` would require *every* enum key to be present, so
+// model it as a partial object instead (unknown keys are stripped by default).
+const proxyByAgentSchema = z
+  .object({ claude: z.string(), cursor: z.string(), codex: z.string(), kimi: z.string(), kiro: z.string() })
+  .partial();
+
 const hostSchema = z.object({
   name: z.string().min(1).refine((n) => !n.includes('::'), 'name cannot contain "::"'),
   ssh: z.string().min(1),
   proxy: z.string().optional(),
+  proxyByAgent: proxyByAgentSchema.optional(),
 });
 
 const hostPatchSchema = z.object({
   ssh: z.string().min(1).optional(),
   proxy: z.string().optional(),
+  proxyByAgent: proxyByAgentSchema.optional(),
+});
+
+// MCP server definition (stdio command, or sse/http URL). Validation of which
+// fields apply is finalized server-side in the registry (normalize()).
+const mcpServerSchema = z.object({
+  name: z.string().min(1),
+  transport: z.enum(['stdio', 'sse', 'http']),
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  url: z.string().optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  auth: z.enum(['none', 'oauth']).optional(),
+});
+
+// Saved New-session engine preset (agent + model + permission + effort).
+const presetSchema = z.object({
+  name: z.string().min(1),
+  agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro']),
+  model: z.string().min(1),
+  permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']),
+  effort: z.enum(effortLevels),
 });
 
 // -- File browser/editor (local + remote) ------------------------------------
@@ -97,8 +140,13 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** Max bytes for a raw (e.g. image) download. */
 const MAX_RAW_BYTES = 25 * 1024 * 1024;
 
-/** Max bytes for a single uploaded file (kept symmetric with downloads). */
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** Max bytes for a single uploaded file (chat attachments + FilesPane upload). */
+const MAX_UPLOAD_MB = 100;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+/** Raw-body parser limit — set a touch above the cap so the handler's friendly
+ *  'file too large' message wins over body-parser's terse 413 for files just
+ *  over the limit. Only files larger than this are rejected by the parser. */
+const UPLOAD_BODY_LIMIT = (MAX_UPLOAD_MB + 10) * 1024 * 1024;
 
 /** Content-Type for image extensions served by /files/raw. */
 const imageMimes: Record<string, string> = {
@@ -132,6 +180,48 @@ function resolveFileTarget(host?: string): { remote: boolean; target: string } {
   if (!host) return { remote: false, target: '' };
   const h = hostRegistry.get(host);
   return { remote: true, target: h?.ssh ?? host };
+}
+
+/** Reduce a session id to a filesystem-safe slug for a per-session temp folder. */
+function attachmentSlug(sessionId: string): string {
+  return sessionId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || 'session';
+}
+
+/** Per-session dir on the host running the session where chat attachments land.
+ *  Local uses the OS temp dir; remote assumes /tmp (Linux remotes). The agent
+ *  runs on this host, so a path here is reachable by its file tools. */
+function localAttachmentDir(slug: string): string {
+  return path.join(os.tmpdir(), 'vibe', slug);
+}
+function remoteAttachmentDir(slug: string): string {
+  return `/tmp/vibe/${slug}`;
+}
+
+/** Write an uploaded chat attachment locally, mkdir -p the session folder. */
+function writeLocalAttachment(slug: string, name: string, body: Buffer): string {
+  const dir = localAttachmentDir(slug);
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = path.join(dir, name);
+  fs.writeFileSync(dest, body);
+  return dest;
+}
+
+/** Write an uploaded chat attachment on a remote host over SSH. mkdir -p the
+ *  folder, then pipe a base64 of the bytes through `base64 -d > file` (sshExec's
+ *  stdin is text-only, like /files/upload). */
+async function writeRemoteAttachment(target: string, slug: string, name: string, body: Buffer): Promise<string> {
+  const dir = remoteAttachmentDir(slug);
+  const dest = `${dir}/${name}`;
+  const mk = await sshExec(target, loginShellCommand(`mkdir -p ${shQuote(dir)}`), { timeoutMs: 10_000 });
+  if (mk.timedOut) throw new HttpError(504, 'write timed out');
+  if (mk.code !== 0) throw new HttpError(400, (mk.stderr.trim() || 'mkdir failed').slice(0, 500));
+  const r = await sshExec(target, loginShellCommand(`base64 -d > ${shQuote(dest)}`), {
+    input: body.toString('base64'),
+    timeoutMs: 120_000,
+  });
+  if (r.timedOut) throw new HttpError(504, 'write timed out');
+  if (r.code !== 0) throw new HttpError(400, (r.stderr.trim() || 'write failed').slice(0, 500));
+  return dest;
 }
 
 /** An error carrying an HTTP status, so shared helpers can signal e.g. 422/504
@@ -206,8 +296,51 @@ const completeSchema = z.object({
   host: z.string().optional(),
 });
 
+/** Best-effort origin the user's browser reaches this server at (respects the
+ *  X-Forwarded-* headers a reverse proxy sets). Used to build OAuth redirect URIs. */
+function vibeBaseUrl(req: express.Request): string {
+  const protoH = req.headers['x-forwarded-proto'];
+  const proto = (Array.isArray(protoH) ? protoH[0] : protoH) || (req.protocol === 'https' || req.secure ? 'https' : 'http');
+  const hostH = req.headers['x-forwarded-host'];
+  const host = (Array.isArray(hostH) ? hostH[0] : hostH) || req.get('host') || 'localhost';
+  return `${proto}://${host}`;
+}
+
+/** Minimal self-closing result page rendered at the end of the OAuth callback. */
+function oauthResultPage(title: string, message: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Vibe — ${title}</title>
+<style>body{font:14px/1.5 -apple-system,Segoe UI,sans-serif;background:#0b0f17;color:#cbd5e1;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.box{text-align:center;max-width:380px;padding:24px}</style></head>
+<body><div class="box"><h2 style="margin:0 0 8px">${title}</h2><p style="color:#94a3b8">${message}</p>
+<p><a href="/" style="color:#6ee7b7">Open Vibe</a></p></div>
+<script>try{setTimeout(()=>window.close(),1500);}catch(e){}</script></body></html>`;
+}
+
 export function createApiRouter(): Router {
   const router = Router();
+
+  // The OAuth callback is hit by the user's browser as a top-level redirect from
+  // the MCP provider — it carries no Authorization header — so it MUST sit before
+  // requireAuth. CSRF is bounded by the random `state` we issued at /start.
+  router.get('/mcp/oauth/callback', async (req, res) => {
+    const { code, state, error, error_description } = req.query as Record<string, string | undefined>;
+    const fail = (msg: string) =>
+      res
+        .type('html')
+        .status(400)
+        .send(
+          oauthResultPage('Could not connect', msg),
+        );
+    if (error) return fail(`${error}${error_description ? `: ${error_description}` : ''}`);
+    if (!code || !state) return fail('missing code/state in callback');
+    try {
+      const name = await oauthStore.handleCallback(state, code);
+      res.type('html').send(oauthResultPage('Connected', `MCP server “${name}” is connected. You can close this tab and return to Vibe.`));
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : 'token exchange failed');
+    }
+  });
+
   router.use(requireAuth);
 
   router.get('/me', (_req, res) => {
@@ -229,9 +362,28 @@ export function createApiRouter(): Router {
   });
 
   // Codex has no `models` subcommand; its cached model list (~/.codex/models_cache.json)
-  // is read directly so the picker matches the installed CLI.
-  router.get('/codex/models', (_req, res) => {
-    res.json({ models: listCodexModels() });
+  // is read directly so the picker matches the installed CLI. Optional `?host=` reads
+  // the cache on that remote host (with its proxy) so models match what a turn there
+  // can actually use — same rationale as Cursor above.
+  router.get('/codex/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    const models = host ? await listRemoteCodexModels(host) : listCodexModels();
+    res.json({ models });
+  });
+
+  // Kimi exposes configured model aliases as JSON. Permission modes are gated
+  // by flags/ACP support advertised by that exact local or remote CLI build.
+  router.get('/kimi/capabilities', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    const capabilities = host ? await discoverRemoteKimiCapabilities(host) : await discoverKimiCapabilities();
+    res.json(capabilities);
+  });
+
+  // Kiro CLI lists models as JSON; permission modes are fixed (spawn trust flags + planner mode).
+  router.get('/kiro/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    const models = host ? await listRemoteKiroModels(host) : await listKiroModels();
+    res.json({ models, permissions: KIRO_PERMISSIONS });
   });
 
   router.post('/projects/validate', (req, res) => {
@@ -485,7 +637,7 @@ export function createApiRouter(): Router {
   // text-only — the mirror of how /files/raw ships remote binary back).
   router.post(
     '/files/upload',
-    express.raw({ type: () => true, limit: 30 * 1024 * 1024 }),
+    express.raw({ type: () => true, limit: UPLOAD_BODY_LIMIT }),
     async (req, res) => {
       const parsed = filesUploadQuerySchema.safeParse(req.query);
       if (!parsed.success) {
@@ -498,7 +650,7 @@ export function createApiRouter(): Router {
         return;
       }
       if (body.length > MAX_UPLOAD_BYTES) {
-        res.status(413).json({ error: 'file too large (>25MB)' });
+        res.status(413).json({ error: `file too large (limit ${MAX_UPLOAD_MB}MB)` });
         return;
       }
       const { dir, host } = parsed.data;
@@ -525,6 +677,45 @@ export function createApiRouter(): Router {
         res.json({ ok: true, path: dest });
       } catch (err) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'write failed' });
+      }
+    },
+  );
+
+  // Attach a file to a chat message. The raw bytes are the body (route-local
+  // express.raw, like /files/upload); `name` is reduced to its basename. The
+  // file lands in a per-session temp dir on the session's host (resolved via
+  // hub.locate, so it works for local and SSH-remote sessions alike) and the
+  // absolute path is returned for the client to fold into the prompt text.
+  router.post(
+    '/sessions/:id/attachments',
+    express.raw({ type: () => true, limit: UPLOAD_BODY_LIMIT }),
+    async (req, res) => {
+      const id = req.params.id;
+      const rawName = typeof req.query.name === 'string' ? req.query.name : '';
+      const name = path.basename(rawName) || 'upload';
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        res.status(400).json({ error: 'empty file' });
+        return;
+      }
+      if (body.length > MAX_UPLOAD_BYTES) {
+        res.status(413).json({ error: `file too large (limit ${MAX_UPLOAD_MB}MB)` });
+        return;
+      }
+      const loc = hub.locate(id);
+      if (!loc) {
+        res.status(404).json({ error: 'session not found' });
+        return;
+      }
+      const slug = attachmentSlug(id);
+      try {
+        const dest = loc.sshTarget
+          ? await writeRemoteAttachment(loc.sshTarget, slug, name, body)
+          : writeLocalAttachment(slug, name, body);
+        res.json({ ok: true, path: dest });
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'write failed' });
       }
     },
   );
@@ -557,8 +748,19 @@ export function createApiRouter(): Router {
       res.status(404).json({ error: 'unknown host' });
       return;
     }
-    // Proxy/egress changes which models Cursor advertises for that host.
-    if (parsed.data.proxy !== undefined) invalidateCursorModelsCache(updated.name);
+    // Any proxy change (default or a per-agent override) can move which models a
+    // host advertises (Cursor/Kiro) or caches (Codex), and which aliases Kimi sees —
+    // so drop discovery caches and let the next request re-fetch.
+    const proxyChanged = parsed.data.proxy !== undefined || parsed.data.proxyByAgent !== undefined;
+    // SSH/proxy changes can point discovery at a different CLI/config.
+    if (parsed.data.ssh !== undefined || proxyChanged) {
+      invalidateKimiCapabilitiesCache(updated.name);
+      invalidateKiroModelsCache(updated.name);
+    }
+    if (proxyChanged) {
+      invalidateCursorModelsCache(updated.name);
+      invalidateCodexModelsCache(updated.name);
+    }
     res.json({ host: updated });
   });
 
@@ -567,101 +769,182 @@ export function createApiRouter(): Router {
     res.json({ ok: true });
   });
 
-  // Reachability + claude-installed probe for a host (by name or raw ssh target).
+  // -- MCP servers (global registry + per-scope enable) --------------------
+
+  router.get('/mcp', (_req, res) => {
+    res.json(mcpRegistry.snapshot());
+  });
+
+  // Insert or update a server definition in the global registry.
+  router.post('/mcp/servers', (req, res) => {
+    const parsed = mcpServerSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid server' });
+      return;
+    }
+    const server = mcpRegistry.upsert(parsed.data);
+    if (!server) {
+      res.status(400).json({ error: 'invalid server definition (stdio needs command; sse/http needs url)' });
+      return;
+    }
+    res.json({ server });
+  });
+
+  router.delete('/mcp/servers/:name', (req, res) => {
+    mcpRegistry.remove(req.params.name);
+    res.json({ ok: true });
+  });
+
+  // Set which server names are enabled for a scope ('local' or a host name).
+  router.put('/mcp/enabled/:scope', (req, res) => {
+    const parsed = z.object({ names: z.array(z.string()) }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid enable list' });
+      return;
+    }
+    mcpRegistry.setEnabled(req.params.scope, parsed.data.names);
+    res.json({ enabled: mcpRegistry.enabledFor(req.params.scope) });
+  });
+
+  // -- Saved New-session presets (agent + model + permission + effort) --------
+
+  router.get('/presets', (_req, res) => {
+    res.json({ presets: presetRegistry.list() });
+  });
+
+  router.post('/presets', (req, res) => {
+    const parsed = presetSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid preset' });
+      return;
+    }
+    const preset = presetRegistry.upsert(parsed.data);
+    if (!preset) {
+      res.status(400).json({ error: 'invalid preset definition' });
+      return;
+    }
+    res.json({ preset });
+  });
+
+  router.delete('/presets/:name', (req, res) => {
+    presetRegistry.remove(req.params.name);
+    res.json({ ok: true });
+  });
+
+  // Begin the MCP-OAuth flow for a server: discover + register, return the
+  // provider consent URL for the client to open in the user's browser.
+  router.post('/mcp/oauth/start', async (req, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    const def = mcpRegistry.get(name);
+    if (!def || def.transport === 'stdio' || def.auth !== 'oauth' || !def.url) {
+      res.status(400).json({ error: 'not an OAuth remote MCP server' });
+      return;
+    }
+    const redirectUri = `${vibeBaseUrl(req)}/api/mcp/oauth/callback`;
+    try {
+      const authUrl = await oauthStore.startAuth(name, def.url, redirectUri);
+      res.json({ authUrl });
+    } catch (err) {
+      log.warn('mcp oauth start failed', err);
+      res.status(502).json({ error: err instanceof Error ? err.message : 'OAuth discovery failed' });
+    }
+  });
+
+  // Drop stored tokens for an OAuth server (best-effort revocation).
+  router.post('/mcp/oauth/disconnect/:name', async (req, res) => {
+    await oauthStore.disconnect(req.params.name);
+    res.json({ ok: true, oauth: oauthStore.snapshotStatus() });
+  });
+
+  // Reachability + per-agent install/version probe for a host (by name or raw ssh target).
+  // `local` / the configured localName probes this machine without SSH.
   router.get('/hosts/:name/check', async (req, res) => {
-    const host = hostRegistry.get(req.params.name);
-    const target = host?.ssh ?? req.params.name;
-    const result = await sshCheck(target);
-    res.json({ name: req.params.name, ssh: target, ...result });
+    const name = req.params.name;
+    if (name === 'local' || name === config.localName) {
+      const result = await localProbeAgents();
+      res.json({ name: config.localName, ssh: 'local', ...result });
+      return;
+    }
+    const host = hostRegistry.get(name);
+    const target = host?.ssh ?? name;
+    const result = await sshProbeAgents(target);
+    res.json({ name, ssh: target, ...result });
+  });
+
+  // Latest published versions for all supported agents (cached server-side).
+  router.get('/agents/latest', async (_req, res) => {
+    const versions = await getLatestAgentVersions();
+    res.json({ versions });
+  });
+
+  // Install or upgrade an agent CLI on a host (local machine or remote over SSH).
+  router.post('/hosts/:name/agents/:agent/update', async (req, res) => {
+    const agentParam = req.params.agent;
+    if (!isAgentKind(agentParam)) {
+      res.status(400).json({ error: 'agent must be claude, cursor, codex, kimi, or kiro' });
+      return;
+    }
+    const name = req.params.name;
+    const isLocal = name === 'local' || name === config.localName;
+    if (!isLocal && !hostRegistry.get(name)) {
+      res.status(404).json({ error: 'unknown host' });
+      return;
+    }
+    try {
+      const result = isLocal
+        ? await localUpdateAgent(agentParam)
+        : await sshUpdateAgent(hostRegistry.get(name)!.ssh, agentParam);
+      if (!result.ok) {
+        res.status(502).json(result);
+        return;
+      }
+      if (agentParam === 'kimi') invalidateKimiCapabilitiesCache(isLocal ? undefined : name);
+      if (agentParam === 'kiro') invalidateKiroModelsCache(isLocal ? undefined : name);
+      res.json(result);
+    } catch (err) {
+      log.warn('agent update failed', err);
+      res.status(500).json({
+        ok: false,
+        agent: agentParam,
+        error: err instanceof Error ? err.message : 'update failed',
+      });
+    }
   });
 
   // Unified list: local Vibe-managed + local CLI-discovered + every remote
   // host's sessions, deduped and tagged with their host.
   router.get('/sessions', async (_req, res) => {
-    const stored = sessionStore.list();
-    const storeMetas = stored.map((s) => toMeta(s, hub.isRunning(s.id), 'vibe'));
-
-    // A conversation is identified by its (bare) Claude session id; dedup
-    // discovered sessions against that so a stored session and its on-disk
-    // transcript never both appear.
-    const known = new Set<string>();
-    for (const s of stored) {
-      known.add(s.id);
-      if (s.claudeSessionId) known.add(s.claudeSessionId);
-    }
-
-    const discovered: SessionMeta[] = [];
-
-    // Local CLI sessions (Claude).
-    try {
-      for (const d of await listClaudeSessions()) {
-        if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
-          discovered.push(discoveredToMeta(d, config.localName, false));
-        }
-      }
-    } catch (err) {
-      log.warn('local session discovery failed', err);
-    }
-
-    // Local Cursor CLI sessions (~/.cursor/chats, cwd recovered via md5).
-    try {
-      for (const d of listCursorSessions()) {
-        if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
-          discovered.push(discoveredToMeta(d, config.localName, false, 'cursor'));
-        }
-      }
-    } catch (err) {
-      log.warn('cursor session discovery failed', err);
-    }
-
-    // Local Codex CLI sessions (~/.codex/sessions/**/rollout-*.jsonl).
-    try {
-      for (const d of listCodexSessions()) {
-        if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
-          discovered.push(discoveredToMeta(d, config.localName, false, 'codex'));
-        }
-      }
-    } catch (err) {
-      log.warn('codex session discovery failed', err);
-    }
-
-    // Remote hosts (in parallel; a down host just contributes nothing).
-    await Promise.all(
-      hostRegistry.list().map(async (host) => {
-        try {
-          for (const d of await listRemoteSessions(host)) {
-            const id = encodeRemoteId(host.name, d.claudeSessionId);
-            hub.cacheRemoteSession(id, { host: host.name, sshTarget: host.ssh, cwd: d.cwd, model: d.model, title: d.title, proxy: host.proxy });
-            // Dedup by the conversation's Claude session id; the hide-list keys
-            // on the host-namespaced id (what delete dismisses).
-            if (!known.has(d.claudeSessionId) && !known.has(id) && !sessionStore.isHidden(id)) {
-              discovered.push(discoveredToMeta(d, host.name, true));
-            }
-          }
-        } catch (err) {
-          log.debug(`remote discovery failed for ${host.name}`, err);
-        }
-      }),
-    );
-
-    const sessions = [...storeMetas, ...discovered].sort((a, b) => b.updatedAt - a.updatedAt);
-    res.json({ sessions });
+    res.json({ sessions: await listAllSessions() });
   });
 
-  router.post('/sessions', (req, res) => {
+  router.post('/sessions', async (req, res) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'invalid body', details: parsed.error.issues });
       return;
     }
     const { host } = parsed.data;
-    let cwd = parsed.data.cwd;
+    // autoCwd only applies when the caller didn't also hand us an explicit path.
+    const wantAuto = !!parsed.data.autoCwd && !parsed.data.cwd?.trim();
+    let cwd = parsed.data.cwd?.trim() ?? '';
     if (host) {
       // Remote: trust the path (validated lazily when the turn runs over SSH).
-      if (!hostRegistry.get(host)) {
+      const remoteHost = hostRegistry.get(host);
+      if (!remoteHost) {
         res.status(400).json({ error: 'unknown host' });
         return;
       }
+      if (wantAuto) {
+        try {
+          cwd = await createRemoteWorkdir(remoteHost.ssh);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'remote workdir create failed';
+          res.status(msg.includes('timed out') ? 504 : 502).json({ error: msg });
+          return;
+        }
+      }
+    } else if (wantAuto) {
+      cwd = createLocalWorkdir();
     } else {
       const check = validateDir(cwd);
       if (!check.ok) {
@@ -673,12 +956,23 @@ export function createApiRouter(): Router {
     const agent: AgentKind = parsed.data.agent ?? config.defaultAgent;
     const session = sessionStore.create({
       cwd,
-      model: parsed.data.model || (agent === 'cursor' ? config.defaultCursorModel : agent === 'codex' ? config.defaultCodexModel : config.defaultModel),
+      model:
+        parsed.data.model
+        || (agent === 'cursor'
+          ? config.defaultCursorModel
+          : agent === 'codex'
+            ? config.defaultCodexModel
+            : agent === 'kimi'
+              ? config.defaultKimiModel
+              : agent === 'kiro'
+                ? config.defaultKiroModel
+                : config.defaultModel),
       permissionMode: (parsed.data.permissionMode as PermissionMode) || 'default',
       effort: (parsed.data.effort as EffortLevel) || (config.defaultEffort as EffortLevel),
       agent,
       title: parsed.data.title,
       host,
+      ephemeral: wantAuto || undefined,
     });
     const meta = toMeta(session, false, 'vibe');
     hub.broadcastMeta(session.id);
@@ -709,7 +1003,7 @@ export function createApiRouter(): Router {
         ? await getRemoteSessionInfo(remoteHost, claudeSessionId)
         : await getClaudeSessionInfo(id);
       let agent: AgentKind = 'claude';
-      // Not a Claude session — maybe a local Cursor chat or Codex rollout.
+      // Not a Claude session — maybe another local agent's native session.
       if (!info && !host) {
         const c = resolveCursorSessionSync(id);
         if (c) {
@@ -720,6 +1014,18 @@ export function createApiRouter(): Router {
           if (x) {
             info = x;
             agent = 'codex';
+          } else {
+            const k = resolveKimiSessionSync(id);
+            if (k) {
+              info = k;
+              agent = 'kimi';
+            } else {
+              const r = resolveKiroSessionSync(id);
+              if (r) {
+                info = r;
+                agent = 'kiro';
+              }
+            }
           }
         }
       }
@@ -749,12 +1055,31 @@ export function createApiRouter(): Router {
     res.json({ session: toMeta(updated, hub.isRunning(updated.id), 'vibe') });
   });
 
+  // Favorite/pin toggle. A standalone id set (like `hidden`) so it works for
+  // discovered sessions too without adopting them. The store patches the list
+  // cache; we broadcast the cached meta so other tabs stay in sync.
+  router.put('/sessions/:id/pin', (req, res) => {
+    const parsed = pinSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid body' });
+      return;
+    }
+    const id = req.params.id;
+    if (parsed.data.pinned) sessionStore.pin(id);
+    else sessionStore.unpin(id);
+    const meta = peekSessionListCache()?.find((s) => s.id === id);
+    if (meta) hub.broadcastMetaObject(meta);
+    res.json({ ok: true, pinned: parsed.data.pinned });
+  });
+
   // Delete = stop tracking in Vibe. We never delete the underlying ~/.claude
   // transcript; instead we dismiss it (so discovery won't resurface it).
   router.delete('/sessions/:id', (req, res) => {
     const id = req.params.id;
     const stored = sessionStore.get(id);
     sessionStore.remove(id);
+    if (stored?.agent === 'kimi') deleteKimiTranscript(id);
+    if (stored?.agent === 'kiro') deleteKiroTranscript(id);
     // Dismiss every form discovery might resurface it under (the list id and,
     // for local sessions, the bare Claude id).
     sessionStore.hide(id);

@@ -7,6 +7,8 @@ import { config } from './config.js';
 import { log } from './log.js';
 import { createApiRouter } from './http/api.js';
 import { attachWsServer } from './ws/server.js';
+import { startTelegramBot } from './telegram/index.js';
+import { prefetchSessionList } from './sessions/list.js';
 
 function localIPs(): string[] {
   const out: string[] = [];
@@ -23,14 +25,20 @@ function banner(): void {
   const line = '─'.repeat(54);
   const urls = ['localhost', ...localIPs()];
   log.ok('\n┌' + line + '┐');
-  log.ok('  Vibe — remote vibe coding for Claude Code');
+  log.ok('  Vibe — remote multi-agent coding');
   log.ok('├' + line + '┤');
   for (const host of urls) {
     log.info(`  http://${host}:${config.port}/?token=${config.token}`);
   }
   log.ok('└' + line + '┘');
   log.info('claude:', config.claudeExecutable ?? '(SDK bundled binary)');
+  log.info('cursor:', config.cursorExecutable ?? '(not found)');
+  log.info('codex:', config.codexExecutable ?? '(not found)');
+  log.info('kimi:', config.kimiExecutable ?? '(not found)');
   log.info('Open a link above. The token is also stored at', path.join(config.home, 'token'), '\n');
+  if (config.telegramBotToken) {
+    log.info('Telegram bot: enabled (token from VIBE_TELEGRAM_BOT_TOKEN)');
+  }
 }
 
 function main(): void {
@@ -54,14 +62,33 @@ function main(): void {
   const server = http.createServer(app);
   attachWsServer(server);
 
+  let telegram: { stop: () => Promise<void> } | null = null;
+
   server.listen(config.port, config.host, () => {
     banner();
+    prefetchSessionList();
+    telegram = startTelegramBot();
   });
 
   server.on('error', (err) => {
     log.error('server error:', err);
     process.exit(1);
   });
+
+  // Telegram long-polling keeps the event loop alive; stop it on shutdown so
+  // systemd restart doesn't hang waiting for the old process.
+  const shutdown = async (signal: string) => {
+    log.info(`shutting down (${signal})…`);
+    try {
+      await telegram?.stop();
+    } catch (err) {
+      log.warn('telegram stop failed', err);
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    process.exit(0);
+  };
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
 }
 
 main();

@@ -44,20 +44,30 @@ for a in "$@"; do
   case "$a" in --permission-mode=bypassPermissions) sandbox="IS_SANDBOX=1"; break ;; esac
   prev="$a"
 done
+# Line-buffer claude's stdout/stderr over ssh -T (no PTY → block buffering). Use
+# stdbuf only; do not wrap with `script` (breaks stdin). stdbuf execs a SINGLE
+# command, so it must wrap only `claude` itself — never the leading `cd` (a shell
+# builtin: `stdbuf … cd /p` → "failed to run command 'cd'", exit 127) nor the `&&`.
+# Apply the IS_SANDBOX=1 env prefix AFTER stdbuf so it stays leftmost: the shell
+# then exports it to stdbuf and through to its child claude.
+if command -v stdbuf >/dev/null 2>&1; then
+  claude_cmd="stdbuf -oL -eL $claude_cmd"
+fi
 [ -n "$sandbox" ] && claude_cmd="$sandbox $claude_cmd"
 
-# cd into the remote cwd, then run claude.
+# cd into the remote cwd (a builtin — the remote shell handles it), then run claude.
 if [ -n "${VIBE_REMOTE_CWD:-}" ]; then
   full="cd $(printf '%q' "$VIBE_REMOTE_CWD") && $claude_cmd"
 else
   full="$claude_cmd"
 fi
 
-# Run it through the user's remote login+interactive shell so version managers
-# (nvm/fnm/volta/…) put `claude` on PATH. `\${SHELL:-bash}` is escaped so the
-# LOCAL wrapper leaves it literal, then the REMOTE shell expands it (mirrors
-# loginShellCommand in remote/ssh.ts — it must NOT be quoted, or the remote
-# shell would try to run a command literally named `${SHELL:-bash}`).
+# Run it through `bash` explicitly so version managers (nvm/fnm/volta/…) put
+# `claude` on PATH and so POSIX syntax in $full works on hosts whose login
+# shell is non-POSIX (fish). SSH runs the remote command string under the
+# user's login shell — `${SHELL:-bash}` would be parsed by fish and rejected
+# ("${ is not a valid variable in fish"). `bash -lic` is invoked as a binary
+# by any shell (mirrors loginShellCommand in remote/ssh.ts).
 #
 # Optional per-host proxy (VIBE_PROXY): prepend HTTP(S)_PROXY in both cases so
 # the remote login shell — and the claude it launches — inherit them and route
@@ -67,7 +77,7 @@ if [ -n "${VIBE_PROXY:-}" ]; then
   q=$(printf '%q' "$VIBE_PROXY")
   proxy_prefix="HTTP_PROXY=$q HTTPS_PROXY=$q http_proxy=$q https_proxy=$q "
 fi
-remote="${proxy_prefix}\${SHELL:-bash} -lic $(printf '%q' "$full")"
+remote="${proxy_prefix}bash -lic $(printf '%q' "$full")"
 
 # Capture remote stderr to a side-channel file when runner.ts provides one
 # (VIBE_ERR_LOG). The Agent SDK's thrown error on a non-zero exit carries only

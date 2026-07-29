@@ -6,6 +6,7 @@ import { useStore } from '../store/store';
 import { MessageList } from './MessageList';
 import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
+import { TodoPane } from './TodoPane';
 import { ContextMeter } from './ContextMeter';
 import { Menu } from './Menu';
 import { Logo } from './Logo';
@@ -47,6 +48,7 @@ export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTermin
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
         <div className="pointer-events-auto">
           <PermissionPrompt sessionId={activeId} />
+          <TodoPane sessionId={activeId} />
           <Composer sessionId={activeId} />
         </div>
       </div>
@@ -74,7 +76,11 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
                 ? 'bg-accent/15 text-accent-soft'
                 : session.agent === 'codex'
                   ? 'bg-emerald-500/15 text-emerald-300'
-                  : 'bg-ink-700 text-slate-300',
+                  : session.agent === 'kimi'
+                    ? 'bg-sky-500/15 text-sky-300'
+                    : session.agent === 'kiro'
+                      ? 'bg-violet-500/15 text-violet-300'
+                      : 'bg-ink-700 text-slate-300',
             )}
           >
             {agentLabel(session.agent)}
@@ -88,7 +94,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 
       <ContextMeter sessionId={session.id} />
       <ModelControl />
-      {session.agent !== 'cursor' && <EffortControl />}
+      {session.agent !== 'cursor' && session.agent !== 'kimi' && <EffortControl />}
       <PermissionControl />
       <button
         type="button"
@@ -127,24 +133,33 @@ function ModelControl() {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
   const cursorModels = useStore((s) => s.cursorModels);
   const codexModels = useStore((s) => s.codexModels);
+  const kimiModels = useStore((s) => s.kimiModels);
+  const kiroModels = useStore((s) => s.kiroModels);
   const loadCursorModels = useStore((s) => s.loadCursorModels);
-  // Cursor's model list is large (search it); Codex/Claude are short. Allow a
-  // custom typed value for Cursor and Codex (both accept arbitrary model ids).
+  const loadCodexModels = useStore((s) => s.loadCodexModels);
+  const loadKimiCapabilities = useStore((s) => s.loadKimiCapabilities);
+  const loadKiroModels = useStore((s) => s.loadKiroModels);
+  // Cursor's model list is large (search it); Codex/Claude are short. Headless
+  // agents accept custom model ids or aliases, including Kimi/Kiro.
   const usePicker = session.agent !== 'claude';
 
-  // Reload Cursor models for this session's host (proxy/egress can hide models).
+  // Reload this agent's model list for the session's host: Cursor's egress/proxy
+  // can hide region-gated ids; Codex caches per host (~/.codex/models_cache.json).
   useEffect(() => {
-    if (session.agent !== 'cursor') return;
-    void loadCursorModels(session.host || undefined);
-  }, [session.agent, session.host, loadCursorModels]);
+    const h = session.host || undefined;
+    if (session.agent === 'cursor') void loadCursorModels(h);
+    else if (session.agent === 'codex') void loadCodexModels(h);
+    else if (session.agent === 'kimi') void loadKimiCapabilities(h);
+    else if (session.agent === 'kiro') void loadKiroModels(h);
+  }, [session.agent, session.host, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels]);
 
   return (
     <Menu
       align="right"
-      triggerLabel={`Model: ${modelLabel(session.model, cursorModels, codexModels)}`}
+      triggerLabel={`Model: ${modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels)}`}
       searchable={usePicker}
       allowCustom={usePicker}
-      items={modelsForAgent(session.agent, cursorModels, codexModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
+      items={modelsForAgent(session.agent, cursorModels, codexModels, kimiModels, kiroModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
       onSelect={(value) => void patchSession(session.id, { model: value })}
       trigger={
         <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-300 transition hover:border-ink-600">
@@ -157,12 +172,14 @@ function ModelControl() {
 
 function EffortControl() {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const codexModels = useStore((s) => s.codexModels);
+  const codexModelOpt = codexModels.find((m) => m.value === session.model) ?? null;
 
   return (
     <Menu
       align="right"
       triggerLabel={`Effort: ${effortLabel(session.effort)}`}
-      items={effortLevelsForAgent(session.agent).map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
+      items={effortLevelsForAgent(session.agent, codexModelOpt).map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
       onSelect={(value) => void patchSession(session.id, { effort: value as EffortLevel })}
       trigger={
         <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-300 transition hover:border-ink-600">
@@ -175,13 +192,15 @@ function EffortControl() {
 
 function PermissionControl() {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const kimiPermissionModes = useStore((s) => s.kimiPermissionModes);
+  const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
   const mode = session.permissionMode;
 
   return (
     <Menu
       align="right"
-      triggerLabel={`Permissions: ${permissionModeLabel(mode)}`}
-      items={permissionModesForAgent(session.agent).map((m) => ({ value: m.value, label: m.label, hint: m.hint, active: m.value === mode }))}
+      triggerLabel={`Permissions: ${permissionModeLabel(mode, session.agent, kimiPermissionModes, kiroPermissionModes)}`}
+      items={permissionModesForAgent(session.agent, kimiPermissionModes, kiroPermissionModes).map((m) => ({ value: m.value, label: m.label, hint: m.hint, active: m.value === mode }))}
       onSelect={(value) => void patchSession(session.id, { permissionMode: value as PermissionMode })}
       trigger={
         <span
@@ -219,7 +238,7 @@ function EmptyState({ onOpenSidebar, onNewSession }: ChatViewProps) {
         <Logo className="mb-5 h-12 w-12 text-accent/80" />
         <h2 className="text-lg font-semibold text-slate-200">Start vibe coding</h2>
         <p className="mt-1.5 max-w-xs text-sm text-slate-500">
-          Spin up a session in any directory on this machine and drive Claude Code from anywhere.
+          Spin up an agent session in any directory and drive it from anywhere.
         </p>
         <button
           onClick={onNewSession}

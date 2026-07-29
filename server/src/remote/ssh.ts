@@ -86,7 +86,7 @@ export function shQuote(s: string): string {
 }
 
 /** Shell prefix that exports `proxy` as HTTP(S)_PROXY in both cases, so a remote
- *  agent (claude / cursor-agent / codex — Node, Rust, …) routes its API traffic
+ *  agent (claude / cursor-agent / codex / kimi / kiro-cli — Node, Rust, …) routes its API traffic
  *  through it regardless of which variable the library reads. Meant to prepend
  *  to a remote command string (it ends in a trailing space). '' when no proxy.
  *
@@ -115,6 +115,22 @@ export function cleanRemoteStderr(s: string, maxLen = 1000): string {
 }
 
 /**
+ * Wrap a remote agent command so stdout stays line-buffered over `ssh -T`.
+ * Without a PTY, many runtimes block-buffer pipes — thinking/tool JSONL then
+ * arrives in one burst.
+ *
+ * Use `stdbuf -oL` only — do NOT wrap with `script`/PTY here: agents read the
+ * prompt from stdin, and `script` often breaks stdin forwarding over SSH.
+ */
+export function streamRemoteCommand(inner: string): string {
+  // `inner` is a full command with shell-safe quoting already applied.
+  return (
+    `if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL ${inner}; ` +
+    `else ${inner}; fi`
+  );
+}
+
+/**
  * Wrap a command so it runs through the user's login + interactive shell. This
  * is essential for finding `claude` (and the `node` it needs) on remote hosts:
  * non-interactive SSH doesn't source `~/.bashrc`/`~/.profile`, so tools managed
@@ -122,10 +138,17 @@ export function cleanRemoteStderr(s: string, maxLen = 1000): string {
  * warnings, banners) is irrelevant — we only parse stdout.
  */
 export function loginShellCommand(inner: string): string {
-  return `\${SHELL:-bash} -lic ${shQuote(inner)}`;
+  // Run through `bash` explicitly. SSH executes the remote command string under
+  // the user's *login* shell, so a host whose login shell is non-POSIX (fish)
+  // would otherwise parse `${SHELL:-bash}` itself and reject POSIX syntax
+  // ("${ is not a valid variable in fish"). Invoking `bash` as a binary works
+  // from any shell, and `-lic` loads the login+interactive rc files so version
+  // managers (nvm/fnm/volta) put tools on PATH. bash ships on macOS and Linux.
+  return `bash -lic ${shQuote(inner)}`;
 }
 
-/** Check reachability + whether `claude` is installed on a host. */
+/** Check reachability + whether `claude` is installed on a host.
+ *  Prefer `sshProbeAgents` from `./agents.js` when you need per-agent versions. */
 export async function sshCheck(target: string): Promise<{ online: boolean; claude: boolean; error?: string }> {
   const probe = loginShellCommand('command -v claude >/dev/null 2>&1 && echo HAS_CLAUDE');
   const res = await sshExec(target, `echo VIBE_OK; ${probe} 2>/dev/null || true`, { timeoutMs: 15_000 });

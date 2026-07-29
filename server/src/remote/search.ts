@@ -1,7 +1,7 @@
 import { log } from '../log.js';
 import { isClaudeSessionId } from '../sessions/discovery.js';
 import type { RemoteHost } from '../../../shared/protocol.js';
-import { shQuote, sshExec } from './ssh.js';
+import { loginShellCommand, shQuote, sshExec } from './ssh.js';
 
 // Record/field separators (control chars) keep the bundle unambiguous vs JSON,
 // matching remote/discovery.ts. JSON escapes control chars, so RS/FS never
@@ -56,7 +56,7 @@ function bundleCmd(query: string): string {
  * matching files contribute any content to the transfer.
  */
 export async function searchRemoteHost(host: RemoteHost, query: string): Promise<RemoteSearchHit[]> {
-  const res = await sshExec(host.ssh, bundleCmd(query), { timeoutMs: 20_000 });
+  const res = await sshExec(host.ssh, loginShellCommand(bundleCmd(query)), { timeoutMs: 20_000 });
   if (res.code !== 0) {
     log.debug(`remote search failed for ${host.name}`, res.stderr.trim().slice(0, 120));
     return [];

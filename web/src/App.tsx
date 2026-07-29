@@ -121,7 +121,7 @@ function TokenGate() {
           <Logo className="h-8 w-8 text-accent" />
           <div>
             <h1 className="text-lg font-semibold text-slate-100">Vibe</h1>
-            <p className="text-xs text-slate-500">Remote vibe coding for Claude Code</p>
+            <p className="text-xs text-slate-500">Remote multi-agent vibe coding</p>
           </div>
         </div>
         <label className="mb-1.5 block text-xs font-medium text-slate-400">Access token</label>

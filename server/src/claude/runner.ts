@@ -7,8 +7,9 @@ import { config } from '../config.js';
 import { log } from '../log.js';
 import { StreamNormalizer } from './normalize.js';
 import { REMOTE_STDERR_NOISE, sshConnectPrefix } from '../remote/ssh.js';
-import type { EffortLevel, PermissionDecision, PermissionMode, PermissionRequest } from '../../../shared/protocol.js';
+import type { EffortLevel, McpServerDef, PermissionDecision, PermissionMode, PermissionRequest } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from './types.js';
+import { toSdkMcpServers } from '../mcp/apply.js';
 
 export interface RunOptions {
   prompt: string;
@@ -21,6 +22,10 @@ export interface RunOptions {
   resume?: string;
   /** Tools the user has chosen to always allow this session. */
   allowedTools: string[];
+  /** MCP servers enabled for this session's host; added (not replacing) the
+   *  servers in the user's own ~/.claude.json. The SDK spawns stdio servers on
+   *  the host claude runs on (the remote machine for SSH turns). */
+  mcpServers?: McpServerDef[];
   /** When set, the turn runs on a remote host over SSH via the tunnel wrapper
    *  (still through the Agent SDK, so interactive prompts work remotely).
    *  `cwd` is the remote path. */
@@ -128,6 +133,9 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
   // Prefer the user's real claude binary over the SDK's bundled one (avoids
   // architecture mismatches and reuses their auth/proxy config).
   if (config.claudeExecutable) sdkOptions.pathToClaudeCodeExecutable = config.claudeExecutable;
+  // Vibe-managed MCP servers. Additive: only set when non-empty so the user's
+  // own ~/.claude.json servers are untouched on either side of the SSH tunnel.
+  if (opts.mcpServers?.length) sdkOptions.mcpServers = toSdkMcpServers(opts.mcpServers);
 
   // Remote (SSH) turn: drive the remote claude through the tunnel wrapper so the
   // SDK's control protocol (interactive prompts) runs remotely. The SDK passes

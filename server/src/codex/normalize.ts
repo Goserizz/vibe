@@ -73,7 +73,11 @@ export function parseCodexResponseItem(item: any): ParsedItem[] {
   if (type === 'reasoning') {
     const summary = joinContent(item.summary, ['summary_text', 'text']);
     const body = joinContent(item.content, ['reasoning_text', 'text']);
-    const text = (summary || body).trim();
+    // Rollout response_items store reasoning in `summary`/`content`, while the
+    // current `codex exec --json` stream emits a flat `{ type: "reasoning",
+    // text: "..." }` item. Accept both shapes so live summaries are not dropped.
+    const direct = typeof item.text === 'string' ? item.text : '';
+    const text = (summary || body || direct).trim();
     return text ? [{ kind: 'thinking', text }] : [];
   }
   if (type === 'function_call') {

@@ -9,7 +9,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
-import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle, Upload, Download } from 'lucide-react';
+import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle, Upload, Download, RefreshCw } from 'lucide-react';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
 import { cn, basename } from '../lib/format';
@@ -384,6 +384,17 @@ export function FilesPane() {
                   e.target.value = '';
                 }}
               />
+              <button
+                onClick={reload}
+                disabled={listLoading}
+                title="Refresh"
+                className={cn(
+                  'shrink-0 rounded p-1 transition',
+                  listLoading ? 'text-slate-500' : 'text-slate-400 hover:bg-ink-800 hover:text-slate-200',
+                )}
+              >
+                {listLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              </button>
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}

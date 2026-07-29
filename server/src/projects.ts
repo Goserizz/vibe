@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { config } from './config.js';
 import type { ProjectDir } from '../../shared/protocol.js';
 
@@ -63,6 +64,8 @@ export function getRecentProjects(limit = 40): ProjectDir[] {
     }
     const cwd = newestFile ? readCwdFromTranscript(newestFile) : undefined;
     if (!cwd || !fs.existsSync(cwd)) continue;
+    // Skip auto-created throwaway dirs — they must stay out of "common directories".
+    if (isEphemeralCwd(cwd)) continue;
     projects.push({ path: cwd, name: path.basename(cwd), lastUsed: newest, sessionCount: files.length });
   }
 
@@ -90,4 +93,27 @@ export function validateDir(input: string): PathCheck {
   } catch {
     return { ok: false, path: resolved, error: 'directory does not exist' };
   }
+}
+
+/** True for working directories Vibe auto-created (under the fixed workdirs base).
+ *  Used to keep them out of "common directories" and to tag the session ephemeral. */
+export function isEphemeralCwd(cwd: string): boolean {
+  const base = config.workdirsBase;
+  return cwd === base || cwd.startsWith(base + path.sep);
+}
+
+/** A unique, sort-of-readable name for an auto-created workdir: YYYYMMDDHHMMSS-<6 hex>. */
+export function ephemeralWorkdirName(): string {
+  const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+  const rand = crypto.randomBytes(3).toString('hex');
+  return `${ts}-${rand}`;
+}
+
+/** Create a fresh throwaway working directory under the fixed base and return its
+ *  absolute path. Used when a New session skips picking a cwd. */
+export function createLocalWorkdir(): string {
+  fs.mkdirSync(config.workdirsBase, { recursive: true });
+  const dir = path.join(config.workdirsBase, ephemeralWorkdirName());
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }

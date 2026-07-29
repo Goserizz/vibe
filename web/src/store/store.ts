@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type {
   AgentKind,
   EffortLevel,
+  McpConfigSnapshot,
+  McpServerDef,
   PermissionDecision,
   PermissionMode,
   PermissionRequest,
@@ -10,11 +12,15 @@ import type {
   SearchResult,
   ServerEvent,
   SessionMeta,
+  SessionPreset,
   TokenUsage,
 } from '@shared/protocol';
+import { compareSessions } from '@shared/protocol';
 import { api, ApiError, setApiToken } from '../lib/api';
+import type { ModelOption, PermissionOption } from '../lib/format';
 import { VibeSocket, type ConnStatus } from '../lib/ws';
 import { clearToken } from '../lib/token';
+import { loadNotifySound, playNotifySound, saveNotifySound, type NotifySoundId } from '../lib/notifySound';
 import { emptyView, reduceView, viewFromBlocks, type SessionView } from './blocks';
 
 let socket: VibeSocket | null = null;
@@ -24,6 +30,11 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toStr
 // in-flight responses are discarded.
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let searchReqId = 0;
+
+// Sessions the user aborted this turn. Their end-of-turn chime is suppressed
+// (they stopped it themselves, so no need to notify). Consumed by the next
+// run_state for that session; cleared if a fresh turn starts instead.
+const abortedSessions = new Set<string>();
 
 type Theme = 'dark' | 'light';
 
@@ -40,18 +51,32 @@ interface StoreState {
   status: ConnStatus;
   serverVersion: string;
   defaultModel: string;
-  cursorModels: { value: string; label: string }[];
-  codexModels: { value: string; label: string }[];
+  cursorModels: ModelOption[];
+  codexModels: ModelOption[];
+  kimiModels: ModelOption[];
+  kimiPermissionModes: PermissionOption[];
+  kiroModels: ModelOption[];
+  kiroPermissionModes: PermissionOption[];
   theme: Theme;
+  /** Sound played when a model turn finishes. Persisted in localStorage. */
+  notifySound: NotifySoundId;
 
   sessions: SessionMeta[];
   projects: ProjectDir[];
   hosts: RemoteHost[];
+  /** MCP server registry + per-scope enable lists. */
+  mcp: McpConfigSnapshot;
+  /** Saved New-session engine presets (agent + model + permission + effort). */
+  presets: SessionPreset[];
   localName: string;
   activeId: string | null;
   views: Record<string, SessionView>;
   usage: Record<string, TokenUsage | undefined>;
   pending: Record<string, PermissionRequest[]>;
+  /** Sessions whose last turn finished while they weren't the active one — i.e.
+   *  "has a reply you haven't seen yet". Cleared by opening the session. Lives
+   *  only in memory: it tracks live running→idle transitions, not history. */
+  unread: Record<string, true>;
   // Per-session right-panel state: which tab (if any) each session has open.
   // Keyed by sessionId so opening/closing the Terminal or Files panel in one
   // session never affects another.
@@ -70,19 +95,38 @@ interface StoreState {
   loadHosts: () => Promise<void>;
   /** Load Cursor models for the local CLI, or for a remote host (with its proxy). */
   loadCursorModels: (host?: string) => Promise<void>;
-  loadCodexModels: () => Promise<void>;
+  /** Load Codex models from the local cache, or the remote host's cache. */
+  loadCodexModels: (host?: string) => Promise<void>;
+  /** Discover configured Kimi models and ACP permission modes on a host. */
+  loadKimiCapabilities: (host?: string) => Promise<void>;
+  /** Load Kiro models (and fixed permission modes) for local or remote CLI. */
+  loadKiroModels: (host?: string) => Promise<void>;
   addHost: (host: RemoteHost) => Promise<boolean>;
-  updateHost: (name: string, patch: { ssh?: string; proxy?: string }) => Promise<boolean>;
+  updateHost: (name: string, patch: { ssh?: string; proxy?: string; proxyByAgent?: Partial<Record<AgentKind, string>> }) => Promise<boolean>;
   removeHost: (name: string) => Promise<void>;
+  /** Reload the MCP registry + enable lists from the server. */
+  loadMcp: () => Promise<void>;
+  /** Insert or update a server definition. */
+  upsertMcpServer: (def: McpServerDef) => Promise<boolean>;
+  deleteMcpServer: (name: string) => Promise<void>;
+  /** Set the enabled server names for a scope ('local' or a host name). */
+  setMcpEnabled: (scope: string, names: string[]) => Promise<void>;
+  /** Reload saved New-session presets from the server. */
+  loadPresets: () => Promise<void>;
+  /** Insert or update a preset (keyed by name). */
+  upsertPreset: (preset: SessionPreset) => Promise<boolean>;
+  deletePreset: (name: string) => Promise<void>;
   openSession: (id: string) => Promise<void>;
-  createSession: (input: { cwd: string; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<void>;
+  createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<boolean>;
   renameSession: (id: string, title: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
+  togglePin: (id: string) => Promise<void>;
   sendMessage: (text: string) => void;
   abort: () => void;
   respondPermission: (requestId: string, decision: PermissionDecision) => void;
   setToast: (msg: string | null) => void;
   setRightTab: (id: string, tab: 'terminal' | 'files' | null) => void;
+  setNotifySound: (id: NotifySoundId) => void;
 }
 
 export const useStore = create<StoreState>((set, get) => {
@@ -112,6 +156,8 @@ export const useStore = create<StoreState>((set, get) => {
     let sessionsDirty = false;
     const resetIds: string[] = [];
     const setRunning: Record<string, boolean> = {};
+    let playDoneSound = false;
+    const finishedUnreadIds: string[] = [];
 
     const push = (sid: string, seq: number, ev: import('@shared/protocol').LiveEvent) => {
       let arr = eventsBySession.get(sid);
@@ -126,6 +172,18 @@ export const useStore = create<StoreState>((set, get) => {
       switch (msg.t) {
         case 'event':
           if (msg.ev.k === 'token_usage') usagePatch[msg.sessionId] = msg.ev.usage;
+          if (msg.ev.k === 'run_state') {
+            if (msg.ev.running) {
+              // A fresh turn started — any stale abort flag is now irrelevant.
+              abortedSessions.delete(msg.sessionId);
+            } else {
+              // Notify when a live turn ends (true → false). Skip the subscribe/
+              // replay path (which only sets running via `subscribed`) and skip
+              // turns the user aborted. `delete` returns true iff it was an abort.
+              const wasRunning = state.views[msg.sessionId]?.running;
+              if (wasRunning && !abortedSessions.delete(msg.sessionId)) playDoneSound = true;
+            }
+          }
           push(msg.sessionId, msg.seq, msg.ev);
           break;
         case 'subscribed':
@@ -144,8 +202,17 @@ export const useStore = create<StoreState>((set, get) => {
           break;
         }
         case 'session_meta': {
+          // The hub broadcasts session_meta (with `running`) to every client on
+          // turn start/end, so this is how we learn a background session just
+          // finished. running true→false on a non-active session ⇒ mark unread
+          // and chime (the run_state chime only fires for the active session).
+          const prev = sessions.find((s) => s.id === msg.session.id);
+          if (prev?.running && !msg.session.running && msg.session.id !== state.activeId) {
+            finishedUnreadIds.push(msg.session.id);
+            playDoneSound = true;
+          }
           const others = sessions.filter((s) => s.id !== msg.session.id);
-          sessions = [msg.session, ...others].sort((a, b) => b.updatedAt - a.updatedAt);
+          sessions = [msg.session, ...others].sort(compareSessions);
           sessionsDirty = true;
           break;
         }
@@ -174,13 +241,19 @@ export const useStore = create<StoreState>((set, get) => {
       }
       const usage = Object.keys(usagePatch).length ? { ...s.usage, ...usagePatch } : s.usage;
       const pending = Object.keys(pendingPatch).length ? { ...s.pending, ...pendingPatch } : s.pending;
+      const unread = finishedUnreadIds.length
+        ? { ...s.unread, ...Object.fromEntries(finishedUnreadIds.map((id) => [id, true as const])) }
+        : s.unread;
       return {
         views,
         usage,
         pending,
+        unread,
         sessions: sessionsDirty ? sessions : s.sessions,
       };
     });
+
+    if (playDoneSound) playNotifySound(get().notifySound);
 
     // Stale-replay recovery: reload transcript then resubscribe.
     for (const sid of resetIds) {
@@ -208,15 +281,23 @@ export const useStore = create<StoreState>((set, get) => {
     defaultModel: 'opus',
     cursorModels: [],
     codexModels: [],
+    kimiModels: [],
+    kimiPermissionModes: [],
+    kiroModels: [],
+    kiroPermissionModes: [],
     theme: initialTheme(),
+    notifySound: loadNotifySound(),
     sessions: [],
     projects: [],
     hosts: [],
+    mcp: { servers: [], enabled: {}, oauth: {} },
+    presets: [],
     localName: 'local',
     activeId: null,
     views: {},
     usage: {},
     pending: {},
+    unread: {},
     rightTabs: {},
     toast: null,
     searchQuery: '',
@@ -239,7 +320,17 @@ export const useStore = create<StoreState>((set, get) => {
       socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus });
       socket.connect(token);
 
-      await Promise.all([get().refreshSessions(), get().loadProjects(), get().loadHosts(), get().loadCursorModels(), get().loadCodexModels()]);
+      await Promise.all([
+        get().refreshSessions(),
+        get().loadProjects(),
+        get().loadHosts(),
+        get().loadCursorModels(),
+        get().loadCodexModels(),
+        get().loadKimiCapabilities(),
+        get().loadKiroModels(),
+        get().loadMcp(),
+        get().loadPresets(),
+      ]);
       set({ phase: 'ready' });
 
       const { sessions, activeId } = get();
@@ -250,7 +341,7 @@ export const useStore = create<StoreState>((set, get) => {
       socket?.close();
       socket = null;
       clearToken();
-      set({ phase: 'unauthorized', sessions: [], views: {}, rightTabs: {}, activeId: null, searchQuery: '', searchResults: [], searchLoading: false });
+      set({ phase: 'unauthorized', sessions: [], views: {}, rightTabs: {}, unread: {}, activeId: null, searchQuery: '', searchResults: [], searchLoading: false });
     },
 
     async refreshSessions() {
@@ -280,12 +371,30 @@ export const useStore = create<StoreState>((set, get) => {
       }
     },
 
-    async loadCodexModels() {
+    async loadCodexModels(host?: string) {
       try {
-        const codexModels = await api.listCodexModels();
+        const codexModels = await api.listCodexModels(host);
         set({ codexModels });
       } catch {
         /* ignore — the picker falls back to a small static list */
+      }
+    },
+
+    async loadKimiCapabilities(host?: string) {
+      try {
+        const { models, permissions } = await api.getKimiCapabilities(host);
+        set({ kimiModels: models, kimiPermissionModes: permissions });
+      } catch {
+        /* ignore — selectors retain their conservative prompt-mode fallback */
+      }
+    },
+
+    async loadKiroModels(host?: string) {
+      try {
+        const { models, permissions } = await api.listKiroModels(host);
+        set({ kiroModels: models, kiroPermissionModes: permissions });
+      } catch {
+        /* ignore — picker falls back to Auto + static permission modes */
       }
     },
 
@@ -332,10 +441,92 @@ export const useStore = create<StoreState>((set, get) => {
       }
     },
 
+    async loadMcp() {
+      try {
+        set({ mcp: await api.listMcp() });
+      } catch {
+        /* ignore */
+      }
+    },
+
+    async upsertMcpServer(def) {
+      try {
+        const server = await api.upsertMcpServer(def);
+        set((s) => ({ mcp: { ...s.mcp, servers: [...s.mcp.servers.filter((x) => x.name !== server.name), server].sort((a, b) => a.name.localeCompare(b.name)) } }));
+        return true;
+      } catch (err) {
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to save MCP server' });
+        return false;
+      }
+    },
+
+    async deleteMcpServer(name) {
+      try {
+        await api.deleteMcpServer(name);
+        // Remove it from every scope's enable list client-side too.
+        set((s) => ({
+          mcp: {
+            ...s.mcp,
+            servers: s.mcp.servers.filter((x) => x.name !== name),
+            enabled: Object.fromEntries(Object.entries(s.mcp.enabled).map(([k, v]) => [k, v.filter((n) => n !== name)])),
+          },
+        }));
+      } catch {
+        set({ toast: 'Failed to delete MCP server' });
+      }
+    },
+
+    async setMcpEnabled(scope, names) {
+      // Optimistic update so toggles feel instant; the server reconciles.
+      const prev = get().mcp.enabled;
+      set((s) => ({ mcp: { ...s.mcp, enabled: { ...s.mcp.enabled, [scope]: names } } }));
+      try {
+        const enabled = await api.setMcpEnabled(scope, names);
+        set((s) => ({ mcp: { ...s.mcp, enabled: { ...s.mcp.enabled, [scope]: enabled } } }));
+      } catch (err) {
+        set({ mcp: { ...get().mcp, enabled: prev } });
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to update MCP servers' });
+      }
+    },
+
+    async loadPresets() {
+      try {
+        set({ presets: await api.listPresets() });
+      } catch {
+        /* ignore */
+      }
+    },
+
+    async upsertPreset(preset) {
+      try {
+        const saved = await api.upsertPreset(preset);
+        set((s) => ({ presets: [...s.presets.filter((p) => p.name !== saved.name), saved].sort((a, b) => a.name.localeCompare(b.name)) }));
+        return true;
+      } catch (err) {
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to save preset' });
+        return false;
+      }
+    },
+
+    async deletePreset(name) {
+      try {
+        await api.deletePreset(name);
+        set((s) => ({ presets: s.presets.filter((p) => p.name !== name) }));
+      } catch {
+        set({ toast: 'Failed to delete preset' });
+      }
+    },
+
     async openSession(id: string) {
       const prev = get().activeId;
       if (prev && prev !== id) socket?.send({ t: 'unsubscribe', sessionId: prev });
-      set({ activeId: id });
+      // Opening a session counts as viewing it — clear its unread marker.
+      set((s) => {
+        if (!s.unread[id]) return { activeId: id };
+        const unread = { ...s.unread };
+        delete unread[id];
+        return { activeId: id, unread };
+      });
 
       const existing = get().views[id];
       if (!existing?.loaded) {
@@ -356,10 +547,12 @@ export const useStore = create<StoreState>((set, get) => {
     async createSession(input) {
       try {
         const session = await api.createSession(input);
-        set((s) => ({ sessions: [session, ...s.sessions.filter((x) => x.id !== session.id)] }));
+        set((s) => ({ sessions: [session, ...s.sessions.filter((x) => x.id !== session.id)].sort(compareSessions) }));
         await get().openSession(session.id);
+        return true;
       } catch (err) {
         set({ toast: err instanceof ApiError ? err.message : 'Failed to create session' });
+        return false;
       }
     },
 
@@ -384,11 +577,26 @@ export const useStore = create<StoreState>((set, get) => {
         delete views[id];
         const rightTabs = { ...s.rightTabs };
         delete rightTabs[id];
+        const unread = { ...s.unread };
+        delete unread[id];
         const activeId = s.activeId === id ? (sessions[0]?.id ?? null) : s.activeId;
-        return { sessions, views, rightTabs, activeId };
+        return { sessions, views, rightTabs, unread, activeId };
       });
       const next = get().activeId;
       if (next) void get().openSession(next);
+    },
+
+    async togglePin(id) {
+      const cur = get().sessions.find((s) => s.id === id)?.pinned ?? false;
+      const next = !cur;
+      set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, pinned: next } : x)).sort(compareSessions) }));
+      try {
+        await api.setSessionPinned(id, next);
+      } catch (err) {
+        // Revert on failure so the star reflects the server's truth.
+        set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, pinned: cur } : x)).sort(compareSessions) }));
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to update favorite' });
+      }
     },
 
     sendMessage(text) {
@@ -411,7 +619,11 @@ export const useStore = create<StoreState>((set, get) => {
 
     abort() {
       const id = get().activeId;
-      if (id) socket?.send({ t: 'abort', sessionId: id });
+      if (id) {
+        // The user stopped this turn themselves — suppress its completion chime.
+        abortedSessions.add(id);
+        socket?.send({ t: 'abort', sessionId: id });
+      }
     },
 
     respondPermission(requestId, decision) {
@@ -429,6 +641,11 @@ export const useStore = create<StoreState>((set, get) => {
 
     setRightTab(id, tab) {
       set((s) => ({ rightTabs: { ...s.rightTabs, [id]: tab } }));
+    },
+
+    setNotifySound(id) {
+      saveNotifySound(id);
+      set({ notifySound: id });
     },
 
     setSearchQuery(q) {

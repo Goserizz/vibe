@@ -2,9 +2,10 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { CursorStreamNormalizer } from './normalize.js';
-import { sshConnectPrefix, shQuote, loginShellCommand, proxyEnvPrefix, cleanRemoteStderr } from '../remote/ssh.js';
+import { sshConnectPrefix, shQuote, loginShellCommand, proxyEnvPrefix, cleanRemoteStderr, streamRemoteCommand } from '../remote/ssh.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
-import type { PermissionMode } from '../../../shared/protocol.js';
+import { applyCursorMcp } from '../mcp/apply.js';
+import type { McpServerDef, PermissionMode } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
 
 export interface CursorRunOptions {
@@ -14,6 +15,9 @@ export interface CursorRunOptions {
   permissionMode: PermissionMode;
   /** Cursor chat id to resume; omit for a fresh chat. */
   resume?: string;
+  /** MCP servers enabled for this session's host; merged into ~/.cursor/mcp.json
+   *  (on the host the session runs on) before the turn. */
+  mcpServers?: McpServerDef[];
   /** When set, the turn runs on a remote host over SSH. `cwd` is the remote path. */
   remote?: { sshTarget: string; cwd: string; proxy?: string };
 }
@@ -35,7 +39,8 @@ function buildSpawn(opts: CursorRunOptions): { bin?: string; args: string[]; rem
 
   if (opts.remote) {
     const inner = `cursor-agent ${cliArgs.map(shQuote).join(' ')}`;
-    const remoteCmd = proxyEnvPrefix(opts.remote.proxy) + loginShellCommand(inner);
+    // Line-buffer / PTY so stream-json thinking doesn't arrive in one SSH burst.
+    const remoteCmd = proxyEnvPrefix(opts.remote.proxy) + loginShellCommand(streamRemoteCommand(inner));
     const { bin, opts: sshOpts } = sshConnectPrefix();
     return { bin, args: [...sshOpts, '-T', opts.remote.sshTarget, remoteCmd], remote: true };
   }
@@ -123,6 +128,11 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
   };
 
   const done = (async () => {
+    // Reconcile Vibe's MCP servers into ~/.cursor/mcp.json (local or remote)
+    // before the first attempt. Best-effort: a failure logs and continues so the
+    // turn still runs without those servers.
+    await applyCursorMcp(opts.mcpServers ?? [], opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined);
+
     for (let attempt = 0; ; attempt++) {
       // Fresh normalizer per attempt so state from a failed run can't leak in.
       const normalizer = new CursorStreamNormalizer(wrappedCb);

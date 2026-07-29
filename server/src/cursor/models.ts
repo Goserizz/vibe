@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
-import { hostRegistry } from '../remote/hosts.js';
+import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { loginShellCommand, proxyEnvPrefix, shQuote, sshExec } from '../remote/ssh.js';
 
 export interface CursorModel {
@@ -97,7 +97,7 @@ export async function listRemoteCursorModels(hostName: string): Promise<CursorMo
   const hit = caches.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.models;
 
-  const remoteCmd = proxyEnvPrefix(host.proxy) + loginShellCommand(`cursor-agent ${shQuote('models')}`);
+  const remoteCmd = proxyEnvPrefix(proxyForAgent(host, 'cursor')) + loginShellCommand(`cursor-agent ${shQuote('models')}`);
   try {
     const res = await sshExec(host.ssh, remoteCmd, { timeoutMs: 20_000 });
     // `cursor-agent models` prints the list on stdout even when some variants

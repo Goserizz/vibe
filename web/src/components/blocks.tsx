@@ -13,6 +13,10 @@ import {
   Check,
   ListTodo,
   ClipboardList,
+  Trash2,
+  Image,
+  ArrowLeftRight,
+  Clock,
 } from 'lucide-react';
 import type {
   AssistantBlock,
@@ -25,6 +29,7 @@ import type {
 } from '@shared/protocol';
 import { Markdown } from './Markdown';
 import { cn, formatTokens } from '../lib/format';
+import { stripAttachments } from '../lib/attachments';
 
 export const BlockView = memo(function BlockView({ block }: { block: ChatBlock }) {
   switch (block.kind) {
@@ -46,10 +51,15 @@ export const BlockView = memo(function BlockView({ block }: { block: ChatBlock }
 });
 
 function UserView({ block }: { block: UserBlock }) {
+  // Hide the attachment boilerplate block the Composer folds into the prompt
+  // (the agent still sees it; the user just sees what they typed). If the
+  // message was attachments-only, keep the bubble from going empty.
+  const { text, files } = stripAttachments(block.text);
+  const display = text.trim() || (files.length ? `📎 ${files.length} file${files.length > 1 ? 's' : ''} attached` : '');
   return (
     <div className="flex justify-end animate-fade-in">
       <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent/15 px-4 py-2.5 text-[14.5px] leading-relaxed text-slate-100">
-        {block.text}
+        {display}
       </div>
     </div>
   );
@@ -64,11 +74,45 @@ function AssistantView({ block }: { block: AssistantBlock }) {
   );
 }
 
+/**
+ * Latest *completed* paragraph (blank-line separated) of a streaming thinking
+ * block. A paragraph counts as complete only once a trailing blank line closes
+ * it; the trailing in-progress paragraph is withheld. Ported from the Telegram
+ * thinking preview so the web shows one paragraph at a time — each newly
+ * finished paragraph replacing the previous on screen — until the block ends
+ * and the full reasoning is revealed on expand.
+ */
+function latestCompletedThinkingParagraph(text: string): string {
+  // Do not trim trailing whitespace — trailing blank lines mark paragraph completion.
+  const cleaned = text.replace(/^\uFEFF/, '');
+  if (!cleaned.trim()) return '';
+  const parts = cleaned.split(/\n\s*\n/);
+  const trailingComplete = /\n\s*\n\s*$/.test(cleaned);
+  // If text does not end with a blank line, the last part is still generating.
+  const lastCompleteIdx = trailingComplete ? parts.length - 1 : parts.length - 2;
+  for (let i = lastCompleteIdx; i >= 0; i--) {
+    const p = parts[i]!.replace(/^\n+|\n+$/g, '');
+    if (p.trim()) return p;
+  }
+  return '';
+}
+
 function ThinkingView({ block }: { block: ThinkingBlock }) {
   // Auto-expand while thinking, auto-collapse once done; a manual toggle overrides.
   const [manual, setManual] = useState<boolean | null>(null);
   if (!block.text) return null;
   const open = manual ?? block.streaming;
+
+  // While streaming, show one paragraph at a time: each newly completed
+  // paragraph replaces the previous (mirrors Telegram's thinking preview). The
+  // still-generating first paragraph is shown as it types so the box is never
+  // empty; once done, expand reveals the full reasoning.
+  let displayText = block.text;
+  if (block.streaming) {
+    const latest = latestCompletedThinkingParagraph(block.text);
+    displayText = latest || block.text.trim() || '…';
+  }
+
   return (
     <div className="animate-fade-in rounded-xl border border-white/5 bg-ink-900/40">
       <button
@@ -81,7 +125,7 @@ function ThinkingView({ block }: { block: ThinkingBlock }) {
       </button>
       {open && (
         <div className="whitespace-pre-wrap break-words border-t border-white/5 px-3 py-2.5 font-mono text-[12px] leading-relaxed text-slate-500">
-          {block.text}
+          {displayText}
         </div>
       )}
     </div>
@@ -94,20 +138,25 @@ interface ToolMeta {
   detail?: string;
 }
 
-/** Canonical display kind for a tool, engine-agnostic. Claude, Cursor and Codex
+/** Canonical display kind for a tool, engine-agnostic. Claude, Cursor, Codex and Kimi
  *  name the same actions differently (Claude `Bash` vs Cursor `Shell`, or Claude
  *  `file_path` vs Cursor `path`), and Cursor wraps results in a JSON envelope.
  *  Collapsing the name to a kind lets one set of icons/labels/details and one
  *  result renderer cover every engine. */
 type ToolKind =
-  | 'read' | 'edit' | 'write' | 'bash' | 'glob' | 'grep'
-  | 'search' | 'webfetch' | 'websearch' | 'todo' | 'task' | 'plan' | 'other';
+  | 'read' | 'edit' | 'write' | 'delete' | 'move' | 'bash' | 'await' | 'glob' | 'grep'
+  | 'search' | 'webfetch' | 'websearch' | 'todo' | 'task' | 'plan' | 'lints'
+  | 'image' | 'mode' | 'mcp' | 'other';
 
 const TOOL_KIND_ALIASES: Record<string, ToolKind> = {
   read: 'read', readfile: 'read',
   edit: 'edit', editfile: 'edit', multiedit: 'edit', strreplace: 'edit',
+  editnotebook: 'edit', notebookedit: 'edit',
   write: 'write', writefile: 'write', createfile: 'write',
-  bash: 'bash', shell: 'bash', runterminalcommand: 'bash', terminal: 'bash', runcommand: 'bash',
+  delete: 'delete', deletefile: 'delete', removefile: 'delete',
+  move: 'move', movefile: 'move', rename: 'move', renamefile: 'move',
+  bash: 'bash', shell: 'bash', runterminalcommand: 'bash', terminal: 'bash', runcommand: 'bash', execute: 'bash',
+  awaitshell: 'await', await: 'await',
   glob: 'glob', listdir: 'glob', listdirectory: 'glob', ls: 'glob', findfiles: 'glob',
   grep: 'grep', searchfiles: 'grep', ripgrep: 'grep',
   semsearch: 'search', codebasesearch: 'search', semanticsearch: 'search', directorysearch: 'search',
@@ -116,6 +165,10 @@ const TOOL_KIND_ALIASES: Record<string, ToolKind> = {
   todowrite: 'todo', todo: 'todo', updatetodo: 'todo',
   task: 'task', subagent: 'task',
   exitplanmode: 'plan',
+  readlints: 'lints', getdiagnostics: 'lints', diagnostics: 'lints',
+  generateimage: 'image', image: 'image',
+  switchmode: 'mode',
+  listmcpresources: 'mcp', fetchmcpresource: 'mcp', callmcptool: 'mcp',
 };
 
 export function toolKind(name: string): ToolKind {
@@ -133,36 +186,121 @@ function firstOf(obj: Record<string, any>, keys: string[]): string | undefined {
   return undefined;
 }
 
+function pathsDetail(i: Record<string, any>): string | undefined {
+  const paths = Array.isArray(i.paths) ? i.paths.map(String).filter(Boolean) : [];
+  if (paths.length === 1) return paths[0];
+  if (paths.length > 1) return `${paths.length} paths`;
+  return undefined;
+}
+
+/** Best-effort one-line detail for unknown / sparsely-mapped tools. */
+function fallbackDetail(i: Record<string, any>): string | undefined {
+  return (
+    pathsDetail(i) ||
+    firstOf(i, [
+      'command', 'cmd',
+      'file_path', 'path', 'relativePath', 'filePath', 'target_file', 'target_notebook',
+      'filename', 'uri', 'url',
+      'query', 'search_term', 'searchTerm', 'pattern', 'glob_pattern', 'globPattern', 'regex',
+      'description', 'prompt', 'title', 'explanation',
+      'target_mode_id', 'targetModeId', 'mode',
+      'server', 'toolName', 'tool_name', 'name',
+      'shell_id', 'shellId',
+    ])
+  );
+}
+
 export function toolMeta(name: string, input: unknown): ToolMeta {
   const i = (input ?? {}) as Record<string, any>;
-  const path = firstOf(i, ['file_path', 'path', 'relativePath', 'filePath']);
+  const path = firstOf(i, [
+    'file_path', 'path', 'relativePath', 'filePath', 'target_file', 'target_notebook',
+  ]);
   switch (toolKind(name)) {
     case 'bash':
       return { icon: Terminal, label: 'Terminal', detail: firstOf(i, ['command', 'cmd']) };
+    case 'await':
+      return {
+        icon: Clock,
+        label: 'Await',
+        detail: firstOf(i, ['shell_id', 'shellId', 'pattern', 'command', 'cmd']),
+      };
     case 'read':
       return { icon: FileText, label: 'Read', detail: path };
     case 'write':
       return { icon: FilePen, label: 'Write', detail: path };
     case 'edit':
-      return { icon: FilePen, label: 'Edit', detail: path };
-    case 'glob':
-      return { icon: Search, label: 'Glob', detail: firstOf(i, ['pattern', 'globPattern']) };
-    case 'grep':
-      return { icon: Search, label: 'Grep', detail: firstOf(i, ['pattern', 'regex', 'query']) };
-    case 'search':
-      return { icon: Search, label: 'Search', detail: firstOf(i, ['query']) };
+      return { icon: FilePen, label: name.toLowerCase().includes('notebook') ? 'Notebook' : 'Edit', detail: path };
+    case 'delete':
+      return { icon: Trash2, label: 'Delete', detail: path };
+    case 'move': {
+      const from = firstOf(i, ['from', 'source', 'old_path', 'oldPath', 'path']);
+      const to = firstOf(i, ['to', 'dest', 'destination', 'new_path', 'newPath']);
+      const detail = from && to ? `${from} → ${to}` : from || to || path;
+      return { icon: ArrowLeftRight, label: 'Move', detail };
+    }
+    case 'glob': {
+      const pat = firstOf(i, ['pattern', 'glob_pattern', 'globPattern', 'glob']);
+      const target = firstOf(i, ['path', 'target_directory', 'targetDirectory', 'dir']);
+      const detail = pat && target ? `${pat} in ${target}` : pat || target;
+      return { icon: Search, label: 'Glob', detail };
+    }
+    case 'grep': {
+      const pat = firstOf(i, ['pattern', 'regex', 'query']);
+      const target = firstOf(i, ['path', 'file_path', 'target_directory', 'targetDirectory', 'dir']);
+      const glob = firstOf(i, ['glob', 'glob_pattern', 'globPattern']);
+      const where = [target, glob].filter(Boolean).join(' ');
+      const detail = pat && where ? `${pat} in ${where}` : pat || where;
+      return { icon: Search, label: 'Grep', detail };
+    }
+    case 'search': {
+      const q = firstOf(i, ['query', 'pattern', 'search_term', 'searchTerm']);
+      const target = firstOf(i, ['path', 'file_path', 'target_directory', 'targetDirectory', 'dir']);
+      const detail = q && target ? `${q} in ${target}` : q || target;
+      return { icon: Search, label: 'Search', detail };
+    }
     case 'webfetch':
-      return { icon: Globe, label: 'Fetch', detail: firstOf(i, ['url']) };
+      return { icon: Globe, label: 'Fetch', detail: firstOf(i, ['url', 'uri']) };
     case 'websearch':
-      return { icon: Globe, label: 'Search', detail: firstOf(i, ['query']) };
+      return { icon: Globe, label: 'Search', detail: firstOf(i, ['query', 'search_term', 'searchTerm']) };
     case 'todo':
       return { icon: ListTodo, label: 'Update todos', detail: Array.isArray(i.todos) ? `${i.todos.length} items` : undefined };
     case 'plan':
       return { icon: ClipboardList, label: 'Plan', detail: Array.isArray(i.allowedPrompts) && i.allowedPrompts.length ? `${i.allowedPrompts.length} permissions` : undefined };
-    case 'task':
-      return { icon: Wrench, label: `Task: ${i.subagent_type ?? ''}`.trim(), detail: i.description };
+    case 'task': {
+      const sub = firstOf(i, ['subagent_type', 'subagentType', 'agent']);
+      return {
+        icon: Wrench,
+        label: sub ? `Task: ${sub}` : 'Task',
+        detail: firstOf(i, ['description', 'prompt']),
+      };
+    }
+    case 'lints':
+      return { icon: CircleAlert, label: 'Lints', detail: pathsDetail(i) || path };
+    case 'image':
+      return {
+        icon: Image,
+        label: 'Image',
+        detail: firstOf(i, ['filename', 'description', 'path', 'file_path']),
+      };
+    case 'mode':
+      return {
+        icon: ArrowLeftRight,
+        label: 'Switch mode',
+        detail: firstOf(i, ['target_mode_id', 'targetModeId', 'mode']),
+      };
+    case 'mcp': {
+      const server = firstOf(i, ['server']);
+      const tool = firstOf(i, ['toolName', 'tool_name', 'name']);
+      const uri = firstOf(i, ['uri', 'url']);
+      const detail = [server, tool || uri].filter(Boolean).join(' · ') || uri;
+      return { icon: Wrench, label: 'MCP', detail };
+    }
     default:
-      return { icon: Wrench, label: name, detail: typeof input === 'object' ? undefined : String(input) };
+      return {
+        icon: Wrench,
+        label: name,
+        detail: typeof input === 'object' && input != null ? fallbackDetail(i) : input != null ? String(input) : undefined,
+      };
   }
 }
 
