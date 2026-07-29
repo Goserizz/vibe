@@ -351,7 +351,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                       type="button"
                       onClick={() => void saveAsPreset()}
                       disabled={savingPreset}
-                      className="flex h-9 min-w-[64px] items-center justify-center gap-1.5 rounded-lg bg-accent px-3 text-[12px] font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
+                      className="flex h-9 min-w-[64px] items-center justify-center gap-1.5 rounded-lg bg-accent px-3 text-[12px] font-semibold text-accent-fg transition hover:bg-accent-soft disabled:opacity-40"
                     >
                       {savingPreset ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
                       Save
@@ -559,7 +559,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           <button
             onClick={() => void submit()}
             disabled={creating || (!autoCwd && !cwd.trim() && !query.trim())}
-            className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
           >
             {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Folder className="h-4 w-4" />}
             Create

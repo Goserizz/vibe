@@ -115,7 +115,7 @@ export function PresetForm({ def, onDone }: { def?: SessionPreset; onDone: () =>
           type="button"
           onClick={() => void submit()}
           disabled={saving}
-          className="flex h-8 min-w-[72px] items-center justify-center gap-1.5 rounded-md bg-accent px-3 text-[12px] font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
+          className="flex h-8 min-w-[72px] items-center justify-center gap-1.5 rounded-md bg-accent px-3 text-[12px] font-semibold text-accent-fg transition hover:bg-accent-soft disabled:opacity-40"
         >
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
           Save

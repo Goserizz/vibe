@@ -71,7 +71,7 @@ export function McpEnableList({ scope, emptyHint }: { scope: string; emptyHint?:
               <span
                 className={cn(
                   'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
-                  on ? 'border-accent bg-accent text-ink-950' : 'border-ink-600 text-transparent',
+                  on ? 'border-accent bg-accent text-accent-fg' : 'border-ink-600 text-transparent',
                 )}
               >
                 <Check className="h-3 w-3" />
@@ -237,7 +237,7 @@ export function McpServerForm({
           type="button"
           onClick={() => void submit()}
           disabled={saving}
-          className="flex h-8 min-w-[72px] items-center justify-center gap-1.5 rounded-md bg-accent px-3 text-[12px] font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
+          className="flex h-8 min-w-[72px] items-center justify-center gap-1.5 rounded-md bg-accent px-3 text-[12px] font-semibold text-accent-fg transition hover:bg-accent-soft disabled:opacity-40"
         >
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
           Save

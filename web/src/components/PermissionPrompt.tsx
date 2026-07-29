@@ -52,7 +52,7 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
           <div className="flex flex-wrap gap-2 border-t border-white/5 px-4 py-3">
               <button
                 onClick={() => respond(req.requestId, { allow: true })}
-                className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft"
+                className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-accent-fg transition hover:bg-accent-soft"
               >
                 <Check className="h-3.5 w-3.5" />
                 Allow
@@ -149,7 +149,7 @@ function PlanPrompt({ req, respond }: { req: PermissionRequest; respond: (id: st
           <div className="flex flex-wrap gap-2 border-t border-white/5 px-4 py-3">
             <button
               onClick={() => respond(req.requestId, { allow: true })}
-              className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft"
+              className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-accent-fg transition hover:bg-accent-soft"
             >
               <Check className="h-3.5 w-3.5" />
               Approve plan
@@ -323,7 +323,7 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
           <button
             onClick={submit}
             disabled={!canSubmit}
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-semibold text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Check className="h-3.5 w-3.5" />
             Submit

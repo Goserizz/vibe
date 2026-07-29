@@ -18,6 +18,55 @@
       } catch (e) {
         document.documentElement.className = 'dark';
       }
+      // Apply accent before paint: manual override from localStorage, else OS
+      // AccentColor (falls back to CSS tokens when neither is available).
+      try {
+        var root = document.documentElement;
+        var mix = function (a, x, t) { return Math.round(a + (x - a) * t); };
+        var applyRgb = function (r, g, b, fr, fg, fb) {
+          root.style.setProperty('--accent', r + ' ' + g + ' ' + b);
+          root.style.setProperty('--accent-soft', mix(r, 255, 0.22) + ' ' + mix(g, 255, 0.22) + ' ' + mix(b, 255, 0.22));
+          root.style.setProperty('--accent-muted', mix(r, 110, 0.42) + ' ' + mix(g, 118, 0.42) + ' ' + mix(b, 130, 0.42));
+          root.style.setProperty('--accent-glow', 'rgba(' + r + ', ' + g + ', ' + b + ', 0.18)');
+          if (fr != null) root.style.setProperty('--accent-fg', fr + ' ' + fg + ' ' + fb);
+          else {
+            var lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+            root.style.setProperty('--accent-fg', lum > 0.55 ? '10 11 15' : '255 255 255');
+          }
+        };
+        var custom = null;
+        try {
+          var stored = JSON.parse(localStorage.getItem('vibe.accent') || 'null');
+          if (stored && stored.mode === 'custom' && typeof stored.hex === 'string') custom = stored.hex;
+        } catch (e) {}
+        var hm = custom && /^#([0-9a-f]{6})$/i.exec(custom);
+        if (hm) {
+          var n = parseInt(hm[1], 16);
+          applyRgb((n >> 16) & 255, (n >> 8) & 255, n & 255);
+        } else {
+          var el = document.createElement('div');
+          el.style.color = 'AccentColor';
+          el.style.position = 'fixed';
+          el.style.left = '-9999px';
+          document.documentElement.appendChild(el);
+          var c = getComputedStyle(el).color;
+          el.remove();
+          var m = /^rgba?\(\s*([\d.]+)\s*[, ]\s*([\d.]+)\s*[, ]\s*([\d.]+)/i.exec(c || '');
+          if (m) {
+            var r = Math.round(+m[1]), g = Math.round(+m[2]), b = Math.round(+m[3]);
+            el = document.createElement('div');
+            el.style.color = 'AccentColorText';
+            el.style.position = 'fixed';
+            el.style.left = '-9999px';
+            document.documentElement.appendChild(el);
+            var fc = getComputedStyle(el).color;
+            el.remove();
+            var fm = /^rgba?\(\s*([\d.]+)\s*[, ]\s*([\d.]+)\s*[, ]\s*([\d.]+)/i.exec(fc || '');
+            if (fm) applyRgb(r, g, b, Math.round(+fm[1]), Math.round(+fm[2]), Math.round(+fm[3]));
+            else applyRgb(r, g, b);
+          }
+        }
+      } catch (e) {}
     </script>
   </head>
   <body class="app-bg">

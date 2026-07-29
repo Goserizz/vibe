@@ -38,6 +38,8 @@ export default {
           DEFAULT: 'rgb(var(--accent) / <alpha-value>)',
           soft: 'rgb(var(--accent-soft) / <alpha-value>)',
           muted: 'rgb(var(--accent-muted) / <alpha-value>)',
+          // Text on solid accent fills (from OS AccentColorText when available).
+          fg: 'rgb(var(--accent-fg) / <alpha-value>)',
           glow: 'var(--accent-glow)',
         },
       },

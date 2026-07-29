@@ -21,6 +21,12 @@ import type { ModelOption, PermissionOption } from '../lib/format';
 import { VibeSocket, type ConnStatus } from '../lib/ws';
 import { clearToken } from '../lib/token';
 import { loadNotifySound, playNotifySound, saveNotifySound, type NotifySoundId } from '../lib/notifySound';
+import {
+  applyAccent,
+  loadAccentPreference,
+  saveAccentPreference,
+  type AccentPreference,
+} from '../lib/systemAccent';
 import { emptyView, reduceView, viewFromBlocks, type SessionView } from './blocks';
 
 let socket: VibeSocket | null = null;
@@ -70,6 +76,8 @@ interface StoreState {
   theme: Theme;
   /** Sound played when a model turn finishes. Persisted in localStorage. */
   notifySound: NotifySoundId;
+  /** Accent color: follow OS or a manual hex. Persisted in localStorage. */
+  accent: AccentPreference;
 
   sessions: SessionMeta[];
   projects: ProjectDir[];
@@ -137,6 +145,7 @@ interface StoreState {
   setToast: (msg: string | null) => void;
   setRightTab: (id: string, tab: 'terminal' | 'files' | null) => void;
   setNotifySound: (id: NotifySoundId) => void;
+  setAccent: (pref: AccentPreference) => void;
 }
 
 export const useStore = create<StoreState>((set, get) => {
@@ -297,6 +306,7 @@ export const useStore = create<StoreState>((set, get) => {
     kiroPermissionModes: [],
     theme: initialTheme(),
     notifySound: loadNotifySound(),
+    accent: loadAccentPreference(),
     sessions: [],
     projects: [],
     hosts: [],
@@ -701,6 +711,12 @@ export const useStore = create<StoreState>((set, get) => {
       set({ notifySound: id });
     },
 
+    setAccent(pref) {
+      saveAccentPreference(pref);
+      applyAccent(pref);
+      set({ accent: pref });
+    },
+
     setSearchQuery(q) {
       set({ searchQuery: q });
       if (searchTimer) {
@@ -739,5 +755,7 @@ if (typeof window !== 'undefined' && window.matchMedia) {
     el.classList.remove('dark', 'light');
     el.classList.add(next);
     useStore.setState({ theme: next });
+    // System accent can shift with appearance mode; custom prefs stay put.
+    applyAccent();
   });
 }

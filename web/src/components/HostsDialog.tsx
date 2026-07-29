@@ -293,7 +293,7 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
                 <button
                   onClick={() => void submit()}
                   disabled={adding || !name.trim() || !ssh.trim()}
-                  className="flex h-10 min-w-[84px] items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-accent px-3.5 text-sm font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-40"
+                  className="flex h-10 min-w-[84px] items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-accent px-3.5 text-sm font-semibold text-accent-fg transition hover:bg-accent-soft disabled:opacity-40"
                 >
                   {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                   Add

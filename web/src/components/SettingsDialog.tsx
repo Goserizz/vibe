@@ -1,6 +1,7 @@
-import { X, Settings, Volume2, Play, Plug, Bookmark } from 'lucide-react';
+import { X, Settings, Volume2, Play, Plug, Bookmark, Palette } from 'lucide-react';
 import { useStore } from '../store/store';
 import { NOTIFY_SOUNDS, playNotifySound, type NotifySoundId } from '../lib/notifySound';
+import { ACCENT_PRESETS } from '../lib/systemAccent';
 import { cn } from '../lib/format';
 import { McpServerRegistry, McpEnableList } from './McpControls';
 import { PresetRegistry } from './PresetControls';
@@ -8,11 +9,15 @@ import { PresetRegistry } from './PresetControls';
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const notifySound = useStore((s) => s.notifySound);
   const setNotifySound = useStore((s) => s.setNotifySound);
+  const accent = useStore((s) => s.accent);
+  const setAccent = useStore((s) => s.setAccent);
 
   const select = (id: NotifySoundId) => {
     setNotifySound(id);
     if (id !== 'none') playNotifySound(id);
   };
+
+  const customHex = accent.mode === 'custom' ? accent.hex ?? '#7c9cff' : '#7c9cff';
 
   return (
     <div
@@ -33,6 +38,72 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           </div>
 
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <Palette className="h-3.5 w-3.5 text-slate-400" />
+                <h3 className="text-xs font-medium text-slate-400">Accent color</h3>
+              </div>
+              <p className="mb-3 text-[12px] leading-relaxed text-slate-600">
+                Buttons, highlights, and the aurora wash. System follows the OS accent when the browser exposes it;
+                otherwise pick a color below.
+              </p>
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAccent({ mode: 'system' })}
+                  className={cn(
+                    'rounded-lg border px-3 py-1.5 text-[12px] font-medium transition',
+                    accent.mode === 'system'
+                      ? 'border-accent/50 bg-accent/15 text-accent-soft'
+                      : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
+                  )}
+                >
+                  System
+                </button>
+                <label
+                  className={cn(
+                    'flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition',
+                    accent.mode === 'custom'
+                      ? 'border-accent/50 bg-accent/15 text-accent-soft'
+                      : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
+                  )}
+                >
+                  <span
+                    className="h-4 w-4 shrink-0 rounded-full border border-white/20"
+                    style={{ background: accent.mode === 'custom' ? customHex : 'rgb(var(--accent))' }}
+                  />
+                  Custom
+                  <input
+                    type="color"
+                    value={customHex}
+                    aria-label="Custom accent color"
+                    onChange={(e) => setAccent({ mode: 'custom', hex: e.target.value })}
+                    className="h-0 w-0 appearance-none opacity-0"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {ACCENT_PRESETS.map((p) => {
+                  const active = accent.mode === 'custom' && accent.hex === p.hex;
+                  return (
+                    <button
+                      key={p.hex}
+                      type="button"
+                      title={p.label}
+                      aria-label={p.label}
+                      aria-pressed={active}
+                      onClick={() => setAccent({ mode: 'custom', hex: p.hex })}
+                      className={cn(
+                        'h-7 w-7 rounded-full border-2 transition',
+                        active ? 'border-slate-100 scale-110' : 'border-transparent hover:scale-105',
+                      )}
+                      style={{ background: p.hex }}
+                    />
+                  );
+                })}
+              </div>
+            </section>
+
             <section>
               <div className="mb-2 flex items-center gap-2">
                 <Volume2 className="h-3.5 w-3.5 text-slate-400" />

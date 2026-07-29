@@ -135,7 +135,7 @@ function TokenGate() {
         <button
           type="submit"
           disabled={busy || !value.trim()}
-          className="mt-4 w-full rounded-lg bg-accent py-2.5 text-sm font-semibold text-ink-950 transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
+          className="mt-4 w-full rounded-lg bg-accent py-2.5 text-sm font-semibold text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? 'Connecting…' : 'Connect'}
         </button>

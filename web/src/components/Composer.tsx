@@ -245,7 +245,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
                   onClick={() => void submit()}
                   disabled={busy || (!text.trim() && !hasAttachments)}
                   title="Send"
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent text-ink-950 transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-slate-500"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-slate-500"
                 >
                   {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
                 </button>

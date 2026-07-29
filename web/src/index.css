@@ -24,9 +24,12 @@
     --slate-500: 100 116 139;
     --slate-600: 71 85 105;
     --c-white: 255 255 255;
+    /* Fallback accent; overwritten at runtime from the OS AccentColor
+       (see web/src/lib/systemAccent.ts) when the browser exposes it. */
     --accent: 124 156 255;
     --accent-soft: 157 180 255;
     --accent-muted: 91 111 158;
+    --accent-fg: 10 11 15;
     --accent-glow: rgba(124, 156, 255, 0.18);
     /* highlight.js token palette (github-dark). The code-block surface itself
        uses ink tokens below; these color only the syntax tokens. */
@@ -64,6 +67,7 @@
     --accent: 59 91 219;
     --accent-soft: 67 99 216;
     --accent-muted: 110 128 168;
+    --accent-fg: 255 255 255;
     --accent-glow: rgba(59, 91, 219, 0.14);
     /* highlight.js token palette (github-light). */
     --code-fg: 36 41 47;
