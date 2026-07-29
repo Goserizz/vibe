@@ -4,7 +4,7 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-**An elegant, low‑latency web UI for driving Claude Code, Codex, Cursor, and Kimi agents on any machine.**
+**An elegant, low‑latency web UI for driving Claude Code, Codex, Cursor, Kimi, and Kiro agents on any machine.**
 
 Run it on the machine where your code lives, open the printed link from any browser
 (laptop, phone, tablet), and vibe‑code remotely with smooth streaming and a clean interface.
@@ -41,10 +41,10 @@ Run it on the machine where your code lives, open the printed link from any brow
 ## Why Vibe
 
 Vibe runs a small server on your machine that talks to Claude Code, Codex, Cursor,
-or Kimi Code, normalizes each agent's stream into the same structured conversation
+Kimi Code, or Kiro, normalizes each agent's stream into the same structured conversation
 model, and sends it to a React web client over a single WebSocket. Claude sessions
 use the official [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk);
-Codex, Cursor, and Kimi sessions run their headless CLIs.
+Codex, Cursor, Kimi, and Kiro sessions run their headless CLIs.
 
 It was built to fix two things that make other remote coding-agent UIs feel clunky:
 
@@ -61,7 +61,7 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
 
 - 💬 **Structured chat loop** — streaming assistant text, thinking, tool calls, and results
 - 🧰 **Tool visibility** — Bash/Read/Edit/Grep/… rendered as compact cards with status + output
-- 🤖 **Multiple agents** — choose Claude, Codex, Cursor, or Kimi per session, with agent-specific
+- 🤖 **Multiple agents** — choose Claude, Codex, Cursor, Kimi, or Kiro per session, with agent-specific
   model, reasoning, and permission controls
 - 🔐 **Permission controls** — Claude supports inline Allow / Always allow / Deny prompts;
   Codex and Cursor use coarse modes; Kimi discovers Default / Plan / Auto / YOLO from its
@@ -79,6 +79,17 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   side panel
 - 🎛 **Per‑session controls** — choose the agent when creating a session, then switch
   model, reasoning effort, and permission mode from the header
+- 📎 **File attachments** — attach, drag‑drop, or paste images into the composer; files
+  are uploaded to the session's host (locally or over SSH) and the agent reads them with
+  its own file tools, so it works for every engine
+- 🔌 **MCP servers** — define Model Context Protocol servers (stdio / sse / http) once,
+  then enable them per host; OAuth ("sign in") servers are connected and token‑refreshed
+  for you
+- 🔖 **Session presets** — save an agent + model + permission + effort bundle and apply
+  it in one click from the New session dialog
+- 🔔 **Notifications** — a configurable completion cue plays when a turn ends (on the open
+  session *or* any background one), and sessions with a finished‑but‑unseen reply get an
+  unread marker in the sidebar; turns you abort yourself stay silent
 - 🌗 **Dark & light themes** with a one‑click toggle (remembers your choice)
 - 📈 **Context meter** and per‑turn cost/duration
 - 🔁 **Robust reconnection** with seq‑based replay (no lost or duplicated messages)
@@ -219,6 +230,28 @@ interactive shell **on that session's host**, in the session's working directory
 - the host's full environment is loaded (so version managers like nvm, your aliases, etc. work);
 - drag the panel's left edge to resize (the width is remembered).
 
+## MCP servers, presets & notifications
+
+Open **Settings** (the gear in the sidebar) to manage shared engine configuration:
+
+- **MCP servers** — register a Model Context Protocol server once (a stdio command, or an
+  `sse`/`http` endpoint), then toggle it on per host: "Enabled on this machine" here, and per
+  remote host in the Hosts dialog. For remote hosts the stdio command runs on that machine, so
+  reference executables that exist there. `http`/`sse` servers can use static headers or
+  **MCP‑OAuth**: click *Connect* to sign in through your browser — Vibe runs the RFC 9728 → 8414
+  → 7591 + PKCE flow, stores and refreshes the access token (mode 0600), and injects it every
+  turn. Editing the registry applies to the next turn.
+- **Session presets** — save a named bundle of agent + model + permission mode + reasoning
+  effort, then pick it from the New session dialog to apply all four at once. Presets are
+  host‑agnostic; anything invalid for the chosen machine (e.g. a model not installed there) is
+  reconciled when applied.
+- **Completion sound** — pick a turn‑finished cue (Chime / Ping / Bell / Pop / Success, or Off)
+  and preview each one inline. It fires when any turn ends — the session you have open *or* a
+  background one — except for turns you stop yourself.
+
+When a turn finishes on a session you're not currently viewing, the sidebar marks it with a
+steady accent dot and a bold title until you open it.
+
 ## How it works
 
 ```
@@ -226,21 +259,24 @@ Browser (React + Vite)
    │  WebSocket  /ws  (seq‑tagged events, rAF‑coalesced)  +  /terminal  (PTY stream)
    ▼
 Vibe server (Node + Express + ws)
-   │  local: Claude SDK → `claude`; Codex / Cursor / Kimi structured CLI output
+   │  local: Claude SDK → `claude`; Codex / Cursor / Kimi / Kiro structured CLI output
    │  remote: ssh → selected agent CLI on the host        terminal: node-pty (local shell / ssh -tt)
    ▼
 Agent CLI  (runs in your chosen directory; history is read from native stores or Vibe transcripts)
 ```
 
 - **`shared/protocol.ts`** — the single source of truth for the wire protocol.
-- **`server/`** — token auth, agent runners (Claude SDK plus Codex/Cursor/Kimi CLI runners,
+- **`server/`** — token auth, agent runners (Claude SDK plus Codex/Cursor/Kimi/Kiro CLI runners,
   local or remote over `ssh`, all normalized into the same block stream), a per‑session
   event hub (seq log, replay, backpressure), a session metadata store, transcript readers
-  for history, discovery of existing Claude/Codex/Cursor/Kimi sessions where available, and the
-  terminal PTY channel. Deleting a discovered session only dismisses it from Vibe — the
-  underlying agent transcript is never touched.
+  for history, discovery of existing Claude/Codex/Cursor/Kimi/Kiro sessions where available, the
+  MCP server registry (per‑scope enable lists + OAuth token management), saved session presets,
+  chat‑attachment upload, an optional Telegram bot, and the terminal PTY channel. Deleting a
+  discovered session only dismisses it from Vibe — the underlying agent transcript is never touched.
 - **`web/`** — the WebSocket client (reconnect + coalescing), a Zustand store with a block
-  reducer, and the UI (chat, sidebar, terminal panel).
+  reducer, and the UI: chat with file attachments, sidebar (sessions, hosts, search, unread
+  markers), terminal & files panels, the agent todo list, and Settings (MCP servers, presets,
+  completion sound).
 
 ## Security
 
