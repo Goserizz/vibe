@@ -6,8 +6,24 @@ import { Logo } from './Logo';
 import { ConnectionBadge } from './ConnectionBadge';
 import { HostsDialog } from './HostsDialog';
 import { SettingsDialog } from './SettingsDialog';
-import { basename, cn, relativeTime } from '../lib/format';
+import type { AgentKind } from '@shared/protocol';
+import { agentLabel, basename, cn, modelLabel, relativeTime } from '../lib/format';
 import { Glass } from './LiquidGlass';
+
+function agentTagTone(agent: AgentKind): string {
+  switch (agent) {
+    case 'cursor':
+      return 'bg-accent/15 text-accent-soft';
+    case 'codex':
+      return 'bg-emerald-500/15 text-emerald-300';
+    case 'kimi':
+      return 'bg-sky-500/15 text-sky-300';
+    case 'kiro':
+      return 'bg-violet-500/15 text-violet-300';
+    default:
+      return 'bg-amber-500/15 text-amber-500';
+  }
+}
 
 interface SidebarProps {
   open: boolean;
@@ -247,9 +263,16 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
   const deleteSession = useStore((s) => s.deleteSession);
   const togglePin = useStore((s) => s.togglePin);
   const unread = useStore((s) => !!s.unread[session.id]);
+  const cursorModels = useStore((s) => s.cursorModels);
+  const codexModels = useStore((s) => s.codexModels);
+  const kimiModels = useStore((s) => s.kimiModels);
+  const kiroModels = useStore((s) => s.kiroModels);
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [title, setTitle] = useState(session.title);
+  const agent = session.agent ?? 'claude';
+  const model = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels);
+  const tagText = `${agentLabel(agent)} · ${model}`;
 
   const commitRename = () => {
     setEditing(false);
@@ -314,27 +337,15 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
               >
                 {session.title}
               </span>
-              {session.agent === 'cursor' ? (
-                <span className="shrink-0 rounded bg-accent/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-accent-soft">
-                  Cursor
-                </span>
-              ) : session.agent === 'codex' ? (
-                <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-emerald-300">
-                  Codex
-                </span>
-              ) : session.agent === 'kimi' ? (
-                <span className="shrink-0 rounded bg-sky-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-sky-300">
-                  Kimi
-                </span>
-              ) : session.agent === 'kiro' ? (
-                <span className="shrink-0 rounded bg-violet-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-violet-300">
-                  Kiro
-                </span>
-              ) : (
-                <span className="shrink-0 rounded bg-amber-500/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-amber-500">
-                  Claude
-                </span>
-              )}
+              <span
+                title={tagText}
+                className={cn(
+                  'max-w-[10.5rem] shrink-0 truncate rounded px-1 py-px text-[9px] font-medium tracking-wide',
+                  agentTagTone(agent),
+                )}
+              >
+                {tagText}
+              </span>
             </div>
           )}
           <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-600">
