@@ -36,6 +36,7 @@ import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { mcpRegistry } from '../mcp/registry.js';
 import { oauthStore } from '../mcp/oauth.js';
 import { presetRegistry } from '../presets/registry.js';
+import { deleteSkill, listSkills, readSkill, validateSkillName, writeSkill } from '../skills/skills.js';
 import { getRemoteSessionInfo } from '../remote/discovery.js';
 import { sshExec, loginShellCommand, shQuote } from '../remote/ssh.js';
 import { createRemoteWorkdir } from '../remote/workdir.js';
@@ -49,7 +50,14 @@ import {
 } from '../remote/agents.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { hub } from '../ws/hub.js';
-import type { AgentKind, EffortLevel, FileEntry, PermissionMode } from '../../../shared/protocol.js';
+import type {
+  AgentKind,
+  EffortLevel,
+  FileEntry,
+  PermissionMode,
+  SkillDetail,
+  SkillScope,
+} from '../../../shared/protocol.js';
 
 const permissionModes: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
 const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
@@ -131,6 +139,27 @@ const presetSchema = z.object({
   model: z.string().min(1),
   permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']),
   effort: z.enum(effortLevels),
+});
+
+// Agent skills (personal CRUD + read-only system view) for Claude/Cursor/Codex/
+// Kimi/Kiro. Skill names become directory names under the agent's user skills dir,
+// so the charset is locked down here and re-checked server-side (no traversal).
+const skillAgentSchema = z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro']);
+const skillNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'invalid skill name');
+const skillSaveSchema = z.object({
+  agent: skillAgentSchema,
+  name: skillNameSchema,
+  description: z.string().min(1),
+  whenToUse: z.string().optional(),
+  body: z.string(),
+  host: z.string().optional(),
+});
+const skillReadQuery = z.object({
+  agent: skillAgentSchema,
+  host: z.string().optional(),
+  name: z.string().min(1),
+  scope: z.enum(['personal', 'system']).optional(),
+  source: z.string().optional(),
 });
 
 // -- File browser/editor (local + remote) ------------------------------------
@@ -836,6 +865,95 @@ export function createApiRouter(): Router {
   router.delete('/presets/:name', (req, res) => {
     presetRegistry.remove(req.params.name);
     res.json({ ok: true });
+  });
+
+  // -- Agent skills (personal CRUD + read-only system view) -----------------
+
+  // List personal + system skills for an agent on this machine or a remote host.
+  // Lightweight rows only; descriptions/bodies load via /skills/read on open.
+  router.get('/skills', async (req, res) => {
+    const parsed = z.object({ agent: skillAgentSchema, host: z.string().optional() }).safeParse({
+      agent: req.query.agent,
+      host: req.query.host,
+    });
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
+      return;
+    }
+    try {
+      res.json({ skills: await listSkills({ agent: parsed.data.agent, host: parsed.data.host }) });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'list failed' });
+    }
+  });
+
+  // Read one skill's full content (frontmatter + body). System skills are read-only.
+  router.get('/skills/read', async (req, res) => {
+    const parsed = skillReadQuery.safeParse({
+      agent: req.query.agent,
+      host: req.query.host,
+      name: req.query.name,
+      scope: req.query.scope,
+      source: req.query.source,
+    });
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
+      return;
+    }
+    try {
+      const skill = await readSkill({
+        agent: parsed.data.agent,
+        host: parsed.data.host,
+        name: parsed.data.name,
+        scope: parsed.data.scope as SkillScope | undefined,
+        source: parsed.data.source,
+      });
+      res.json({ skill });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'read failed';
+      res.status(/not found/i.test(msg) ? 404 : /timed out/i.test(msg) ? 504 : 400).json({ error: msg });
+    }
+  });
+
+  // Create or update a personal skill (writes <agent user dir>/skills/<name>/SKILL.md).
+  router.post('/skills', async (req, res) => {
+    const parsed = skillSaveSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid skill' });
+      return;
+    }
+    if (!validateSkillName(parsed.data.name)) {
+      res.status(400).json({ error: 'invalid skill name' });
+      return;
+    }
+    try {
+      const skill: SkillDetail = await writeSkill(parsed.data);
+      res.json({ skill });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'save failed';
+      res.status(/timed out/i.test(msg) ? 504 : 400).json({ error: msg });
+    }
+  });
+
+  // Delete a personal skill directory. System skills are read-only — a crafted
+  // system name can't match a personal dir, so this only ever removes personal.
+  router.delete('/skills', async (req, res) => {
+    const parsed = z.object({ agent: skillAgentSchema, host: z.string().optional(), name: skillNameSchema }).safeParse({
+      agent: req.query.agent,
+      host: req.query.host,
+      name: req.query.name,
+    });
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid skill' });
+      return;
+    }
+    try {
+      await deleteSkill({ agent: parsed.data.agent, host: parsed.data.host, name: parsed.data.name });
+      res.json({ ok: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'delete failed';
+      res.status(/timed out/i.test(msg) ? 504 : 400).json({ error: msg });
+    }
   });
 
   // Begin the MCP-OAuth flow for a server: discover + register, return the

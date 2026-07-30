@@ -240,6 +240,45 @@ export interface SessionPreset {
   effort: EffortLevel;
 }
 
+/**
+ * Where a skill lives. `personal` = user-authored under the agent's user skills
+ * dir (editable); `system` = the agent's installed plugin/built-in skills
+ * (read-only). All five supported agents (Claude, Cursor, Codex, Kimi, Kiro)
+ * use the same Agent Skills standard (a `<name>/SKILL.md` with YAML
+ * frontmatter), just at different directories.
+ */
+export type SkillScope = 'personal' | 'system';
+
+/** Lightweight row in the Skills list. Frontmatter/body are fetched on open. */
+export interface SkillEntry {
+  /** Directory name — also the filesystem key for personal skills. */
+  name: string;
+  scope: SkillScope;
+  /** Which agent this skill belongs to. */
+  agent: AgentKind;
+  /** Absolute path to SKILL.md for system skills (read-only). Undefined for
+   *  personal skills, where the path is derived from the name. */
+  source?: string;
+}
+
+/** Full skill content, returned when a user opens one. */
+export interface SkillDetail {
+  /** Directory name (filesystem key). */
+  name: string;
+  scope: SkillScope;
+  agent: AgentKind;
+  source?: string;
+  /** Frontmatter `name` (may diverge from the directory name after an edit). */
+  frontmatterName?: string;
+  description: string;
+  /** Optional `whenToUse` frontmatter key some skill authors set. */
+  whenToUse?: string;
+  /** Markdown body below the closing `---` fence. */
+  body: string;
+  /** True for system skills — not editable or deletable. */
+  readOnly: boolean;
+}
+
 /** Install + version info for one agent CLI on a host. */
 export interface AgentInstallInfo {
   installed: boolean;

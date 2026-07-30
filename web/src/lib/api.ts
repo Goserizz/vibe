@@ -12,6 +12,9 @@ import type {
   ProjectDir,
   RemoteHost,
   SearchResult,
+  SkillDetail,
+  SkillEntry,
+  SkillScope,
   SessionMeta,
   SessionPreset,
 } from '@shared/protocol';
@@ -142,6 +145,31 @@ export const api = {
     request<{ preset: SessionPreset }>('/presets', { method: 'POST', body: JSON.stringify(preset) }).then((r) => r.preset),
 
   deletePreset: (name: string) => request<{ ok: boolean }>(`/presets/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  // -- Agent skills (personal CRUD + read-only system view) ------------------
+
+  listSkills: (agent: AgentKind, host?: string) => {
+    const qs = new URLSearchParams({ agent });
+    if (host) qs.set('host', host);
+    return request<{ skills: SkillEntry[] }>(`/skills?${qs.toString()}`).then((r) => r.skills);
+  },
+
+  readSkill: (args: { agent: AgentKind; host?: string; name: string; scope?: SkillScope; source?: string }) => {
+    const qs = new URLSearchParams({ agent: args.agent, name: args.name });
+    if (args.host) qs.set('host', args.host);
+    if (args.scope) qs.set('scope', args.scope);
+    if (args.source) qs.set('source', args.source);
+    return request<{ skill: SkillDetail }>(`/skills/read?${qs.toString()}`).then((r) => r.skill);
+  },
+
+  saveSkill: (input: { agent: AgentKind; name: string; description: string; whenToUse?: string; body: string; host?: string }) =>
+    request<{ skill: SkillDetail }>('/skills', { method: 'POST', body: JSON.stringify(input) }).then((r) => r.skill),
+
+  deleteSkill: (args: { agent: AgentKind; host?: string; name: string }) => {
+    const qs = new URLSearchParams({ agent: args.agent, name: args.name });
+    if (args.host) qs.set('host', args.host);
+    return request<{ ok: boolean }>(`/skills?${qs.toString()}`, { method: 'DELETE' });
+  },
 
   latestAgentVersions: () =>
     request<{ versions: AgentLatestVersions }>('/agents/latest').then((r) => r.versions),

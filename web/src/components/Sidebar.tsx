@@ -6,24 +6,8 @@ import { Logo } from './Logo';
 import { ConnectionBadge } from './ConnectionBadge';
 import { HostsDialog } from './HostsDialog';
 import { SettingsDialog } from './SettingsDialog';
-import type { AgentKind } from '@shared/protocol';
 import { agentLabel, basename, cn, modelLabel, relativeTime } from '../lib/format';
 import { Glass } from './LiquidGlass';
-
-function agentTagTone(agent: AgentKind): string {
-  switch (agent) {
-    case 'cursor':
-      return 'bg-accent/15 text-accent-soft';
-    case 'codex':
-      return 'bg-emerald-500/15 text-emerald-300';
-    case 'kimi':
-      return 'bg-sky-500/15 text-sky-300';
-    case 'kiro':
-      return 'bg-violet-500/15 text-violet-300';
-    default:
-      return 'bg-amber-500/15 text-amber-500';
-  }
-}
 
 interface SidebarProps {
   open: boolean;
@@ -151,11 +135,9 @@ export function Sidebar({ open, onClose, onNewSession }: SidebarProps) {
 
 /** Small host label so every session shows which machine it lives on. */
 function HostChip({ host }: { host: string }) {
-  const localName = useStore((s) => s.localName);
-  const isRemote = host !== localName;
   return (
-    <span className={cn('flex shrink-0 items-center gap-1', isRemote ? 'text-accent-soft/90' : 'text-slate-500')}>
-      <span className={cn('h-1.5 w-1.5 rounded-full', isRemote ? 'bg-accent/80' : 'bg-slate-600')} />
+    <span className="flex shrink-0 items-center gap-1 text-slate-500">
+      <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
       <span className="max-w-[96px] truncate">{host}</span>
     </span>
   );
@@ -339,10 +321,7 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
               </span>
               <span
                 title={tagText}
-                className={cn(
-                  'max-w-[10.5rem] shrink-0 truncate rounded px-1 py-px text-[9px] font-medium tracking-wide',
-                  agentTagTone(agent),
-                )}
+                className="max-w-[10.5rem] shrink-0 truncate rounded-md bg-ink-750 px-1.5 py-px text-[9px] font-medium tracking-wide text-slate-400 ring-1 ring-inset ring-accent/30"
               >
                 {tagText}
               </span>

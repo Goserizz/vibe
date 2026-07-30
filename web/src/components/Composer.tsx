@@ -154,7 +154,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
         >
           <Glass
             className={cn(
-              'relative focus-within:ring-2 focus-within:ring-accent/15',
+              'relative',
+              // While a turn is running the border already glows/breathes, so skip the
+              // focus ring to avoid stacking two accent outlines on top of each other.
+              !running && 'focus-within:ring-2 focus-within:ring-accent/15',
               running && 'composer-running',
               dragging && 'ring-2 ring-accent/40',
             )}

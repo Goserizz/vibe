@@ -56,11 +56,18 @@ export default {
           '0%, 100%': { opacity: '0.4' },
           '50%': { opacity: '1' },
         },
+        // Softer, slightly longer fade used when the thinking preview swaps to a
+        // new paragraph — pure opacity + a hair of settle, no layout reflow.
+        'fade-in-soft': {
+          '0%': { opacity: '0', transform: 'translateY(3px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 0.18s ease-out',
         shimmer: 'shimmer 1.6s linear infinite',
         'pulse-dot': 'pulse-dot 1.2s ease-in-out infinite',
+        'fade-in-soft': 'fade-in-soft 0.32s ease-out',
       },
     },
   },

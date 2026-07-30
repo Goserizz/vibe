@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useLayoutEffect, useRef, useState } from 'react';
 import {
   Brain,
   ChevronRight,
@@ -74,44 +74,25 @@ function AssistantView({ block }: { block: AssistantBlock }) {
   );
 }
 
-/**
- * Latest *completed* paragraph (blank-line separated) of a streaming thinking
- * block. A paragraph counts as complete only once a trailing blank line closes
- * it; the trailing in-progress paragraph is withheld. Ported from the Telegram
- * thinking preview so the web shows one paragraph at a time — each newly
- * finished paragraph replacing the previous on screen — until the block ends
- * and the full reasoning is revealed on expand.
- */
-function latestCompletedThinkingParagraph(text: string): string {
-  // Do not trim trailing whitespace — trailing blank lines mark paragraph completion.
-  const cleaned = text.replace(/^\uFEFF/, '');
-  if (!cleaned.trim()) return '';
-  const parts = cleaned.split(/\n\s*\n/);
-  const trailingComplete = /\n\s*\n\s*$/.test(cleaned);
-  // If text does not end with a blank line, the last part is still generating.
-  const lastCompleteIdx = trailingComplete ? parts.length - 1 : parts.length - 2;
-  for (let i = lastCompleteIdx; i >= 0; i--) {
-    const p = parts[i]!.replace(/^\n+|\n+$/g, '');
-    if (p.trim()) return p;
-  }
-  return '';
-}
-
 function ThinkingView({ block }: { block: ThinkingBlock }) {
   // Auto-expand while thinking, auto-collapse once done; a manual toggle overrides.
   const [manual, setManual] = useState<boolean | null>(null);
-  if (!block.text) return null;
+  const viewportRef = useRef<HTMLDivElement>(null);
   const open = manual ?? block.streaming;
 
-  // While streaming, show one paragraph at a time: each newly completed
-  // paragraph replaces the previous (mirrors Telegram's thinking preview). The
-  // still-generating first paragraph is shown as it types so the box is never
-  // empty; once done, expand reveals the full reasoning.
-  let displayText = block.text;
-  if (block.streaming) {
-    const latest = latestCompletedThinkingParagraph(block.text);
-    displayText = latest || block.text.trim() || '…';
-  }
+  // Stream the full reasoning as it arrives — no per-paragraph paging.
+  const displayText = block.text;
+
+  // The preview grows with the text up to a cap; once the text overflows that
+  // cap, pin the height and scroll to the newest line so only the latest
+  // content shows. While it hasn't filled the box yet, leave it top-aligned.
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight > el.clientHeight + 1 ? el.scrollHeight : 0;
+  }, [displayText, open]);
+
+  if (!block.text) return null;
 
   return (
     <div className="animate-fade-in rounded-xl border border-white/5 bg-ink-900/40">
@@ -124,8 +105,16 @@ function ThinkingView({ block }: { block: ThinkingBlock }) {
         <ChevronRight className={cn('ml-auto h-3.5 w-3.5 transition-transform', open && 'rotate-90')} />
       </button>
       {open && (
-        <div className="whitespace-pre-wrap break-words border-t border-white/5 px-3 py-2.5 font-mono text-[12px] leading-relaxed text-slate-500">
-          {displayText}
+        <div
+          ref={viewportRef}
+          className={cn(
+            'border-t border-white/5',
+            block.streaming && 'max-h-28 overflow-hidden',
+          )}
+        >
+          <div className="whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-[12px] leading-relaxed text-slate-500">
+            {displayText}
+          </div>
         </div>
       )}
     </div>

@@ -1,10 +1,11 @@
-import { X, Settings, Volume2, Play, Plug, Bookmark, Palette } from 'lucide-react';
+import { X, Settings, Volume2, Play, Plug, Bookmark, Palette, Sparkles } from 'lucide-react';
 import { useStore } from '../store/store';
 import { NOTIFY_SOUNDS, playNotifySound, type NotifySoundId } from '../lib/notifySound';
 import { ACCENT_PRESETS } from '../lib/systemAccent';
 import { cn } from '../lib/format';
 import { McpServerRegistry, McpEnableList } from './McpControls';
 import { PresetRegistry } from './PresetControls';
+import { SkillRegistry } from './SkillControls';
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const notifySound = useStore((s) => s.notifySound);
@@ -188,6 +189,19 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 Session dialog. Presets are host-agnostic — invalid combos are reconciled when applied.
               </p>
               <PresetRegistry />
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <Sparkles className="h-3.5 w-3.5 text-slate-400" />
+                <h3 className="text-xs font-medium text-slate-400">Skills</h3>
+              </div>
+              <p className="mb-3 text-[12px] leading-relaxed text-slate-600">
+                Author personal skills or browse installed ones for Claude, Cursor, Codex, Kimi, and Kiro (all use the same{' '}
+                <span className="font-mono">SKILL.md</span> standard). Pick an agent + host; system/plugin skills are read-only.
+                Skills compiled into an agent binary aren&apos;t on disk and can&apos;t be listed.
+              </p>
+              <SkillRegistry />
             </section>
           </div>
         </div>

@@ -13,6 +13,9 @@ import type {
   ServerEvent,
   SessionMeta,
   SessionPreset,
+  SkillDetail,
+  SkillEntry,
+  SkillScope,
   TokenUsage,
 } from '@shared/protocol';
 import { compareSessions } from '@shared/protocol';
@@ -86,6 +89,13 @@ interface StoreState {
   mcp: McpConfigSnapshot;
   /** Saved New-session engine presets (agent + model + permission + effort). */
   presets: SessionPreset[];
+  /** Agent skills for the currently-selected agent + host (personal + system).
+   *  Loaded lazily when the Skills panel is opened. */
+  skills: SkillEntry[];
+  /** Agent whose skills are in `skills`. */
+  skillsAgent: AgentKind | null;
+  /** Host name whose skills are in `skills` (null = this machine). */
+  skillsHost: string | null;
   localName: string;
   activeId: string | null;
   views: Record<string, SessionView>;
@@ -134,6 +144,15 @@ interface StoreState {
   /** Insert or update a preset (keyed by name). */
   upsertPreset: (preset: SessionPreset) => Promise<boolean>;
   deletePreset: (name: string) => Promise<void>;
+  /** Reload skills for an agent + host (undefined host = this machine). */
+  loadSkills: (agent: AgentKind, host?: string) => Promise<void>;
+  /** Read one skill's full content (frontmatter + body). */
+  readSkillDetail: (args: { agent: AgentKind; host?: string; name: string; scope?: SkillScope; source?: string }) => Promise<SkillDetail | null>;
+  /** Create/update a personal skill across one or more agents — same content
+   *  written to each selected agent's skills dir. Returns true iff all succeeded. */
+  saveSkillMulti: (input: { agents: AgentKind[]; name: string; description: string; whenToUse?: string; body: string; host?: string }) => Promise<boolean>;
+  /** Delete a personal skill. */
+  deleteSkillAction: (agent: AgentKind, host: string | undefined, name: string) => Promise<void>;
   openSession: (id: string) => Promise<void>;
   createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<boolean>;
   renameSession: (id: string, title: string) => Promise<void>;
@@ -312,6 +331,9 @@ export const useStore = create<StoreState>((set, get) => {
     hosts: [],
     mcp: { servers: [], enabled: {}, oauth: {} },
     presets: [],
+    skills: [],
+    skillsAgent: null,
+    skillsHost: null,
     localName: 'local',
     activeId: null,
     views: {},
@@ -577,6 +599,57 @@ export const useStore = create<StoreState>((set, get) => {
         set((s) => ({ presets: s.presets.filter((p) => p.name !== name) }));
       } catch {
         set({ toast: 'Failed to delete preset' });
+      }
+    },
+
+    async loadSkills(agent, host) {
+      try {
+        set({ skills: await api.listSkills(agent, host), skillsAgent: agent, skillsHost: host ?? null });
+      } catch {
+        set({ toast: 'Failed to list skills' });
+      }
+    },
+
+    async readSkillDetail(args) {
+      try {
+        return await api.readSkill(args);
+      } catch (err) {
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to read skill' });
+        return null;
+      }
+    },
+
+    async saveSkillMulti(input) {
+      // Write the same content to each target agent's skills dir in parallel.
+      const failed: AgentKind[] = [];
+      await Promise.all(
+        input.agents.map(async (agent) => {
+          try {
+            await api.saveSkill({ agent, name: input.name, description: input.description, whenToUse: input.whenToUse, body: input.body, host: input.host });
+          } catch {
+            failed.push(agent);
+          }
+        }),
+      );
+      // Refresh the currently-browsed agent's list if it was among the targets.
+      const cur = get().skillsAgent;
+      if (cur && input.agents.includes(cur)) {
+        try {
+          set({ skills: await api.listSkills(cur, get().skillsHost ?? undefined) });
+        } catch {
+          /* ignore */
+        }
+      }
+      if (failed.length) set({ toast: `Failed for: ${failed.join(', ')}` });
+      return failed.length === 0;
+    },
+
+    async deleteSkillAction(agent, host, name) {
+      try {
+        await api.deleteSkill({ agent, host, name });
+        set((s) => ({ skills: s.skills.filter((x) => !(x.scope === 'personal' && x.name === name)) }));
+      } catch {
+        set({ toast: 'Failed to delete skill' });
       }
     },
 
