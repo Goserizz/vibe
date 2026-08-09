@@ -34,13 +34,15 @@ import {
 } from '../kiro/transcript.js';
 import { readTranscriptBlocks } from '../sessions/transcript.js';
 import { resolveClaudeSessionSync } from '../sessions/discovery.js';
-import { readRemoteTranscript } from '../remote/discovery.js';
+import { readRemoteAgentTranscript, readRemoteTranscript } from '../remote/discovery.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { mcpRegistry } from '../mcp/registry.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import type {
   AgentKind,
+  AssistantBlock,
+  BackgroundTask,
   ChatBlock,
   EffortLevel,
   LiveEvent,
@@ -50,6 +52,7 @@ import type {
   PermissionRequest,
   ServerEvent,
   SessionMeta,
+  ThinkingBlock,
 } from '../../../shared/protocol.js';
 
 interface RuntimeInit {
@@ -85,6 +88,10 @@ const LOG_CAP = 5000;
 /** Above this socket backlog we drop best-effort `delta` frames (text is
  *  reconciled by the authoritative `block` event), but never structural ones. */
 const DELTA_BACKPRESSURE_BYTES = 512 * 1024;
+
+function isActiveBackgroundTask(task: BackgroundTask): boolean {
+  return task.status === 'pending' || task.status === 'running' || task.status === 'paused';
+}
 
 /**
  * A live-event subscriber. Web clients use {@link WsConn}; in-process consumers
@@ -156,11 +163,16 @@ class SessionRuntime {
   readonly subscribers = new Set<Conn>();
   readonly allowedTools = new Set<string>();
   readonly pending = new Map<string, { request: PermissionRequest; resolve: (d: PermissionDecision) => void }>();
+  readonly tasks = new Map<string, BackgroundTask>();
 
   private logBuf: LoggedEvent[] = [];
+  /** Kind of each still-streaming block id (assistant/thinking), so a finalized
+   *  block can be rebuilt for replay even if its opening event was evicted. */
+  private streamKinds = new Map<string, 'assistant' | 'thinking'>();
   private runBaseSeq = 0;
   private baselineClaudeSessionId?: string;
   private run?: RunHandle;
+  private runUserTurns = 0;
   /** Headless CLI sessions persist normalized transcripts; this accumulates the turn. */
   private transcript?: CursorTranscriptBuilder;
   private turnStartBlocks = 0;
@@ -200,7 +212,12 @@ class SessionRuntime {
     this.logBuf.push(entry);
     // Mirror events into the normalized transcript accumulator (before pruning).
     this.transcript?.apply(ev);
-    this.pruneFinalized(ev);
+    // Remember the kind of every in-flight streamed block so a finalized block
+    // can still be reconstructed if its opening event has been evicted.
+    if (ev.k === 'block' && (ev.block.kind === 'assistant' || ev.block.kind === 'thinking') && ev.block.streaming) {
+      this.streamKinds.set(ev.block.id, ev.block.kind);
+    }
+    this.foldFinalized(ev);
     if (this.logBuf.length > LOG_CAP) this.logBuf.splice(0, this.logBuf.length - LOG_CAP);
     const frame: ServerEvent = { t: 'event', sessionId: this.sessionId, seq: this.seq, ev };
     const skippable = ev.k === 'delta';
@@ -210,23 +227,69 @@ class SessionRuntime {
     }
   }
 
-  /** When a block is finalized, collapse its streaming deltas in the log so
-   *  reconnect replay stays small and authoritative. */
-  private pruneFinalized(ev: LiveEvent): void {
+  /**
+   * When a streamed block finalizes, *fold* its deltas into the block event
+   * already in the log rather than dropping it: the log stays small **and**
+   * every finished block remains self-contained.
+   *
+   * Dropping the opening `block` event (as an earlier version did) left only a
+   * `block_end`, which a client replaying from before the block started has no
+   * block to apply — so assistant text that streamed while the session sat in
+   * the background disappeared until the page refetched the transcript.
+   */
+  private foldFinalized(ev: LiveEvent): void {
     let id: string | undefined;
+    let finalText: string | undefined;
     if (ev.k === 'block' && (ev.block.kind === 'assistant' || ev.block.kind === 'thinking') && !ev.block.streaming) {
       id = ev.block.id;
+      finalText = ev.block.text;
     } else if (ev.k === 'block_end') {
       id = ev.id;
+      finalText = ev.text;
     }
     if (!id) return;
     const targetId = id;
-    this.logBuf = this.logBuf.filter((e) => {
+
+    const next: LoggedEvent[] = [];
+    // Index (in `next`) of the streaming `block` event we fold into, plus the
+    // text accumulated from its deltas (a fallback when the finalizer has none).
+    let openAt = -1;
+    let streamed: string | undefined;
+    for (const e of this.logBuf) {
       const evt = e.ev;
-      if (evt.k === 'delta' && evt.id === targetId) return false;
-      if (evt.k === 'block' && evt.block.id === targetId && 'streaming' in evt.block && evt.block.streaming) return false;
-      return true;
-    });
+      if (evt.k === 'block' && evt.block.id === targetId && 'streaming' in evt.block && evt.block.streaming) {
+        openAt = next.length;
+        streamed = (evt.block as AssistantBlock | ThinkingBlock).text;
+        next.push(e);
+        continue;
+      }
+      if (evt.k === 'delta' && evt.id === targetId) {
+        if (streamed !== undefined) streamed += evt.chunk;
+        continue; // folded into the block event below
+      }
+      next.push(e);
+    }
+
+    if (openAt >= 0) {
+      const open = next[openAt];
+      const block = (open.ev as { k: 'block'; block: ChatBlock }).block as AssistantBlock | ThinkingBlock;
+      const text = finalText ?? streamed ?? block.text;
+      next[openAt] = { seq: open.seq, ev: { k: 'block', block: { ...block, text, streaming: false } } };
+    } else if (ev.k === 'block_end' && finalText != null) {
+      // The opening event was evicted (very long turn): rebuild an authoritative
+      // block in place of the `block_end` so replay still carries the text.
+      const kind = this.streamKinds.get(targetId);
+      if (kind && next.length) {
+        const last = next[next.length - 1];
+        next[next.length - 1] = {
+          seq: last.seq,
+          ev: { k: 'block', block: { id: targetId, kind, text: finalText, streaming: false, ts: Date.now() } },
+        };
+      }
+    }
+
+    this.streamKinds.delete(targetId);
+    this.logBuf = next;
   }
 
   /** Replay everything after `lastSeq`. Returns false if there's a gap (reset). */
@@ -234,6 +297,10 @@ class SessionRuntime {
     const oldest = this.logBuf.length ? this.logBuf[0].seq : this.seq + 1;
     const gap = lastSeq > 0 && lastSeq + 1 < oldest && lastSeq < this.seq;
     if (gap) return false;
+    // A client ahead of our own seq is holding state from an older runtime
+    // incarnation (this runtime was GC'd, or the server restarted). Its blocks
+    // can't be reconciled by replay — make it reload the transcript.
+    if (lastSeq > this.seq) return false;
     for (const entry of this.logBuf) {
       if (entry.seq > lastSeq) {
         conn.send({ t: 'event', sessionId: this.sessionId, seq: entry.seq, ev: entry.ev });
@@ -246,14 +313,42 @@ class SessionRuntime {
     return [...this.pending.values()].map((p) => p.request);
   }
 
+  taskList(): BackgroundTask[] {
+    return [...this.tasks.values()].sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  hasActiveBackgroundTasks(): boolean {
+    return [...this.tasks.values()].some(isActiveBackgroundTask);
+  }
+
+  private upsertTask(task: BackgroundTask): void {
+    const wasRunning = this.hasActiveBackgroundTasks();
+    const previous = this.tasks.get(task.id);
+    const merged: BackgroundTask = previous ? { ...previous, ...task } : task;
+    this.tasks.set(task.id, merged);
+    this.lastActivity = Date.now();
+    this.emit({ k: 'task_upsert', task: merged });
+    if (wasRunning !== this.hasActiveBackgroundTasks()) this.onMeta();
+  }
+
+  /** `running` means a foreground model turn is producing a reply. The agent
+   *  transport can remain alive with this false while background tasks run. */
+  private setForegroundRunning(running: boolean): void {
+    if (this.running === running) return;
+    this.running = running;
+    this.lastActivity = Date.now();
+    this.emit({ k: 'run_state', running });
+    this.onMeta();
+  }
+
   /**
    * Decide which transcript to read and the seq to subscribe from, for a
    * freshly opening client. The hub reads the transcript (locally or over SSH).
-   *  - running: stable history from before this turn + replay the live turn.
-   *  - idle: the latest transcript already contains everything; skip live log.
+   *  - live transport: stable history from before it started + replay its events.
+   *  - closed transport: the latest transcript contains everything; skip replay.
    */
   snapshotPlan(storeClaudeSessionId: string | undefined): { claudeSessionId?: string; seq: number } {
-    if (this.running) {
+    if (this.run) {
       return { claudeSessionId: this.baselineClaudeSessionId ?? storeClaudeSessionId, seq: this.runBaseSeq };
     }
     return { claudeSessionId: this.claudeSessionId ?? storeClaudeSessionId, seq: this.seq };
@@ -261,6 +356,18 @@ class SessionRuntime {
 
   startTurn(text: string, clientMsgId: string): boolean {
     if (this.running) return false;
+
+    // Claude SDK, Kimi ACP, and Codex App Server remain connected while native
+    // tasks run. Steer a new user message through that connection instead of
+    // rejecting it or starting a competing process for the same session.
+    if (this.run) {
+      if (!this.run.sendMessage?.(text)) return false;
+      this.runUserTurns += 1;
+      this.setForegroundRunning(true);
+      this.emit({ k: 'block', block: { id: clientMsgId, kind: 'user', text, ts: Date.now() } });
+      return true;
+    }
+
     // Pick up the latest model/permission/cwd (header changes write to the store).
     const stored = sessionStore.get(this.sessionId);
     const cwd = stored?.cwd ?? this.cwd;
@@ -268,15 +375,15 @@ class SessionRuntime {
     const permissionMode = stored?.permissionMode ?? this.permissionMode;
     const effort = stored?.effort ?? this.effort;
 
-    this.running = true;
     this.runBaseSeq = this.seq;
     this.baselineClaudeSessionId = this.claudeSessionId;
     this.turnStartBlocks = this.transcript?.blocks.length ?? 0;
+    this.runUserTurns = 1;
     this.lastActivity = Date.now();
 
     const where = this.sshTarget ? `host=${this.host}` : 'local';
     log.debug(`turn start session=${this.sessionId} agent=${this.agent} ${where} resume=${this.claudeSessionId ?? 'new'} model=${model} cwd=${cwd}`);
-    this.emit({ k: 'run_state', running: true });
+    this.setForegroundRunning(true);
     this.emit({ k: 'block', block: { id: clientMsgId, kind: 'user', text, ts: Date.now() } });
 
     const runOpts = {
@@ -297,6 +404,8 @@ class SessionRuntime {
         if (id && id !== this.claudeSessionId) this.claudeSessionId = id;
       },
       requestPermission: (request: PermissionRequest) => this.requestPermission(request),
+      onTask: (task: BackgroundTask) => this.upsertTask(task),
+      onTurnState: (running: boolean) => this.setForegroundRunning(running),
     };
 
     if (this.agent === 'cursor') {
@@ -359,19 +468,31 @@ class SessionRuntime {
         : startRun({ ...runOpts, mcpServers }, cb);
     }
 
-    void this.run.done.then(() => this.finishTurn());
+    const activeRun = this.run;
+    void activeRun.done.then(() => this.finishTurn(activeRun));
     return true;
   }
 
-  private finishTurn(): void {
-    this.running = false;
+  private finishTurn(run: RunHandle): void {
+    if (this.run !== run) return;
     this.run = undefined;
+    this.setForegroundRunning(false);
     this.lastActivity = Date.now();
+    this.streamKinds.clear();
+    // Kimi's detached task manager intentionally lets work outlive the ACP turn;
+    // its monitor owns the terminal transition. Other runners keep their
+    // transport alive until native tasks settle, so an active task left when
+    // those transports end really is an interrupted/orphaned run.
+    if (this.agent !== 'kimi') {
+      for (const task of [...this.tasks.values()]) {
+        if (isActiveBackgroundTask(task)) {
+          this.upsertTask({ ...task, status: 'stopped', updatedAt: Date.now(), endedAt: Date.now(), canStop: false });
+        }
+      }
+    }
     // Cancel any still-pending permission prompts.
     for (const [, p] of this.pending) p.resolve({ allow: false });
     this.pending.clear();
-    this.emit({ k: 'run_state', running: false });
-
     // Headless CLI sessions self-persist: append this turn's blocks to Vibe JSONL.
     if (this.transcript) {
       const blocks = this.transcript.blocks.slice(this.turnStartBlocks);
@@ -381,11 +502,13 @@ class SessionRuntime {
       else appendCursorBlocks(this.sessionId, blocks);
     }
 
+    const userTurns = Math.max(1, this.runUserTurns);
+    this.runUserTurns = 0;
     const stored = sessionStore.get(this.sessionId);
     if (stored) {
       sessionStore.update(this.sessionId, {
         claudeSessionId: this.claudeSessionId,
-        messageCount: stored.messageCount + 1,
+        messageCount: stored.messageCount + userTurns,
       });
     } else {
       // A discovered CLI session we just continued — adopt it into Vibe.
@@ -398,7 +521,7 @@ class SessionRuntime {
         permissionMode: this.permissionMode,
         effort: this.effort,
         agent: this.agent,
-        messageCount: 1,
+        messageCount: userTurns,
         host: this.host,
       });
     }
@@ -425,11 +548,41 @@ class SessionRuntime {
   }
 
   abort(): void {
+    if (!this.running) return;
+    // A permission callback is part of the foreground turn. Resolve it before
+    // interrupting so the runner cannot remain blocked on Vibe after Stop.
+    for (const [requestId, pending] of this.pending) {
+      pending.resolve({ allow: false });
+      const frame: ServerEvent = {
+        t: 'permission_resolved',
+        sessionId: this.sessionId,
+        requestId,
+        decision: 'deny',
+      };
+      for (const conn of this.subscribers) conn.send(frame);
+    }
+    this.pending.clear();
     this.run?.abort();
   }
 
+  async stopTask(taskId: string): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task || !task.canStop || !this.run?.stopTask) return false;
+    try {
+      await this.run.stopTask(taskId);
+      return true;
+    } catch (error) {
+      log.warn(`task stop failed session=${this.sessionId} task=${taskId}`, error);
+      return false;
+    }
+  }
+
   hasActivity(): boolean {
-    return this.running || this.subscribers.size > 0 || this.pending.size > 0;
+    return Boolean(this.run) || this.hasActiveBackgroundTasks() || this.subscribers.size > 0 || this.pending.size > 0;
+  }
+
+  hasLiveRun(): boolean {
+    return Boolean(this.run);
   }
 }
 
@@ -558,6 +711,7 @@ export class Hub {
       running: rt.running,
       reset: !ok,
       pendingPermissions: rt.pendingRequests(),
+      tasks: rt.taskList(),
     });
   }
 
@@ -601,6 +755,20 @@ export class Hub {
     this.runtimes.get(sessionId)?.abort();
   }
 
+  stopTask(conn: Conn, sessionId: string, taskId: string): void {
+    void this.stopTaskForSession(sessionId, taskId).then((stopped) => {
+      if (!stopped) conn.send({ t: 'error', message: 'this task cannot be stopped individually', sessionId });
+    });
+  }
+
+  async stopTaskForSession(sessionId: string, taskId: string): Promise<boolean> {
+    return await this.runtimes.get(sessionId)?.stopTask(taskId) ?? false;
+  }
+
+  tasks(sessionId: string): BackgroundTask[] {
+    return this.runtimes.get(sessionId)?.taskList() ?? [];
+  }
+
   resolvePermission(sessionId: string, requestId: string, decision: PermissionDecision): void {
     this.runtimes.get(sessionId)?.resolvePermission(requestId, decision);
   }
@@ -616,55 +784,51 @@ export class Hub {
       ? rt.snapshotPlan(stored?.claudeSessionId)
       : { claudeSessionId: stored?.claudeSessionId ?? rawId, seq: 0 };
     const sid = plan.claudeSessionId ?? rawId;
-    const agent: AgentKind = rt?.agent ?? stored?.agent ?? 'claude';
+    // A discovered session that hasn't been opened yet has neither a runtime nor
+    // a store row; resolveInit knows how to identify it (local agent stores, or
+    // the remote discovery cache) so history isn't read as the wrong engine.
+    const fallback = !rt && !stored ? this.resolveInit(sessionId) : undefined;
+    const agent: AgentKind = rt?.agent ?? stored?.agent ?? fallback?.agent ?? 'claude';
+    const cwd = stored?.cwd ?? rt?.cwd ?? fallback?.cwd ?? '';
+    const remoteHost = host ? hostRegistry.get(host) : undefined;
+
+    /** Native (non-Vibe) history for a session created directly on a CLI. While
+     *  a turn is running we rely on the live stream instead, so in-flight blocks
+     *  aren't duplicated. */
+    const native = async (readLocal: () => ChatBlock[]): Promise<ChatBlock[]> => {
+      if (rt?.hasLiveRun() || !sid) return [];
+      if (host) return remoteHost ? readRemoteAgentTranscript(remoteHost, agent, sid, cwd) : [];
+      return readLocal();
+    };
 
     if (agent === 'cursor') {
       // Vibe-persisted transcript is authoritative for sessions we drove.
       const own = readCursorTranscript(sessionId);
       if (own.length) return { blocks: own, seq: plan.seq };
-      // No Vibe transcript yet: for an idle local session that was created
-      // outside Vibe, best-effort parse its on-disk store; while running we
-      // rely on the live stream (avoids duplicating in-flight blocks).
-      if (!host && !rt?.running) {
-        const cwd = stored?.cwd ?? rt?.cwd;
-        if (cwd && sid) return { blocks: readCursorStoreTranscript(cwd, sid), seq: plan.seq };
-      }
-      return { blocks: [], seq: plan.seq };
+      // No Vibe transcript yet: best-effort parse the agent's own store
+      // (locally, or over SSH for a remote host).
+      return { blocks: await native(() => (cwd ? readCursorStoreTranscript(cwd, sid) : [])), seq: plan.seq };
     }
 
     if (agent === 'codex') {
-      // Vibe-persisted transcript is authoritative for sessions we drove.
       const own = readCodexTranscript(sessionId);
       if (own.length) return { blocks: own, seq: plan.seq };
-      // No Vibe transcript yet: for an idle local session created outside Vibe,
-      // best-effort parse its on-disk rollout; while running we rely on the live
-      // stream (avoids duplicating in-flight blocks).
-      if (!host && !rt?.running && sid) {
-        return { blocks: readCodexRolloutTranscript(stored?.cwd ?? rt?.cwd ?? '', sid), seq: plan.seq };
-      }
-      return { blocks: [], seq: plan.seq };
+      return { blocks: await native(() => readCodexRolloutTranscript(cwd, sid)), seq: plan.seq };
     }
 
     if (agent === 'kimi') {
       const own = readKimiTranscript(sessionId);
       if (own.length) return { blocks: own, seq: plan.seq };
-      if (!host && !rt?.running && sid) {
-        return { blocks: readKimiWireTranscript(sid), seq: plan.seq };
-      }
-      return { blocks: [], seq: plan.seq };
+      return { blocks: await native(() => readKimiWireTranscript(sid)), seq: plan.seq };
     }
 
     if (agent === 'kiro') {
       const own = readKiroTranscript(sessionId);
       if (own.length) return { blocks: own, seq: plan.seq };
-      if (!host && !rt?.running && sid) {
-        return { blocks: readKiroNativeTranscript(sid), seq: plan.seq };
-      }
-      return { blocks: [], seq: plan.seq };
+      return { blocks: await native(() => readKiroNativeTranscript(sid)), seq: plan.seq };
     }
 
     if (host) {
-      const remoteHost = hostRegistry.get(host);
       const blocks = remoteHost && sid ? await readRemoteTranscript(remoteHost, sid) : [];
       return { blocks, seq: plan.seq };
     }
@@ -675,6 +839,10 @@ export class Hub {
     return this.runtimes.get(sessionId)?.running ?? false;
   }
 
+  hasActiveBackgroundTasks(sessionId: string): boolean {
+    return this.runtimes.get(sessionId)?.hasActiveBackgroundTasks() ?? false;
+  }
+
   /** Broadcast updated session metadata to every connected client. */
   broadcastMeta(sessionId: string): void {
     const stored = sessionStore.get(sessionId);
@@ -682,7 +850,12 @@ export class Hub {
       for (const conn of this.conns) conn.send({ t: 'session_removed', sessionId });
       return;
     }
-    const meta = toMeta(stored, this.isRunning(sessionId));
+    const meta = toMeta(
+      stored,
+      this.isRunning(sessionId),
+      'vibe',
+      this.hasActiveBackgroundTasks(sessionId),
+    );
     for (const conn of this.conns) conn.send({ t: 'session_meta', session: meta });
   }
 

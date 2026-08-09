@@ -1,14 +1,44 @@
 import crypto from 'node:crypto';
-import { DEFAULT_CONTEXT_WINDOW, type LiveEvent, type TokenUsage } from '../../../shared/protocol.js';
+import fs from 'node:fs';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  type BackgroundTask,
+  type BackgroundTaskStatus,
+  type LiveEvent,
+  type TokenUsage,
+} from '../../../shared/protocol.js';
 
 export interface NormalizerCallbacks {
   onEvent: (ev: LiveEvent) => void;
   onClaudeSessionId: (id: string) => void;
+  onTask?: (task: BackgroundTask) => void;
 }
 
 function num(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+function readOutputTail(file: unknown, maxBytes = 16_000): string | undefined {
+  if (typeof file !== 'string' || !file) return undefined;
+  let fd: number | undefined;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size === 0) return undefined;
+    const size = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(size);
+    fd = fs.openSync(file, 'r');
+    fs.readSync(fd, buffer, 0, size, Math.max(0, stat.size - size));
+    return buffer.toString('utf8').trim() || undefined;
+  } catch {
+    // Remote Claude output paths are not readable by the local Vibe server;
+    // their progress/completion summary remains available instead.
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
 }
 
 export function extractUsage(usage: Record<string, unknown> | undefined): TokenUsage | null {
@@ -38,6 +68,7 @@ export class StreamNormalizer {
    *  text and recover a block even if its deltas were dropped on the wire. */
   private readonly streamTextById = new Map<string, string>();
   private readonly assistantOffset = new Map<string, number>();
+  private readonly tasks = new Map<string, BackgroundTask>();
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -62,9 +93,60 @@ export class StreamNormalizer {
       case 'result':
         this.handleResult(message);
         return;
+      case 'system':
+        this.handleSystem(message);
+        return;
       default:
         return;
     }
+  }
+
+  private handleSystem(message: any): void {
+    const subtype = String(message.subtype ?? '');
+    if (!subtype.startsWith('task_')) return;
+    const id = String(message.task_id ?? '');
+    if (!id) return;
+
+    const previous = this.tasks.get(id);
+    const now = Date.now();
+    let status: BackgroundTaskStatus = previous?.status ?? 'running';
+    if (subtype === 'task_started') status = 'running';
+    if (subtype === 'task_notification') status = message.status === 'completed'
+      ? 'completed'
+      : message.status === 'stopped' ? 'stopped' : 'failed';
+    const patchStatus = message.patch?.status;
+    if (typeof patchStatus === 'string') {
+      status = patchStatus === 'killed' ? 'stopped' : patchStatus as BackgroundTaskStatus;
+    }
+
+    const taskType = String(message.task_type ?? previous?.kind ?? '');
+    const kind: BackgroundTask['kind'] = message.subagent_type || /agent|subagent/i.test(taskType)
+      ? 'subagent'
+      : /bash|shell|command/i.test(taskType) ? 'command' : (previous?.kind ?? 'other');
+    const terminal = status === 'completed' || status === 'failed' || status === 'stopped';
+    const summary = typeof message.summary === 'string' ? message.summary.slice(0, 8_000) : undefined;
+    const outputFile = typeof message.output_file === 'string' ? message.output_file : previous?.outputFile;
+    const output = readOutputTail(outputFile) ?? summary ?? previous?.output;
+    const error = typeof message.patch?.error === 'string' ? message.patch.error.slice(0, 8_000) : undefined;
+    const task: BackgroundTask = {
+      id,
+      agent: 'claude',
+      kind,
+      status,
+      description: String(message.description ?? message.patch?.description ?? previous?.description ?? `Task ${id}`),
+      startedAt: previous?.startedAt ?? now,
+      updatedAt: now,
+      endedAt: terminal ? Number(message.patch?.end_time) || now : previous?.endedAt,
+      detail: typeof message.prompt === 'string' ? message.prompt : previous?.detail,
+      activity: typeof message.last_tool_name === 'string' ? message.last_tool_name : previous?.activity,
+      summary: summary ?? previous?.summary,
+      output,
+      outputFile,
+      canStop: !terminal,
+      error: error ?? previous?.error,
+    };
+    this.tasks.set(id, task);
+    this.cb.onTask?.(task);
   }
 
   private handleStreamEvent(event: any): void {

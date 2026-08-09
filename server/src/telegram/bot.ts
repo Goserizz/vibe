@@ -7,7 +7,7 @@ import { awaitFullSessionList, prefetchSessionList } from '../sessions/list.js';
 import { getRecentProjects } from '../projects.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { hub } from '../ws/hub.js';
-import { getRemoteSessionInfo } from '../remote/discovery.js';
+import { resolveRemoteSession } from '../remote/discovery.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import type { AgentKind, EffortLevel, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
 import { telegramState } from './state.js';
@@ -91,15 +91,16 @@ async function ensureRemoteCached(sessionId: string): Promise<void> {
   if (!host || sessionStore.get(sessionId)) return;
   const remoteHost = hostRegistry.get(host);
   if (!remoteHost) return;
-  const info = await getRemoteSessionInfo(remoteHost, claudeSessionId);
-  if (info) {
+  const hit = await resolveRemoteSession(remoteHost, claudeSessionId);
+  if (hit) {
     hub.cacheRemoteSession(sessionId, {
       host: remoteHost.name,
       sshTarget: remoteHost.ssh,
-      cwd: info.cwd,
-      model: info.model,
-      title: info.title,
-      proxy: proxyForAgent(remoteHost, 'claude'),
+      cwd: hit.session.cwd,
+      model: hit.session.model,
+      title: hit.session.title,
+      agent: hit.agent,
+      proxy: proxyForAgent(remoteHost, hit.agent),
     });
   }
 }
@@ -153,7 +154,7 @@ async function getActiveMeta(chatId: number): Promise<SessionMeta | undefined> {
   const id = telegramState.get(chatId).sessionId;
   if (!id) return undefined;
   const stored = sessionStore.get(id);
-  if (stored) return toMeta(stored, hub.isRunning(id));
+  if (stored) return toMeta(stored, hub.isRunning(id), 'vibe', hub.hasActiveBackgroundTasks(id));
   const sessions = listCache.get(chatId) ?? (await awaitFullSessionList());
   listCache.set(chatId, sessions);
   return sessions.find((s) => s.id === id);
@@ -229,6 +230,72 @@ export function startTelegramBot(): { stop: () => Promise<void> } | null {
       return;
     }
     await replyHtml(ctx, formatSessionCard(meta));
+  });
+
+  bot.command('tasks', async (ctx) => {
+    const sessionId = telegramState.get(ctx.chat!.id).sessionId;
+    if (!sessionId) {
+      await replyPlain(ctx, 'No active session. /sessions to pick one, or /new to create.');
+      return;
+    }
+    const tasks = hub.tasks(sessionId);
+    if (!tasks.length) {
+      await replyPlain(ctx, 'No background tasks in the active session.');
+      return;
+    }
+    const lines = tasks.map((task) => {
+      const icon = task.status === 'running' || task.status === 'pending' ? '⏳'
+        : task.status === 'completed' ? '✅' : task.status === 'failed' ? '❌' : '⏹';
+      return `${icon} <code>${escHtml(task.id)}</code> · ${escHtml(task.status)}\n${escHtml(clip(task.description, 240))}`;
+    });
+    await replyHtml(ctx, clip(`Background tasks\n\n${lines.join('\n\n')}\n\n/task &lt;id&gt; for details and output.\n/taskstop &lt;id&gt; to stop a running task.`));
+  });
+
+  bot.command('task', async (ctx) => {
+    const sessionId = telegramState.get(ctx.chat!.id).sessionId;
+    const taskId = ((ctx.match as string | undefined) ?? '').trim();
+    if (!sessionId || !taskId) {
+      await replyHtml(ctx, 'Usage: /task &lt;task-id&gt; — see /tasks');
+      return;
+    }
+    const task = hub.tasks(sessionId).find((entry) => entry.id === taskId);
+    if (!task) {
+      await replyPlain(ctx, `Task ${taskId} was not found in the active session.`);
+      return;
+    }
+
+    const lines = [
+      `<b>${escHtml(task.description || task.id)}</b>`,
+      `<code>${escHtml(task.id)}</code>`,
+      `${escHtml(task.agent)} · ${escHtml(task.kind)} · ${escHtml(task.status)}`,
+      `started: ${escHtml(new Date(task.startedAt).toISOString())}`,
+      `updated: ${escHtml(new Date(task.updatedAt).toISOString())}`,
+    ];
+    if (task.endedAt) lines.push(`ended: ${escHtml(new Date(task.endedAt).toISOString())}`);
+    if (task.processId) lines.push(`process: <code>${escHtml(task.processId)}</code>`);
+    if (task.exitCode != null) lines.push(`exit code: <code>${task.exitCode}</code>`);
+    if (task.activity) lines.push(`activity: ${escHtml(task.activity)}`);
+    if (task.cwd) lines.push(`cwd: <code>${escHtml(clip(task.cwd, 1_000))}</code>`);
+    if (task.command) lines.push(`\n<b>Command</b>\n<pre>${escHtml(clip(task.command, 4_000))}</pre>`);
+    if (task.detail && task.detail !== task.command) lines.push(`\n<b>Instructions</b>\n${escHtml(clip(task.detail, 4_000))}`);
+    if (task.summary && task.summary !== task.output) lines.push(`\n<b>Summary</b>\n${escHtml(clip(task.summary, 4_000))}`);
+    if (task.error) lines.push(`\n<b>Error</b>\n<pre>${escHtml(clip(task.error, 4_000))}</pre>`);
+    lines.push(task.output
+      ? `\n<b>Captured output</b>\n<pre>${escHtml(clip(task.output, 16_000))}</pre>`
+      : '\n<b>Captured output</b>\nNo output captured yet.');
+    if (task.outputFile) lines.push(`source: <code>${escHtml(clip(task.outputFile, 1_000))}</code>`);
+    await replyHtml(ctx, lines.join('\n'));
+  });
+
+  bot.command('taskstop', async (ctx) => {
+    const sessionId = telegramState.get(ctx.chat!.id).sessionId;
+    const taskId = ((ctx.match as string | undefined) ?? '').trim();
+    if (!sessionId || !taskId) {
+      await replyHtml(ctx, 'Usage: /taskstop &lt;task-id&gt; — see /tasks');
+      return;
+    }
+    const stopped = await hub.stopTaskForSession(sessionId, taskId);
+    await replyPlain(ctx, stopped ? `Stop requested for ${taskId}.` : 'That task is not running or cannot be stopped individually.');
   });
 
   bot.command('use', async (ctx) => {
@@ -561,6 +628,9 @@ export function startTelegramBot(): { stop: () => Promise<void> } | null {
     { command: 'use', description: 'Switch session: /use <n|id>' },
     { command: 'new', description: 'New session (machine, agent, model, …)' },
     { command: 'status', description: 'Show active session' },
+    { command: 'tasks', description: 'List background tasks' },
+    { command: 'task', description: 'Show task details: /task <id>' },
+    { command: 'taskstop', description: 'Stop one task: /taskstop <id>' },
     { command: 'abort', description: 'Stop the current turn' },
     { command: 'stop', description: 'Stop the current turn' },
     { command: 'model', description: 'Set model: /model <name>' },

@@ -43,7 +43,7 @@
 Vibe 在你的机器上运行一个小型服务器,连接 Claude Code、Codex、Cursor 或 Kimi Code,
 把各 agent 的输出归一化为同一套结构化对话,再通过单条 WebSocket 推送给 React Web 客户端。
 Claude 使用官方 [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
-其余 agent 使用各自的 headless CLI。
+Codex 使用长驻 App Server,Cursor、Kimi 与 Kiro 使用各自的结构化 CLI / ACP 通道。
 
 它专为解决远程 coding-agent UI 的两个卡顿痛点而生:
 
@@ -58,14 +58,19 @@ Claude 使用官方 [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/pac
 
 - 💬 **结构化对话循环** —— 流式的助手文本、思考、工具调用与结果
 - 🧰 **工具可视化** —— Bash/Read/Edit/Grep/… 以紧凑卡片呈现,带状态与输出
+- ⏳ **后台任务管理** —— Claude task、Kimi 后台工具与 Codex 后台终端统一显示实时状态;
+  可展开查看命令/指令、进程信息与捕获的输出,agent 提供单任务控制时可直接停止,任务结束后会自动
+  唤醒 agent 生成后续回复;前台回复结束后可继续发送消息,无需等待后台任务完成;停止当前回复不会
+  停止后台任务,也不会丢失其完成通知
 - 🤖 **多 Agent** —— 每个会话可选择 Claude、Codex、Cursor、Kimi 或 Kiro
 - 🔐 **权限控制** —— Claude 支持内联允许 / 始终允许 / 拒绝;Kimi 会从当前主机自动发现模型及
   Default / Plan / Auto / YOLO 模式,并通过 ACP 处理授权;Kiro 通过 ACP 支持 Ask / Plan / Auto-edit / Bypass
 - 🗂 **会话管理** —— 在任意目录创建、恢复、重命名、删除;可读取各 agent 的本地历史
 - 🖥️ **自动接管你的 CLI 会话** —— 终端中由 `claude`、`codex`、`cursor-agent`、`kimi` 或 `kiro-cli` 创建的对话可自动出现;
   打开即可阅读完整历史并继续对话,并沿用该会话当时使用的模型
-- 🌐 **通过 SSH 管理远程主机** —— 添加可通过 SSH 访问的机器,它们的 Claude Code 项目会出现在
-  同一侧栏(各自标注主机名);像本地会话一样打开和继续(全部在该机器上通过 SSH 运行)
+- 🌐 **通过 SSH 管理远程主机** —— 添加可通过 SSH 访问的机器,它们上面由 Claude、Codex、Cursor、
+  Kimi、Kiro 各自 CLI 创建的会话都会出现在同一侧栏(各自标注主机名与 agent);像本地会话一样
+  打开和继续(全部在该机器上通过 SSH 运行)
 - 💻 **内置终端** —— 一键在会话所在主机上打开真实的交互式 shell(本地登录 shell,或 `ssh`
   进入远端),工作目录即会话目录,位于可调宽度的侧栏面板中
 - 🎛 **按会话切换模型、推理强度(effort)与权限模式**,直接在顶栏操作
@@ -179,7 +184,13 @@ npm run serve
 ## 远程主机(SSH)
 
 在侧栏打开 **Hosts**,用 `~/.ssh/config` 别名或 `user@host` 添加一台机器。Vibe 可通过 SSH
-在该机器上运行 Claude、Codex、Cursor 或 Kimi;已有远程 Claude 会话仍会自动列在侧栏。
+在该机器上运行 Claude、Codex、Cursor、Kimi 或 Kiro;你直接在该主机的 CLI 里创建的会话也会自动
+出现在侧栏(标注主机名与所属 agent)。
+
+远程发现会通过 SSH 读取各 agent 的原生存储:`~/.claude/projects`(Claude)、`~/.codex/sessions`
+(Codex)、`$KIMI_CODE_HOME` 下的会话索引(Kimi)、`~/.kiro/sessions/cli`(Kiro)与
+`~/.cursor/chats`(Cursor)。有两点与本地行为一致:Cursor 只记录工作目录的哈希,因此只有 Vibe
+能推断出目录的会话才可恢复;渲染远端 Cursor 自身的历史还需要该主机上有 `sqlite3`。
 
 要求:
 

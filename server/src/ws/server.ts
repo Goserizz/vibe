@@ -5,6 +5,7 @@ import { log } from '../log.js';
 import { config } from '../config.js';
 import { tokenMatches } from '../auth.js';
 import { WsConn, hub } from './hub.js';
+import { vibotHub } from '../vibot/hub.js';
 import { spawnTerminal } from '../terminal/pty.js';
 import { PROTOCOL_VERSION } from '../../../shared/protocol.js';
 
@@ -21,7 +22,12 @@ const clientMessageSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('unsubscribe'), sessionId: z.string() }),
   z.object({ t: z.literal('send'), sessionId: z.string(), clientMsgId: z.string(), text: z.string() }),
   z.object({ t: z.literal('abort'), sessionId: z.string() }),
+  z.object({ t: z.literal('task_stop'), sessionId: z.string(), taskId: z.string() }),
   z.object({ t: z.literal('permission'), sessionId: z.string(), requestId: z.string(), decision: decisionSchema }),
+  z.object({ t: z.literal('vibot_subscribe'), convId: z.string(), lastSeq: z.number() }),
+  z.object({ t: z.literal('vibot_unsubscribe'), convId: z.string() }),
+  z.object({ t: z.literal('vibot_send'), convId: z.string(), clientMsgId: z.string(), text: z.string() }),
+  z.object({ t: z.literal('vibot_abort'), convId: z.string() }),
   z.object({ t: z.literal('ping') }),
 ]);
 
@@ -52,6 +58,7 @@ export function attachWsServer(server: Server): void {
   wss.on('connection', (ws) => {
     const conn = new WsConn(ws);
     hub.addConn(conn);
+    vibotHub.addConn(conn);
     conn.send({ t: 'hello', protocolVersion: PROTOCOL_VERSION, serverVersion: config.serverVersion });
 
     (ws as WsWithLiveness).isAlive = true;
@@ -85,8 +92,23 @@ export function attachWsServer(server: Server): void {
         case 'abort':
           hub.abort(msg.sessionId);
           break;
+        case 'task_stop':
+          hub.stopTask(conn, msg.sessionId, msg.taskId);
+          break;
         case 'permission':
           hub.resolvePermission(msg.sessionId, msg.requestId, msg.decision);
+          break;
+        case 'vibot_subscribe':
+          vibotHub.subscribe(conn, msg.convId, msg.lastSeq);
+          break;
+        case 'vibot_unsubscribe':
+          vibotHub.unsubscribe(conn, msg.convId);
+          break;
+        case 'vibot_send':
+          vibotHub.send(conn, msg.convId, msg.clientMsgId, msg.text);
+          break;
+        case 'vibot_abort':
+          vibotHub.abort(msg.convId);
           break;
         case 'ping':
           conn.send({ t: 'pong' });
@@ -94,8 +116,14 @@ export function attachWsServer(server: Server): void {
       }
     });
 
-    ws.on('close', () => hub.removeConn(conn));
-    ws.on('error', () => hub.removeConn(conn));
+    ws.on('close', () => {
+      hub.removeConn(conn);
+      vibotHub.removeConn(conn);
+    });
+    ws.on('error', () => {
+      hub.removeConn(conn);
+      vibotHub.removeConn(conn);
+    });
   });
 
   // Detect and reap dead connections so the server doesn't leak sockets and

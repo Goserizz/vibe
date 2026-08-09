@@ -133,14 +133,18 @@ function itemsToBlocks(lines: string[]): ChatBlock[] {
   return blocks;
 }
 
+/** Map rollout JSONL text into renderable blocks (tool outputs matched). */
+export function codexRolloutBlocks(raw: string): ChatBlock[] {
+  return itemsToBlocks(raw.split('\n'));
+}
+
 /** Best-effort read of an external Codex session by id (cwd unused; kept for
  *  signature parity with the cursor reader). */
 export function readCodexRolloutTranscript(_cwd: string, sessionId: string): ChatBlock[] {
   const file = findRollout(sessionId);
   if (!file) return [];
   try {
-    const raw = fs.readFileSync(file, 'utf8');
-    return itemsToBlocks(raw.split('\n'));
+    return codexRolloutBlocks(fs.readFileSync(file, 'utf8'));
   } catch (err) {
     log.debug('codex rollout transcript failed', err);
     return [];

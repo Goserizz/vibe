@@ -101,7 +101,9 @@ function ThinkingView({ block }: { block: ThinkingBlock }) {
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-slate-500 transition hover:text-slate-300"
       >
         <Brain className={cn('h-3.5 w-3.5', block.streaming && 'animate-pulse-dot text-accent')} />
-        <span>{block.streaming ? 'Thinking…' : 'Thought process'}</span>
+        <span className={cn(block.streaming && 'thinking-shimmer')}>
+          {block.streaming ? 'Thinking…' : 'Thought process'}
+        </span>
         <ChevronRight className={cn('ml-auto h-3.5 w-3.5 transition-transform', open && 'rotate-90')} />
       </button>
       {open && (
@@ -138,20 +140,21 @@ type ToolKind =
   | 'image' | 'mode' | 'mcp' | 'other';
 
 const TOOL_KIND_ALIASES: Record<string, ToolKind> = {
-  read: 'read', readfile: 'read',
+  read: 'read', readfile: 'read', fsread: 'read',
   edit: 'edit', editfile: 'edit', multiedit: 'edit', strreplace: 'edit',
   editnotebook: 'edit', notebookedit: 'edit',
-  write: 'write', writefile: 'write', createfile: 'write',
+  write: 'write', writefile: 'write', createfile: 'write', fswrite: 'write',
   delete: 'delete', deletefile: 'delete', removefile: 'delete',
   move: 'move', movefile: 'move', rename: 'move', renamefile: 'move',
   bash: 'bash', shell: 'bash', runterminalcommand: 'bash', terminal: 'bash', runcommand: 'bash', execute: 'bash',
+  executebash: 'bash',
   awaitshell: 'await', await: 'await',
   glob: 'glob', listdir: 'glob', listdirectory: 'glob', ls: 'glob', findfiles: 'glob',
   grep: 'grep', searchfiles: 'grep', ripgrep: 'grep',
   semsearch: 'search', codebasesearch: 'search', semanticsearch: 'search', directorysearch: 'search',
   webfetch: 'webfetch', fetch: 'webfetch', fetchweb: 'webfetch',
   websearch: 'websearch', searchweb: 'websearch',
-  todowrite: 'todo', todo: 'todo', updatetodo: 'todo',
+  todowrite: 'todo', todo: 'todo', updatetodo: 'todo', todolist: 'todo', tasklist: 'todo',
   task: 'task', subagent: 'task',
   exitplanmode: 'plan',
   readlints: 'lints', getdiagnostics: 'lints', diagnostics: 'lints',
@@ -251,8 +254,17 @@ export function toolMeta(name: string, input: unknown): ToolMeta {
       return { icon: Globe, label: 'Fetch', detail: firstOf(i, ['url', 'uri']) };
     case 'websearch':
       return { icon: Globe, label: 'Search', detail: firstOf(i, ['query', 'search_term', 'searchTerm']) };
-    case 'todo':
-      return { icon: ListTodo, label: 'Update todos', detail: Array.isArray(i.todos) ? `${i.todos.length} items` : undefined };
+    case 'todo': {
+      // Claude sends a full snapshot (`todos`); Kiro sends a command plus the
+      // affected tasks (`create` / `add` / `complete` / `remove`).
+      const items = Array.isArray(i.todos) ? i.todos : Array.isArray(i.tasks) ? i.tasks : Array.isArray(i.new_tasks) ? i.new_tasks : null;
+      if (items) return { icon: ListTodo, label: 'Update todos', detail: `${items.length} items` };
+      const done = Array.isArray(i.completed_task_ids) ? i.completed_task_ids.map(String) : [];
+      if (done.length) return { icon: ListTodo, label: 'Update todos', detail: `completed #${done.join(', #')}` };
+      const removed = Array.isArray(i.remove_task_ids) ? i.remove_task_ids.length : 0;
+      if (removed) return { icon: ListTodo, label: 'Update todos', detail: `removed ${removed}` };
+      return { icon: ListTodo, label: 'Update todos', detail: firstOf(i, ['command']) };
+    }
     case 'plan':
       return { icon: ClipboardList, label: 'Plan', detail: Array.isArray(i.allowedPrompts) && i.allowedPrompts.length ? `${i.allowedPrompts.length} permissions` : undefined };
     case 'task': {

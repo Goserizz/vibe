@@ -55,17 +55,8 @@ function resultText(result: any): { text: string; isError: boolean } {
   try { return { text: JSON.stringify(value, null, 2), isError }; } catch { return { text: String(value), isError }; }
 }
 
-/** Best-effort rendering of a native Kimi Code wire log. */
-export function readKimiWireTranscript(sessionId: string): ChatBlock[] {
-  const dir = findKimiSessionDir(sessionId);
-  if (!dir) return [];
-  let raw = '';
-  try {
-    raw = fs.readFileSync(path.join(dir, 'agents', 'main', 'wire.jsonl'), 'utf8');
-  } catch {
-    return [];
-  }
-
+/** Best-effort rendering of a native Kimi Code wire log's content. */
+export function kimiWireBlocks(raw: string): ChatBlock[] {
   const blocks: ChatBlock[] = [];
   const tools = new Map<string, ToolBlock>();
   let lineNo = 0;
@@ -118,4 +109,15 @@ export function readKimiWireTranscript(sessionId: string): ChatBlock[] {
     }
   }
   return blocks;
+}
+
+/** Read a local native Kimi Code session's wire log (via the session index). */
+export function readKimiWireTranscript(sessionId: string): ChatBlock[] {
+  const dir = findKimiSessionDir(sessionId);
+  if (!dir) return [];
+  try {
+    return kimiWireBlocks(fs.readFileSync(path.join(dir, 'agents', 'main', 'wire.jsonl'), 'utf8'));
+  } catch {
+    return [];
+  }
 }

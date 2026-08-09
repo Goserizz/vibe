@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { StreamNormalizer } from './normalize.js';
@@ -103,6 +103,41 @@ function withRemoteDetail(message: string, errLog?: string): string {
   }
 }
 
+/** A one-producer async input stream. Keeping it open after the first prompt is
+ *  what lets Claude's SDK deliver task notifications and automatically run the
+ *  completion turn; string prompt mode closes stdin as soon as the first turn
+ *  finishes and cannot service `stopTask` control requests. */
+class InputQueue<T> implements AsyncIterable<T> {
+  private values: T[] = [];
+  private waiters: Array<(result: IteratorResult<T>) => void> = [];
+  private closed = false;
+
+  push(value: T): boolean {
+    if (this.closed) return false;
+    const waiter = this.waiters.shift();
+    if (waiter) waiter({ value, done: false });
+    else this.values.push(value);
+    return true;
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as T, done: true });
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: () => {
+        const value = this.values.shift();
+        if (value !== undefined) return Promise.resolve({ value, done: false });
+        if (this.closed) return Promise.resolve({ value: undefined as T, done: true });
+        return new Promise((resolve) => this.waiters.push(resolve));
+      },
+    };
+  }
+}
+
 /**
  * Drive one Claude turn on the local machine through the Agent SDK, normalizing
  * its stream into `LiveEvent`s and gating tool use through interactive prompts.
@@ -197,14 +232,40 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
     return { behavior: 'deny', message: 'Denied by user' };
   };
 
-  let queryInstance: AsyncGenerator<any> & { interrupt?: () => Promise<void> };
+  let queryInstance: Query | undefined;
+  let interruptInFlight = false;
+  const input = new InputQueue<SDKUserMessage>();
+  const activeTasks = new Set<string>();
+  input.push({
+    type: 'user',
+    message: { role: 'user', content: opts.prompt },
+    parent_tool_use_id: null,
+  });
 
   const done = (async () => {
     const normalizer = new StreamNormalizer(cb);
     try {
-      queryInstance = query({ prompt: opts.prompt, options: sdkOptions as any }) as any;
+      queryInstance = query({ prompt: input, options: sdkOptions as any });
       for await (const message of queryInstance) {
+        // Background task completion can start a native follow-up turn without
+        // a new Vibe user message. Mark the foreground busy when output begins;
+        // the result event below releases the composer again.
+        if (message.type === 'assistant' || message.type === 'stream_event') cb.onTurnState?.(true);
         normalizer.push(message);
+        if (message.type === 'system' && message.subtype === 'task_started') activeTasks.add(message.task_id);
+        if (message.type === 'system' && message.subtype === 'task_updated') {
+          const status = message.patch.status;
+          if (status === 'completed' || status === 'failed' || status === 'killed') activeTasks.delete(message.task_id);
+          else if (status === 'pending' || status === 'running' || status === 'paused') activeTasks.add(message.task_id);
+        }
+        if (message.type === 'system' && message.subtype === 'task_notification') activeTasks.delete(message.task_id);
+        // Each assistant turn ends in a result. Close only when that result sees
+        // no live task; if tasks remain, Claude stays connected and their native
+        // completion notification steers the next response automatically.
+        if (message.type === 'result') {
+          cb.onTurnState?.(false);
+          if (activeTasks.size === 0) input.close();
+        }
       }
     } catch (err) {
       if (abortController.signal.aborted) {
@@ -223,8 +284,23 @@ export function startRun(opts: RunOptions, cb: RunCallbacks): RunHandle {
 
   return {
     abort: () => {
-      abortController.abort();
-      void queryInstance?.interrupt?.().catch(() => {});
+      // Stop only the foreground reply. Keeping both the streaming input and
+      // Query alive is what lets native background tasks continue and deliver
+      // their task_notification / follow-up turn later.
+      if (!queryInstance || interruptInFlight) return;
+      interruptInFlight = true;
+      void queryInstance.interrupt()
+        .catch((error) => log.warn('claude reply interrupt failed', error))
+        .finally(() => { interruptInFlight = false; });
+    },
+    sendMessage: (text: string) => input.push({
+      type: 'user',
+      message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+    }),
+    stopTask: async (taskId: string) => {
+      if (!queryInstance) throw new Error('Claude query is not ready');
+      await queryInstance.stopTask(taskId);
     },
     done,
   };

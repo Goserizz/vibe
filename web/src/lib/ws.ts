@@ -5,6 +5,10 @@ export type ConnStatus = 'connecting' | 'open' | 'closed';
 interface SocketHandlers {
   onBatch: (events: ServerEvent[]) => void;
   onStatus: (status: ConnStatus, opts: { reconnected: boolean }) => void;
+  /** Optional second dispatch path for Vibot events (t starts with "vibot_").
+   *  Keeping them in a separate stream is what lets the Vibot interface stay a
+   *  fully separate store from the coding sessions, over one socket. */
+  onVibotBatch?: (events: ServerEvent[]) => void;
 }
 
 const MIN_BACKOFF = 300;
@@ -107,9 +111,19 @@ export class VibeSocket {
     this.rafId = 0;
     this.flushTimer = null;
     if (this.inbox.length === 0) return;
-    const batch = this.inbox;
+    const all = this.inbox;
     this.inbox = [];
-    this.handlers.onBatch(batch);
+    if (!this.handlers.onVibotBatch) {
+      this.handlers.onBatch(all);
+      return;
+    }
+    // Split coding vs Vibot frames into two disjoint batches so each store
+    // reduces only its own events.
+    const coding: ServerEvent[] = [];
+    const vibot: ServerEvent[] = [];
+    for (const m of all) (m.t.startsWith('vibot_') ? vibot : coding).push(m);
+    if (coding.length) this.handlers.onBatch(coding);
+    if (vibot.length) this.handlers.onVibotBatch!(vibot);
   }
 
   private startPing(): void {

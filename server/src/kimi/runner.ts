@@ -154,6 +154,7 @@ export function startKimiRun(opts: KimiRunOptions, cb: RunCallbacks): RunHandle 
   let child: ChildProcess | undefined;
   let acpClient: KimiAcpClient | undefined;
   let aborted = false;
+  let usingFallback = false;
   let producedAny = false;
   let resume = opts.resume;
   const wrappedCb: RunCallbacks = {
@@ -183,7 +184,9 @@ export function startKimiRun(opts: KimiRunOptions, cb: RunCallbacks): RunHandle 
       // A pre-ACP Kimi can still run the one supported UI mode (prompt Auto).
       if (outcome.error && opts.permissionMode === 'default' && acpUnavailable(outcome.error)) {
         log.debug('kimi acp unavailable; falling back to prompt mode');
+        usingFallback = true;
         outcome = await runOnce({ ...opts, resume }, normalizer, (next) => (child = next));
+        usingFallback = false;
       }
       if (aborted) {
         log.debug('kimi run aborted');
@@ -211,10 +214,20 @@ export function startKimiRun(opts: KimiRunOptions, cb: RunCallbacks): RunHandle 
 
   return {
     abort: () => {
-      aborted = true;
-      abortController.abort();
+      if (usingFallback) {
+        // Legacy prompt mode is one process per reply and has no persistent task
+        // transport, so terminating that process is its only interrupt primitive.
+        aborted = true;
+        abortController.abort();
+        child?.kill('SIGTERM');
+        return;
+      }
       acpClient?.abort();
-      child?.kill('SIGTERM');
+    },
+    sendMessage: (text: string) => acpClient?.sendMessage(text) ?? false,
+    stopTask: async (taskId: string) => {
+      if (!acpClient) throw new Error('Kimi task control is unavailable');
+      await acpClient.stopTask(taskId);
     },
     done,
   };

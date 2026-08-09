@@ -40,37 +40,54 @@ function hashToCwd(): Map<string, string> {
   return m;
 }
 
-/** Read one chat's metadata from its meta.json (+ filesystem times). */
-function readChatMeta(hashDir: string, chatId: string, cwd: string): DiscoveredSession | null {
+/**
+ * Interpret a chat's `meta.json` content. Pure, so local discovery and remote
+ * (SSH) discovery agree on titles, times and which chats are worth showing.
+ */
+export function parseCursorChatMeta(
+  rawMeta: string,
+  chatId: string,
+  cwd: string,
+  mtime: number,
+): DiscoveredSession | null {
   if (!isClaudeSessionId(chatId)) return null;
-  const chatDir = path.join(hashDir, chatId);
   let meta: any;
   try {
-    meta = JSON.parse(fs.readFileSync(path.join(chatDir, 'meta.json'), 'utf8'));
+    meta = JSON.parse(rawMeta);
   } catch {
     return null;
   }
   // Skip chats that never held a conversation.
   if (meta.hasConversation === false) return null;
-
-  let mtime = Date.now();
-  try {
-    mtime = fs.statSync(path.join(chatDir, 'store.db')).mtimeMs || mtime;
-  } catch {
-    /* no store yet */
-  }
-  const createdAt = Number(meta.createdAtMs) || mtime;
-  const updatedAt = Number(meta.updatedAtMs) || mtime;
-  const title = typeof meta.title === 'string' && meta.title.trim() ? meta.title.trim() : 'Cursor session';
+  const stamp = mtime || Date.now();
   return {
     claudeSessionId: chatId,
     cwd,
-    title,
+    title: typeof meta.title === 'string' && meta.title.trim() ? meta.title.trim() : 'Cursor session',
     model: config.defaultCursorModel,
-    createdAt,
-    updatedAt,
+    createdAt: Number(meta.createdAtMs) || stamp,
+    updatedAt: Number(meta.updatedAtMs) || stamp,
     messageCount: Number(meta.messageCount) || 0,
   };
+}
+
+/** Read one chat's metadata from its meta.json (+ filesystem times). */
+function readChatMeta(hashDir: string, chatId: string, cwd: string): DiscoveredSession | null {
+  if (!isClaudeSessionId(chatId)) return null;
+  const chatDir = path.join(hashDir, chatId);
+  let rawMeta: string;
+  try {
+    rawMeta = fs.readFileSync(path.join(chatDir, 'meta.json'), 'utf8');
+  } catch {
+    return null;
+  }
+  let mtime = 0;
+  try {
+    mtime = fs.statSync(path.join(chatDir, 'store.db')).mtimeMs || 0;
+  } catch {
+    /* no store yet */
+  }
+  return parseCursorChatMeta(rawMeta, chatId, cwd, mtime);
 }
 
 /** Discover local Cursor CLI chats whose cwd we can recover (most-recent first). */

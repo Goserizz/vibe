@@ -69,6 +69,9 @@ export const HELP_TEXT = `Vibe Telegram bot — drive your coding agents from ch
 <b>Chat</b>
 Just send a message to talk in the active session (streams live).
 While generating: send /abort (/stop) or type Stop / 停止 / 中断 to interrupt.
+/tasks — list native background tasks
+/task &lt;id&gt; — show task details and captured output
+/taskstop &lt;id&gt; — stop one background task
 
 <b>Settings</b>
 /model &lt;name&gt; — set model

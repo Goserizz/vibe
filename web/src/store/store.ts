@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type {
   AgentKind,
+  BackgroundTask,
   EffortLevel,
   McpConfigSnapshot,
   McpServerDef,
@@ -16,6 +17,8 @@ import type {
   SkillDetail,
   SkillEntry,
   SkillScope,
+  ConfigFileDetail,
+  ConfigFileEntry,
   TokenUsage,
 } from '@shared/protocol';
 import { compareSessions } from '@shared/protocol';
@@ -23,6 +26,7 @@ import { api, ApiError, setApiToken } from '../lib/api';
 import type { ModelOption, PermissionOption } from '../lib/format';
 import { VibeSocket, type ConnStatus } from '../lib/ws';
 import { clearToken } from '../lib/token';
+import { resolveFilePath } from '../lib/paths';
 import { loadNotifySound, playNotifySound, saveNotifySound, type NotifySoundId } from '../lib/notifySound';
 import {
   applyAccent,
@@ -31,8 +35,13 @@ import {
   type AccentPreference,
 } from '../lib/systemAccent';
 import { emptyView, reduceView, viewFromBlocks, type SessionView } from './blocks';
+import { useVibotStore, vibotHandleBatch } from './vibot';
 
 let socket: VibeSocket | null = null;
+/** The single VibeSocket, owned here, is shared by the separate Vibot store. */
+export function getSocket(): VibeSocket | null {
+  return socket;
+}
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 
 // Debounced full-text search: a timer per keystroke + a monotonic id so stale
@@ -96,11 +105,20 @@ interface StoreState {
   skillsAgent: AgentKind | null;
   /** Host name whose skills are in `skills` (null = this machine). */
   skillsHost: string | null;
+  /** Agent config files for the currently-selected agent + host. Loaded lazily
+   *  when the Agent config files panel is opened. */
+  agentConfigFiles: ConfigFileEntry[];
+  /** Agent whose config files are in `agentConfigFiles`. */
+  agentConfigAgent: AgentKind | null;
+  /** Host name whose config files are in `agentConfigFiles` (null = this machine). */
+  agentConfigHost: string | null;
   localName: string;
   activeId: string | null;
   views: Record<string, SessionView>;
   usage: Record<string, TokenUsage | undefined>;
   pending: Record<string, PermissionRequest[]>;
+  /** Native background tasks keyed by session. */
+  tasks: Record<string, BackgroundTask[]>;
   /** Sessions whose last turn finished while they weren't the active one — i.e.
    *  "has a reply you haven't seen yet". Cleared by opening the session. Lives
    *  only in memory: it tracks live running→idle transitions, not history. */
@@ -110,6 +128,14 @@ interface StoreState {
   // session never affects another.
   rightTabs: Record<string, 'terminal' | 'files' | null>;
   toast: string | null;
+  /** File-path preview opened from a clickable path in a reply. The path is
+   *  already resolved against the active session's cwd; `host` is set only for
+   *  remote sessions. */
+  filePreview: { path: string; host?: string } | null;
+  /** Open a path found in a reply (raw, as written) in the preview modal,
+   *  resolving it against the active session's cwd/host. */
+  openPathPreview: (rawPath: string) => void;
+  closeFilePreview: () => void;
 
   searchQuery: string;
   searchResults: SearchResult[];
@@ -153,6 +179,12 @@ interface StoreState {
   saveSkillMulti: (input: { agents: AgentKind[]; name: string; description: string; whenToUse?: string; body: string; host?: string }) => Promise<boolean>;
   /** Delete a personal skill. */
   deleteSkillAction: (agent: AgentKind, host: string | undefined, name: string) => Promise<void>;
+  /** Reload config files for an agent + host (undefined host = this machine). */
+  loadAgentConfig: (agent: AgentKind, host?: string) => Promise<void>;
+  /** Read one config file's raw content. */
+  readAgentConfigDetail: (args: { agent: AgentKind; host?: string; id: string }) => Promise<ConfigFileDetail | null>;
+  /** Create or overwrite a config file. Returns the updated detail, or null on failure. */
+  saveAgentConfigFile: (args: { agent: AgentKind; host?: string; id: string; content: string }) => Promise<ConfigFileDetail | null>;
   openSession: (id: string) => Promise<void>;
   createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<boolean>;
   renameSession: (id: string, title: string) => Promise<void>;
@@ -160,6 +192,7 @@ interface StoreState {
   togglePin: (id: string) => Promise<void>;
   sendMessage: (text: string) => void;
   abort: () => void;
+  stopTask: (taskId: string) => void;
   respondPermission: (requestId: string, decision: PermissionDecision) => void;
   setToast: (msg: string | null) => void;
   setRightTab: (id: string, tab: 'terminal' | 'files' | null) => void;
@@ -180,7 +213,11 @@ export const useStore = create<StoreState>((set, get) => {
     if (status === 'open') {
       const { activeId } = get();
       if (activeId) resubscribe(activeId);
-      if (opts.reconnected) void get().refreshSessions();
+      if (opts.reconnected) {
+        void get().refreshSessions();
+        // The Vibot interface shares this socket; let it resubscribe too.
+        void useVibotStore.getState().onReconnect();
+      }
     }
   }
 
@@ -190,10 +227,15 @@ export const useStore = create<StoreState>((set, get) => {
     const eventsBySession = new Map<string, { seq: number; ev: import('@shared/protocol').LiveEvent }[]>();
     const usagePatch: Record<string, TokenUsage> = {};
     const pendingPatch: Record<string, PermissionRequest[]> = {};
+    const taskPatch: Record<string, BackgroundTask[]> = {};
     let sessions = state.sessions;
     let sessionsDirty = false;
     const resetIds: string[] = [];
     const setRunning: Record<string, boolean> = {};
+    // Track transitions inside this animation-frame batch too. A short native
+    // background wake can start and finish between two wire polls, so its
+    // run_state true/false frames may arrive together.
+    const liveRunning = new Map<string, boolean>();
     let playDoneSound = false;
     const finishedUnreadIds: string[] = [];
 
@@ -210,6 +252,14 @@ export const useStore = create<StoreState>((set, get) => {
       switch (msg.t) {
         case 'event':
           if (msg.ev.k === 'token_usage') usagePatch[msg.sessionId] = msg.ev.usage;
+          if (msg.ev.k === 'task_upsert') {
+            const task = msg.ev.task;
+            const current = taskPatch[msg.sessionId] ?? state.tasks[msg.sessionId] ?? [];
+            taskPatch[msg.sessionId] = [
+              task,
+              ...current.filter((entry) => entry.id !== task.id),
+            ].sort((a, b) => b.startedAt - a.startedAt);
+          }
           if (msg.ev.k === 'run_state') {
             if (msg.ev.running) {
               // A fresh turn started — any stale abort flag is now irrelevant.
@@ -218,15 +268,17 @@ export const useStore = create<StoreState>((set, get) => {
               // Notify when a live turn ends (true → false). Skip the subscribe/
               // replay path (which only sets running via `subscribed`) and skip
               // turns the user aborted. `delete` returns true iff it was an abort.
-              const wasRunning = state.views[msg.sessionId]?.running;
+              const wasRunning = liveRunning.get(msg.sessionId) ?? state.views[msg.sessionId]?.running;
               if (wasRunning && !abortedSessions.delete(msg.sessionId)) playDoneSound = true;
             }
+            liveRunning.set(msg.sessionId, msg.ev.running);
           }
           push(msg.sessionId, msg.seq, msg.ev);
           break;
         case 'subscribed':
           setRunning[msg.sessionId] = msg.running;
           pendingPatch[msg.sessionId] = msg.pendingPermissions;
+          taskPatch[msg.sessionId] = msg.tasks;
           if (msg.reset) resetIds.push(msg.sessionId);
           break;
         case 'permission_request': {
@@ -279,6 +331,7 @@ export const useStore = create<StoreState>((set, get) => {
       }
       const usage = Object.keys(usagePatch).length ? { ...s.usage, ...usagePatch } : s.usage;
       const pending = Object.keys(pendingPatch).length ? { ...s.pending, ...pendingPatch } : s.pending;
+      const tasks = Object.keys(taskPatch).length ? { ...s.tasks, ...taskPatch } : s.tasks;
       const unread = finishedUnreadIds.length
         ? { ...s.unread, ...Object.fromEntries(finishedUnreadIds.map((id) => [id, true as const])) }
         : s.unread;
@@ -286,6 +339,7 @@ export const useStore = create<StoreState>((set, get) => {
         views,
         usage,
         pending,
+        tasks,
         unread,
         sessions: sessionsDirty ? sessions : s.sessions,
       };
@@ -334,14 +388,19 @@ export const useStore = create<StoreState>((set, get) => {
     skills: [],
     skillsAgent: null,
     skillsHost: null,
+    agentConfigFiles: [],
+    agentConfigAgent: null,
+    agentConfigHost: null,
     localName: 'local',
     activeId: null,
     views: {},
     usage: {},
     pending: {},
+    tasks: {},
     unread: {},
     rightTabs: {},
     toast: null,
+    filePreview: null,
     searchQuery: '',
     searchResults: [],
     searchLoading: false,
@@ -359,7 +418,7 @@ export const useStore = create<StoreState>((set, get) => {
         set({ toast: 'Failed to reach server' });
       }
 
-      socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus });
+      socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus, onVibotBatch: vibotHandleBatch });
       socket.connect(token);
 
       await Promise.all([
@@ -386,7 +445,7 @@ export const useStore = create<StoreState>((set, get) => {
       socket?.close();
       socket = null;
       clearToken();
-      set({ phase: 'unauthorized', sessions: [], views: {}, rightTabs: {}, unread: {}, activeId: null, searchQuery: '', searchResults: [], searchLoading: false });
+      set({ phase: 'unauthorized', sessions: [], views: {}, tasks: {}, rightTabs: {}, unread: {}, activeId: null, filePreview: null, searchQuery: '', searchResults: [], searchLoading: false });
     },
 
     async refreshSessions() {
@@ -653,6 +712,35 @@ export const useStore = create<StoreState>((set, get) => {
       }
     },
 
+    async loadAgentConfig(agent, host) {
+      try {
+        set({ agentConfigFiles: await api.listAgentConfig(agent, host), agentConfigAgent: agent, agentConfigHost: host ?? null });
+      } catch {
+        set({ toast: 'Failed to list config files' });
+      }
+    },
+
+    async readAgentConfigDetail(args) {
+      try {
+        return await api.readAgentConfig(args);
+      } catch (err) {
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to read config file' });
+        return null;
+      }
+    },
+
+    async saveAgentConfigFile(input) {
+      try {
+        const file = await api.saveAgentConfig(input);
+        // Refresh the list so exists/size reflect the write.
+        set({ agentConfigFiles: await api.listAgentConfig(input.agent, input.host) });
+        return file;
+      } catch (err) {
+        set({ toast: err instanceof ApiError ? err.message : 'Failed to save config file' });
+        return null;
+      }
+    },
+
     async openSession(id: string) {
       const prev = get().activeId;
       if (prev && prev !== id) socket?.send({ t: 'unsubscribe', sessionId: prev });
@@ -715,8 +803,10 @@ export const useStore = create<StoreState>((set, get) => {
         delete rightTabs[id];
         const unread = { ...s.unread };
         delete unread[id];
+        const tasks = { ...s.tasks };
+        delete tasks[id];
         const activeId = s.activeId === id ? (sessions[0]?.id ?? null) : s.activeId;
-        return { sessions, views, rightTabs, unread, activeId };
+        return { sessions, views, tasks, rightTabs, unread, activeId };
       });
       const next = get().activeId;
       if (next) void get().openSession(next);
@@ -762,6 +852,12 @@ export const useStore = create<StoreState>((set, get) => {
       }
     },
 
+    stopTask(taskId) {
+      const sessionId = get().activeId;
+      if (!sessionId) return;
+      socket?.send({ t: 'task_stop', sessionId, taskId });
+    },
+
     respondPermission(requestId, decision) {
       const id = get().activeId;
       if (!id) return;
@@ -773,6 +869,18 @@ export const useStore = create<StoreState>((set, get) => {
 
     setToast(msg) {
       set({ toast: msg });
+    },
+
+    openPathPreview(rawPath) {
+      const { sessions, activeId, localName } = get();
+      const session = sessions.find((s) => s.id === activeId);
+      const cwd = session?.cwd ?? '';
+      const host = session && session.host !== localName ? session.host : undefined;
+      set({ filePreview: { path: resolveFilePath(rawPath, cwd), host } });
+    },
+
+    closeFilePreview() {
+      set({ filePreview: null });
     },
 
     setRightTab(id, tab) {

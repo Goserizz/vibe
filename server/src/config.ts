@@ -91,6 +91,12 @@ export const config = {
   mcpOauthFile: path.join(VIBE_HOME, 'mcp-oauth.json'),
   /** Saved New-session engine presets (agent + model + permission + effort). */
   presetsFile: path.join(VIBE_HOME, 'presets.json'),
+  /** Vibot's own LLM API config (baseUrl + apiKey + model + systemPrompt). 0600. */
+  vibotConfigFile: path.join(VIBE_HOME, 'vibot.json'),
+  /** Vibot's durable memories. */
+  vibotMemoriesFile: path.join(VIBE_HOME, 'vibot-memories.json'),
+  /** Per-conversation Vibot transcripts (LLM history + rendered blocks). */
+  vibotConvsDir: path.join(VIBE_HOME, 'vibot-conversations'),
   /** Persisted Telegram bot token path (written when you save a token locally). */
   telegramBotTokenFile: path.join(VIBE_HOME, 'telegram-bot-token'),
   /** Persisted Telegram allowlist path. */

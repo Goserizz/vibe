@@ -74,6 +74,8 @@ const TOOL_KIND_ALIASES: Record<string, ToolKind> = {
   todowrite: 'todo',
   todo: 'todo',
   updatetodo: 'todo',
+  todolist: 'todo',
+  tasklist: 'todo',
   task: 'task',
   subagent: 'task',
   exitplanmode: 'plan',

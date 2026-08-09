@@ -180,50 +180,58 @@ function scanRefs(data: Buffer): string[] {
   return refs;
 }
 
-/** Load all blobs (id -> bytes) and the latest root id from a store.db. */
-function loadStore(dbPath: string): { blobs: Map<string, Buffer>; rootId?: string } {
+/** Parse the two sqlite3 dumps (meta rows, `id<TAB>hex(data)` rows) a store
+ *  yields. Pure so the dumps can equally come from a local or remote sqlite3. */
+export function parseCursorStoreDump(metaDump: string, blobsDump: string): { blobs: Map<string, Buffer>; rootId?: string } {
   const blobs = new Map<string, Buffer>();
   let rootId: string | undefined;
+  for (const line of metaDump.split('\n')) {
+    const h = line.trim();
+    if (!h) continue;
+    try {
+      // hex(value) → inner hex text → JSON (value is a hex-encoded JSON BLOB).
+      const inner = Buffer.from(h, 'hex').toString('utf8');
+      const obj = JSON.parse(Buffer.from(inner, 'hex').toString('utf8'));
+      if (obj && typeof obj.latestRootBlobId === 'string') {
+        rootId = obj.latestRootBlobId;
+        break;
+      }
+    } catch {
+      /* not the json row */
+    }
+  }
+  for (const line of blobsDump.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const id = line.slice(0, tab);
+    const hex = line.slice(tab + 1).trim();
+    if (id && hex) blobs.set(id, Buffer.from(hex, 'hex'));
+  }
+  return { blobs, rootId };
+}
+
+/** Load all blobs (id -> bytes) and the latest root id from a store.db. */
+function loadStore(dbPath: string): { blobs: Map<string, Buffer>; rootId?: string } {
+  let metaDump = '';
+  let blobsDump = '';
   try {
-    const metaOut = execFileSync('sqlite3', ['-batch', '-noheader', '-list', dbPath, 'SELECT hex(value) FROM meta'], {
+    metaDump = execFileSync('sqlite3', ['-batch', '-noheader', '-list', dbPath, 'SELECT hex(value) FROM meta'], {
       encoding: 'utf8',
       maxBuffer: 8 * 1024 * 1024,
     });
-    for (const line of metaOut.split('\n')) {
-      const h = line.trim();
-      if (!h) continue;
-      try {
-        // hex(value) → inner hex text → JSON (value is a hex-encoded JSON BLOB).
-        const inner = Buffer.from(h, 'hex').toString('utf8');
-        const obj = JSON.parse(Buffer.from(inner, 'hex').toString('utf8'));
-        if (obj && typeof obj.latestRootBlobId === 'string') {
-          rootId = obj.latestRootBlobId;
-          break;
-        }
-      } catch {
-        /* not the json row */
-      }
-    }
   } catch (err) {
     log.debug('cursor store meta read failed', err);
-    return { blobs };
+    return { blobs: new Map() };
   }
   try {
-    const out = execFileSync('sqlite3', ['-batch', '-noheader', '-list', '-separator', '\t', dbPath, 'SELECT id, hex(data) FROM blobs'], {
+    blobsDump = execFileSync('sqlite3', ['-batch', '-noheader', '-list', '-separator', '\t', dbPath, 'SELECT id, hex(data) FROM blobs'], {
       encoding: 'utf8',
       maxBuffer: 256 * 1024 * 1024,
     });
-    for (const line of out.split('\n')) {
-      const tab = line.indexOf('\t');
-      if (tab < 0) continue;
-      const id = line.slice(0, tab);
-      const hex = line.slice(tab + 1);
-      if (id && hex) blobs.set(id, Buffer.from(hex, 'hex'));
-    }
   } catch (err) {
     log.debug('cursor store blobs read failed', err);
   }
-  return { blobs, rootId };
+  return parseCursorStoreDump(metaDump, blobsDump);
 }
 
 /** Walk the DAG from the root in conversation order, collecting message blobs.
@@ -322,6 +330,12 @@ function messagesToBlocks(msgs: any[]): ChatBlock[] {
   return blocks;
 }
 
+/** Walk a loaded store into renderable blocks (no filesystem access). */
+export function cursorStoreBlocks(store: { blobs: Map<string, Buffer>; rootId?: string }): ChatBlock[] {
+  if (!store.rootId) return [];
+  return messagesToBlocks(collectMessages(store.blobs, store.rootId));
+}
+
 /** Best-effort read of an external Cursor chat transcript by cwd + chat id. */
 export function readCursorStoreTranscript(cwd: string, chatId: string): ChatBlock[] {
   // Cursor hashes the resolved path; try both the literal cwd and its realpath.
@@ -336,9 +350,7 @@ export function readCursorStoreTranscript(cwd: string, chatId: string): ChatBloc
     const dbPath = path.join(config.cursorChatsDir, hash, chatId, 'store.db');
     if (!fs.existsSync(dbPath)) continue;
     try {
-      const { blobs, rootId } = loadStore(dbPath);
-      if (!rootId) return [];
-      return messagesToBlocks(collectMessages(blobs, rootId));
+      return cursorStoreBlocks(loadStore(dbPath));
     } catch (err) {
       log.debug('cursor store transcript failed', err);
       return [];

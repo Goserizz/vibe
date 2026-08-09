@@ -63,16 +63,8 @@ function contentText(content: unknown): string {
     .join('\n');
 }
 
-/** Best-effort rendering of a native Kiro CLI event log (`*.jsonl`). */
-export function readKiroNativeTranscript(sessionId: string): ChatBlock[] {
-  const file = path.join(config.kiroSessionsDir, `${sessionId}.jsonl`);
-  let raw = '';
-  try {
-    raw = fs.readFileSync(file, 'utf8');
-  } catch {
-    return [];
-  }
-
+/** Best-effort rendering of a native Kiro CLI event log (`*.jsonl` content). */
+export function kiroNativeBlocks(raw: string): ChatBlock[] {
   const blocks: ChatBlock[] = [];
   let lineNo = 0;
   for (const line of raw.split('\n')) {
@@ -120,4 +112,13 @@ export function readKiroNativeTranscript(sessionId: string): ChatBlock[] {
     }
   }
   return blocks;
+}
+
+/** Read a local native Kiro CLI session log (`~/.kiro/sessions/cli/<id>.jsonl`). */
+export function readKiroNativeTranscript(sessionId: string): ChatBlock[] {
+  try {
+    return kiroNativeBlocks(fs.readFileSync(path.join(config.kiroSessionsDir, `${sessionId}.jsonl`), 'utf8'));
+  } catch {
+    return [];
+  }
 }

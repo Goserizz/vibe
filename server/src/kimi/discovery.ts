@@ -30,16 +30,17 @@ export function isKimiSessionId(value: string): boolean {
   return KIMI_SESSION_RE.test(value);
 }
 
-/** Read and validate Kimi Code's append-only session index. */
-export function kimiSessionRefs(): KimiSessionRef[] {
-  let raw = '';
-  try {
-    raw = fs.readFileSync(config.kimiSessionIndexFile, 'utf8');
-  } catch {
-    return [];
-  }
-
-  const home = path.resolve(config.kimiHome);
+/**
+ * Parse Kimi Code's append-only session index. Pure: `home` bounds which
+ * directories are accepted (a malformed/user-edited index must not turn
+ * discovery into an arbitrary filesystem reader) and `exists` lets the local
+ * caller require a real `state.json` while the remote caller skips that check.
+ */
+export function parseKimiIndex(
+  raw: string,
+  home: string,
+  exists: (dir: string) => boolean = () => true,
+): KimiSessionRef[] {
   const byId = new Map<string, KimiSessionRef>();
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
@@ -52,11 +53,12 @@ export function kimiSessionRefs(): KimiSessionRef[] {
     const id = typeof record.sessionId === 'string' ? record.sessionId : '';
     const rawDir = typeof record.sessionDir === 'string' ? record.sessionDir : '';
     if (!isKimiSessionId(id) || !rawDir) continue;
-    const dir = path.resolve(rawDir);
-    // Do not let a malformed/user-edited index turn discovery into an arbitrary
-    // filesystem reader.
-    if (dir !== home && !dir.startsWith(`${home}${path.sep}`)) continue;
-    if (!fs.existsSync(path.join(dir, 'state.json'))) continue;
+    // POSIX-normalize without touching the local filesystem semantics, so the
+    // same check works for remote paths.
+    const dir = path.posix.normalize(rawDir).replace(/\/+$/, '');
+    const root = path.posix.normalize(home).replace(/\/+$/, '');
+    if (dir !== root && !dir.startsWith(`${root}/`)) continue;
+    if (!exists(dir)) continue;
     byId.set(id, {
       id,
       dir,
@@ -64,6 +66,19 @@ export function kimiSessionRefs(): KimiSessionRef[] {
     });
   }
   return [...byId.values()];
+}
+
+/** Read and validate Kimi Code's append-only session index. */
+export function kimiSessionRefs(): KimiSessionRef[] {
+  let raw = '';
+  try {
+    raw = fs.readFileSync(config.kimiSessionIndexFile, 'utf8');
+  } catch {
+    return [];
+  }
+  return parseKimiIndex(raw, path.resolve(config.kimiHome), (dir) =>
+    fs.existsSync(path.join(dir, 'state.json')),
+  );
 }
 
 export function findKimiSessionDir(sessionId: string): string | undefined {
@@ -107,10 +122,40 @@ function modelFromWire(raw: string): string {
   return model;
 }
 
-function toDiscovered(ref: KimiSessionRef): DiscoveredSession | null {
+/**
+ * Build a discovered session from the raw pieces Kimi keeps per session:
+ * `state.json` and the head of `agents/main/wire.jsonl`. Pure, so local and
+ * remote (SSH) discovery share the same interpretation.
+ */
+export function kimiSessionFromParts(
+  ref: KimiSessionRef,
+  stateJson: string,
+  wireHead: string,
+  times: { createdFallback: number; updatedAt: number },
+): DiscoveredSession | null {
   let state: SessionState;
   try {
-    state = JSON.parse(fs.readFileSync(path.join(ref.dir, 'state.json'), 'utf8')) as SessionState;
+    state = JSON.parse(stateJson) as SessionState;
+  } catch {
+    return null;
+  }
+  const cwd = typeof state.workDir === 'string' ? state.workDir : ref.workDir;
+  if (!cwd) return null;
+  return {
+    claudeSessionId: ref.id,
+    cwd,
+    title: typeof state.title === 'string' && state.title.trim() ? state.title.trim().slice(0, 200) : 'Kimi session',
+    model: modelFromWire(wireHead) || config.defaultKimiModel,
+    createdAt: parseTime(state.createdAt) || times.createdFallback,
+    updatedAt: parseTime(state.updatedAt) || times.updatedAt,
+    messageCount: (wireHead.match(/"type":"turn\.prompt"/g) ?? []).length,
+  };
+}
+
+function toDiscovered(ref: KimiSessionRef): DiscoveredSession | null {
+  let stateJson: string;
+  try {
+    stateJson = fs.readFileSync(path.join(ref.dir, 'state.json'), 'utf8');
   } catch {
     return null;
   }
@@ -121,19 +166,11 @@ function toDiscovered(ref: KimiSessionRef): DiscoveredSession | null {
   } catch {
     try { stat = fs.statSync(path.join(ref.dir, 'state.json')); } catch { /* ignore */ }
   }
-  const cwd = typeof state.workDir === 'string' ? state.workDir : ref.workDir;
-  if (!cwd) return null;
-  const wireHead = readHead(wireFile);
-  const messageCount = (wireHead.match(/"type":"turn\.prompt"/g) ?? []).length;
-  return {
-    claudeSessionId: ref.id,
-    cwd,
-    title: typeof state.title === 'string' && state.title.trim() ? state.title.trim().slice(0, 200) : 'Kimi session',
-    model: modelFromWire(wireHead) || config.defaultKimiModel,
-    createdAt: parseTime(state.createdAt) || stat?.birthtimeMs || stat?.mtimeMs || Date.now(),
-    updatedAt: parseTime(state.updatedAt) || stat?.mtimeMs || Date.now(),
-    messageCount,
-  };
+  const now = Date.now();
+  return kimiSessionFromParts(ref, stateJson, readHead(wireFile), {
+    createdFallback: stat?.birthtimeMs || stat?.mtimeMs || now,
+    updatedAt: stat?.mtimeMs || now,
+  });
 }
 
 /** Discover native Kimi Code sessions on this machine, newest first. */

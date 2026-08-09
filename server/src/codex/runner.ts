@@ -7,6 +7,7 @@ import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } fro
 import { applyCodexMcp } from '../mcp/apply.js';
 import type { EffortLevel, McpServerDef, PermissionMode } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
+import { startCodexAppServerRun } from './appServer.js';
 
 export interface CodexRunOptions {
   prompt: string;
@@ -132,6 +133,13 @@ function runOnce(opts: CodexRunOptions, normalizer: CodexStreamNormalizer, setCh
  * per-tool permission prompts, so `requestPermission` is never invoked.
  */
 export function startCodexRun(opts: CodexRunOptions, cb: RunCallbacks): RunHandle {
+  // App Server is required for task-aware turns: unlike one-shot `codex exec`,
+  // it owns background terminals after the foreground turn and exposes list /
+  // terminate APIs. The legacy helpers above remain as protocol documentation
+  // and can still be used by older forks if a compatibility fallback is added.
+  if (process.env.VIBE_CODEX_LEGACY_EXEC !== '1') return startCodexAppServerRun(opts, cb);
+  // Compatibility escape hatch for Codex forks which predate `app-server`.
+  // Legacy exec turns keep chat working but cannot manage background terminals.
   const abortController = new AbortController();
   let child: ChildProcess | undefined;
   let aborted = false;

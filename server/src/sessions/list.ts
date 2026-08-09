@@ -7,7 +7,7 @@ import { listCodexSessions } from '../codex/discovery.js';
 import { listKimiSessions } from '../kimi/discovery.js';
 import { listKiroSessions } from '../kiro/discovery.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
-import { listRemoteSessions, clearRemoteDiscoveryCache } from '../remote/discovery.js';
+import { listRemoteAgentSessions, clearRemoteDiscoveryCache } from '../remote/discovery.js';
 import { encodeRemoteId } from '../remote/sessionId.js';
 import { hub } from '../ws/hub.js';
 import { compareSessions, type AgentKind, type EffortLevel, type SessionMeta } from '../../../shared/protocol.js';
@@ -43,6 +43,7 @@ export function discoveredToMeta(
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
     messageCount: d.messageCount,
+    backgroundTasksRunning: false,
     running: false,
     source:
       agent === 'cursor'
@@ -58,11 +59,14 @@ export function discoveredToMeta(
   };
 }
 
-/** Overlay live running flags without re-scanning disks/SSH. */
-function withLiveRunning(sessions: SessionMeta[]): SessionMeta[] {
+/** Overlay live foreground/background state without re-scanning disks/SSH. */
+function withLiveState(sessions: SessionMeta[]): SessionMeta[] {
   return sessions.map((s) => {
     const running = hub.isRunning(s.id);
-    return s.running === running ? s : { ...s, running };
+    const backgroundTasksRunning = hub.hasActiveBackgroundTasks(s.id);
+    return s.running === running && s.backgroundTasksRunning === backgroundTasksRunning
+      ? s
+      : { ...s, running, backgroundTasksRunning };
   });
 }
 
@@ -71,7 +75,7 @@ function withLiveRunning(sessions: SessionMeta[]): SessionMeta[] {
 function seedFromStore(): SessionMeta[] {
   return sessionStore
     .list()
-    .map((s) => toMeta(s, hub.isRunning(s.id), 'vibe'))
+    .map((s) => toMeta(s, hub.isRunning(s.id), 'vibe', hub.hasActiveBackgroundTasks(s.id)))
     .map((s) => ({ ...s, pinned: sessionStore.isPinned(s.id) }))
     .sort(compareSessions);
 }
@@ -82,7 +86,9 @@ function ensureSeeded(): void {
 
 async function loadAllSessions(): Promise<SessionMeta[]> {
   const stored = sessionStore.list();
-  const storeMetas = stored.map((s) => toMeta(s, hub.isRunning(s.id), 'vibe'));
+  const storeMetas = stored.map((s) =>
+    toMeta(s, hub.isRunning(s.id), 'vibe', hub.hasActiveBackgroundTasks(s.id)),
+  );
 
   const known = new Set<string>();
   for (const s of stored) {
@@ -145,7 +151,7 @@ async function loadAllSessions(): Promise<SessionMeta[]> {
   await Promise.all(
     hostRegistry.list().map(async (host) => {
       try {
-        for (const d of await listRemoteSessions(host)) {
+        for (const { agent, session: d } of await listRemoteAgentSessions(host)) {
           const id = encodeRemoteId(host.name, d.claudeSessionId);
           hub.cacheRemoteSession(id, {
             host: host.name,
@@ -153,10 +159,11 @@ async function loadAllSessions(): Promise<SessionMeta[]> {
             cwd: d.cwd,
             model: d.model,
             title: d.title,
-            proxy: proxyForAgent(host, 'claude'),
+            agent,
+            proxy: proxyForAgent(host, agent),
           });
           if (!known.has(d.claudeSessionId) && !known.has(id) && !sessionStore.isHidden(id)) {
-            discovered.push(discoveredToMeta(d, host.name, true));
+            discovered.push(discoveredToMeta(d, host.name, true, agent));
           }
         }
       } catch (err) {
@@ -182,6 +189,7 @@ function listRelevantEqual(a: SessionMeta, b: SessionMeta): boolean {
     a.agent === b.agent &&
     a.updatedAt === b.updatedAt &&
     a.messageCount === b.messageCount &&
+    a.backgroundTasksRunning === b.backgroundTasksRunning &&
     a.running === b.running &&
     a.pinned === b.pinned &&
     a.host === b.host &&
@@ -218,7 +226,7 @@ async function loadSessionListAwait(): Promise<SessionMeta[]> {
   const prev = peekSessionListCache()?.slice() ?? null;
   const pending = loadAllSessions()
     .then((sessions) => {
-      const live = withLiveRunning(sessions);
+      const live = withLiveState(sessions);
       setSessionListCache(live);
       fullDiscoveryDone = true;
       broadcastSessionListDiff(prev, live);
@@ -243,13 +251,13 @@ export async function listAllSessions(): Promise<SessionMeta[]> {
   if (!fullDiscoveryDone && !getSessionListInflight()) {
     void loadSessionListAwait().catch((err) => log.debug('session list background load failed', err));
   }
-  return withLiveRunning(peekSessionListCache() ?? seedFromStore());
+  return withLiveState(peekSessionListCache() ?? seedFromStore());
 }
 
 /** Wait for a full discovery pass (Telegram /sessions, etc.). */
 export async function awaitFullSessionList(): Promise<SessionMeta[]> {
   ensureSeeded();
-  return withLiveRunning(await loadSessionListAwait());
+  return withLiveState(await loadSessionListAwait());
 }
 
 /** Seed a warm cache immediately, then kick off full discovery in the background. */

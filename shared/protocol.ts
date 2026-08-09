@@ -12,7 +12,7 @@
  *    content render identically.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 export type Role = 'user' | 'assistant';
@@ -134,6 +134,9 @@ export interface SessionMeta {
   createdAt: number;
   updatedAt: number;
   messageCount: number;
+  /** True while one or more Background tasks are still active, independently
+   *  of whether the foreground model turn is currently producing a reply. */
+  backgroundTasksRunning: boolean;
   running: boolean;
   /** 'vibe' = managed in Vibe; otherwise discovered from that CLI. */
   source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro';
@@ -279,6 +282,39 @@ export interface SkillDetail {
   readOnly: boolean;
 }
 
+/**
+ * Agent config files (e.g. Claude's `~/.claude/settings.json`, Codex's
+ * `~/.codex/config.toml`). Surfaced as raw text — JSON or TOML — so formatting
+ * and comments are preserved on edit. The client only ever sends the opaque
+ * `id`; the server resolves it to a path from a fixed per-agent allowlist.
+ */
+export interface ConfigFileEntry {
+  /** Opaque key from the server's allowlist (e.g. `settings`, `config`). */
+  id: string;
+  agent: AgentKind;
+  /** Display label (e.g. `settings.json`, `config.toml`). */
+  label: string;
+  /** `~`-prefixed path shown to the user (remote-form, never a client input). */
+  relPath: string;
+  /** Whether the file currently exists on disk. */
+  exists: boolean;
+  /** Size in bytes (0 when missing). */
+  size: number;
+}
+
+/** Full config file content, returned when a user opens one for editing. */
+export interface ConfigFileDetail {
+  id: string;
+  agent: AgentKind;
+  label: string;
+  relPath: string;
+  /** Raw file text (empty string when the file doesn't exist yet). */
+  content: string;
+  exists: boolean;
+  /** Always false for now (these are user-owned files); kept for symmetry. */
+  readOnly: boolean;
+}
+
 /** Install + version info for one agent CLI on a host. */
 export interface AgentInstallInfo {
   installed: boolean;
@@ -369,6 +405,109 @@ export interface PermissionDecision {
 }
 
 // ---------------------------------------------------------------------------
+// Vibot — the separate built-in assistant (its own subsystem & WS namespace)
+// ---------------------------------------------------------------------------
+
+/**
+ * Vibot's own LLM API configuration, independent of the coding-agent CLIs.
+ * Stored server-side at ~/.vibe/vibot.json (mode 0600). The API key is never
+ * returned in full to the client — {@link VibotConfigClient} carries
+ * `hasApiKey` instead. Vibot speaks an OpenAI-compatible Chat Completions API
+ * (streaming + tool calls), which covers GLM, DeepSeek, Kimi/Moonshot, OpenAI,
+ * OpenRouter, and local servers via a single {baseUrl, apiKey, model} triple.
+ */
+export interface VibotConfig {
+  /** Base URL of an OpenAI-compatible endpoint, no `/chat/completions`. */
+  baseUrl: string;
+  /** API key (secret). Empty string ⇒ unconfigured. */
+  apiKey: string;
+  /** Model id as the provider expects it (e.g. `glm-4.6`, `deepseek-chat`). */
+  model: string;
+  /** Editable system prompt; defaults to the built-in Vibot prompt. */
+  systemPrompt: string;
+  temperature?: number;
+}
+
+/** Safe-to-send projection of {@link VibotConfig}: the key never leaves the
+ *  server; the client only learns whether one is set. */
+export interface VibotConfigClient {
+  baseUrl: string;
+  model: string;
+  systemPrompt: string;
+  temperature?: number;
+  hasApiKey: boolean;
+}
+
+/** A Vibot conversation row for the sidebar. Lives only in the Vibot store —
+ *  never mixed into the coding `SessionMeta` list. */
+export interface VibotConvMeta {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messageCount: number;
+  running: boolean;
+}
+
+/** A durable note Vibot chose to remember. */
+export interface VibotMemory {
+  id: string;
+  /** Short slug; also the user-facing name. */
+  name: string;
+  description: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// Agent background tasks
+// ---------------------------------------------------------------------------
+
+/** Lifecycle shared by Claude tasks, Kimi background tools, and Codex
+ *  background terminals. Terminal states intentionally use one vocabulary even
+ *  though the three engines spell them differently. */
+export type BackgroundTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'stopped';
+
+export type BackgroundTaskKind = 'command' | 'subagent' | 'other';
+
+/** A task which can outlive the agent turn that created it. Task ids are native
+ *  engine ids, scoped to a Vibe session. */
+export interface BackgroundTask {
+  id: string;
+  agent: AgentKind;
+  kind: BackgroundTaskKind;
+  status: BackgroundTaskStatus;
+  description: string;
+  startedAt: number;
+  updatedAt: number;
+  endedAt?: number;
+  command?: string;
+  /** Original prompt/instructions when the engine exposes them. */
+  detail?: string;
+  /** Working directory reported by command-style tasks. */
+  cwd?: string;
+  /** Most recent engine activity, for example Claude's current tool. */
+  activity?: string;
+  /** Engine-generated progress or completion summary. */
+  summary?: string;
+  /** A short, display-safe output/summary. Full logs remain in the engine's file. */
+  output?: string;
+  outputFile?: string;
+  exitCode?: number;
+  processId?: string;
+  /** False when the engine exposes observation but no per-task stop primitive. */
+  canStop: boolean;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Live events (seq-tagged; these mutate block state and are replayable)
 // ---------------------------------------------------------------------------
 
@@ -379,6 +518,7 @@ export type LiveEvent =
   | { k: 'tool_result'; toolUseId: string; content: string; isError: boolean }
   | { k: 'run_state'; running: boolean }
   | { k: 'token_usage'; usage: TokenUsage }
+  | { k: 'task_upsert'; task: BackgroundTask }
   | { k: 'error'; text: string };
 
 // ---------------------------------------------------------------------------
@@ -390,7 +530,12 @@ export type ClientMessage =
   | { t: 'unsubscribe'; sessionId: string }
   | { t: 'send'; sessionId: string; clientMsgId: string; text: string }
   | { t: 'abort'; sessionId: string }
+  | { t: 'task_stop'; sessionId: string; taskId: string }
   | { t: 'permission'; sessionId: string; requestId: string; decision: PermissionDecision }
+  | { t: 'vibot_subscribe'; convId: string; lastSeq: number }
+  | { t: 'vibot_unsubscribe'; convId: string }
+  | { t: 'vibot_send'; convId: string; clientMsgId: string; text: string }
+  | { t: 'vibot_abort'; convId: string }
   | { t: 'ping' };
 
 // ---------------------------------------------------------------------------
@@ -408,6 +553,7 @@ export type ServerEvent =
       /** When true the client must discard live state and reload the transcript. */
       reset: boolean;
       pendingPermissions: PermissionRequest[];
+      tasks: BackgroundTask[];
     }
   | { t: 'event'; sessionId: string; seq: number; ev: LiveEvent }
   | { t: 'permission_request'; sessionId: string; request: PermissionRequest }
@@ -419,5 +565,19 @@ export type ServerEvent =
     }
   | { t: 'session_meta'; session: SessionMeta }
   | { t: 'session_removed'; sessionId: string }
+  // -- Vibot (separate interface; reuses LiveEvent so BlockView renders it) --
+  | { t: 'vibot_event'; convId: string; seq: number; ev: LiveEvent }
+  | {
+      t: 'vibot_subscribed';
+      convId: string;
+      /** Current server seq for this conversation. */
+      seq: number;
+      running: boolean;
+      /** When true the client must discard live state and reload history. */
+      reset: boolean;
+    }
+  | { t: 'vibot_conv_meta'; conv: VibotConvMeta }
+  | { t: 'vibot_conv_removed'; convId: string }
+  | { t: 'vibot_conv_list'; convs: VibotConvMeta[] }
   | { t: 'pong' }
   | { t: 'error'; message: string; sessionId?: string };

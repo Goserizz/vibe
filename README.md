@@ -44,7 +44,8 @@ Vibe runs a small server on your machine that talks to Claude Code, Codex, Curso
 Kimi Code, or Kiro, normalizes each agent's stream into the same structured conversation
 model, and sends it to a React web client over a single WebSocket. Claude sessions
 use the official [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk);
-Codex, Cursor, Kimi, and Kiro sessions run their headless CLIs.
+Codex runs through its long-lived App Server, while Cursor, Kimi, and Kiro use
+their structured CLI/ACP transports.
 
 It was built to fix two things that make other remote coding-agent UIs feel clunky:
 
@@ -61,6 +62,11 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
 
 - 💬 **Structured chat loop** — streaming assistant text, thinking, tool calls, and results
 - 🧰 **Tool visibility** — Bash/Read/Edit/Grep/… rendered as compact cards with status + output
+- ⏳ **Background task control** — Claude tasks, Kimi background tools, and Codex background
+  terminals share one live task pane with expandable metadata, command/instructions, captured
+  output, and per-task stop where the engine exposes it; task completion automatically wakes
+  the agent for a follow-up reply, while the composer remains available between foreground turns;
+  stopping the current reply leaves background tasks and their completion notifications running
 - 🤖 **Multiple agents** — choose Claude, Codex, Cursor, Kimi, or Kiro per session, with agent-specific
   model, reasoning, and permission controls
 - 🔐 **Permission controls** — Claude supports inline Allow / Always allow / Deny prompts;
@@ -72,8 +78,9 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   `claude`, `codex`, `cursor-agent`, `kimi`, or `kiro-cli` appear automatically when their local history is readable;
   open them to read the full history and keep chatting
 - 🌐 **Remote hosts over SSH** — add machines you reach via SSH and run the selected agent
-  on that machine; remote Claude Code sessions are discovered automatically, and Vibe-created
-  remote sessions can use Claude, Codex, Cursor, Kimi, or Kiro when the CLI is installed on the host
+  on that machine; sessions you started on that host's own CLIs (Claude, Codex, Cursor, Kimi,
+  Kiro) are discovered automatically, and Vibe-created remote sessions can use any of them
+  when the CLI is installed on the host
 - 💻 **Integrated terminal** — one click opens a real interactive shell on the session's host
   (a local login shell, or `ssh` into the remote), in the session's directory, in a resizable
   side panel
@@ -208,9 +215,16 @@ Active session per chat is remembered in `~/.vibe/telegram.json`.
 ## Remote hosts (SSH)
 
 Open **Hosts** in the sidebar to add a machine by an `~/.ssh/config` alias or `user@host`.
-Vibe can run Claude, Codex, Cursor, or Kimi turns on that machine over SSH. Existing remote
-Claude Code sessions are discovered in the sidebar (tagged with the host name), and
-Vibe-created remote sessions continue with whichever agent you selected for that session.
+Vibe can run Claude, Codex, Cursor, Kimi, or Kiro turns on that machine over SSH. Sessions that
+already exist on the host's own CLIs are discovered in the sidebar (tagged with the host name and
+the owning agent), and Vibe-created remote sessions continue with whichever agent you selected
+for that session.
+
+Remote discovery reads each agent's native store over SSH: `~/.claude/projects` (Claude),
+`~/.codex/sessions` (Codex), `$KIMI_CODE_HOME`'s session index (Kimi), `~/.kiro/sessions/cli`
+(Kiro) and `~/.cursor/chats` (Cursor). Two caveats mirror the local behavior: a Cursor chat is
+only recoverable when Vibe can name its working directory (Cursor records only a hash of it), and
+rendering a remote Cursor chat's own history needs `sqlite3` on that host.
 
 Requirements:
 

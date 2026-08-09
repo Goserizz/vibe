@@ -37,7 +37,8 @@ import { mcpRegistry } from '../mcp/registry.js';
 import { oauthStore } from '../mcp/oauth.js';
 import { presetRegistry } from '../presets/registry.js';
 import { deleteSkill, listSkills, readSkill, validateSkillName, writeSkill } from '../skills/skills.js';
-import { getRemoteSessionInfo } from '../remote/discovery.js';
+import { listConfigFiles, readConfigFile, writeConfigFile } from '../agentconfig/registry.js';
+import { resolveRemoteSession } from '../remote/discovery.js';
 import { sshExec, loginShellCommand, shQuote } from '../remote/ssh.js';
 import { createRemoteWorkdir } from '../remote/workdir.js';
 import {
@@ -50,6 +51,9 @@ import {
 } from '../remote/agents.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { hub } from '../ws/hub.js';
+import { loadVibotConfig, updateVibotConfig, vibotConfigClient } from '../vibot/config.js';
+import { vibotHub } from '../vibot/hub.js';
+import { memoryStore } from '../vibot/memories.js';
 import type {
   AgentKind,
   EffortLevel,
@@ -57,6 +61,8 @@ import type {
   PermissionMode,
   SkillDetail,
   SkillScope,
+  ConfigFileDetail,
+  ConfigFileEntry,
 } from '../../../shared/protocol.js';
 
 const permissionModes: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
@@ -68,9 +74,17 @@ async function ensureRemoteCached(sessionId: string): Promise<void> {
   if (!host || sessionStore.get(sessionId)) return;
   const remoteHost = hostRegistry.get(host);
   if (!remoteHost) return;
-  const info = await getRemoteSessionInfo(remoteHost, claudeSessionId);
-  if (info) {
-    hub.cacheRemoteSession(sessionId, { host: remoteHost.name, sshTarget: remoteHost.ssh, cwd: info.cwd, model: info.model, title: info.title, proxy: proxyForAgent(remoteHost, 'claude') });
+  const hit = await resolveRemoteSession(remoteHost, claudeSessionId);
+  if (hit) {
+    hub.cacheRemoteSession(sessionId, {
+      host: remoteHost.name,
+      sshTarget: remoteHost.ssh,
+      cwd: hit.session.cwd,
+      model: hit.session.model,
+      title: hit.session.title,
+      agent: hit.agent,
+      proxy: proxyForAgent(remoteHost, hit.agent),
+    });
   }
 }
 
@@ -160,6 +174,18 @@ const skillReadQuery = z.object({
   name: z.string().min(1),
   scope: z.enum(['personal', 'system']).optional(),
   source: z.string().optional(),
+});
+
+// Agent config files: view/edit each agent's main config (e.g. Claude's
+// ~/.claude/settings.json). The id is an opaque key from a server-side
+// allowlist (regex here + re-validated in the registry), so no client-supplied
+// path is ever interpolated — traversal is impossible regardless of input.
+const configIdSchema = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,63}$/, 'invalid config id');
+const configSaveSchema = z.object({
+  agent: skillAgentSchema,
+  id: configIdSchema,
+  content: z.string(),
+  host: z.string().optional(),
 });
 
 // -- File browser/editor (local + remote) ------------------------------------
@@ -956,6 +982,62 @@ export function createApiRouter(): Router {
     }
   });
 
+  // -- Agent config files (raw-text view/edit, local + remote) ----------------
+  // Only the fixed per-agent allowlist is reachable; the client sends an opaque
+  // `id`, never a path. Configs are JSON or TOML and are stored verbatim.
+
+  // List an agent's config files with exists/size (this machine or a remote host).
+  router.get('/agent-config', async (req, res) => {
+    const parsed = z.object({ agent: skillAgentSchema, host: z.string().optional() }).safeParse({
+      agent: req.query.agent,
+      host: req.query.host,
+    });
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
+      return;
+    }
+    try {
+      const files: ConfigFileEntry[] = await listConfigFiles({ agent: parsed.data.agent, host: parsed.data.host });
+      res.json({ files });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'list failed' });
+    }
+  });
+
+  // Read one config file's raw content. Missing file ⇒ content:'', exists:false.
+  router.get('/agent-config/read', async (req, res) => {
+    const parsed = z
+      .object({ agent: skillAgentSchema, host: z.string().optional(), id: configIdSchema })
+      .safeParse({ agent: req.query.agent, host: req.query.host, id: req.query.id });
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
+      return;
+    }
+    try {
+      const file: ConfigFileDetail = await readConfigFile({ agent: parsed.data.agent, host: parsed.data.host, id: parsed.data.id });
+      res.json({ file });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'read failed';
+      res.status(/timed out/i.test(msg) ? 504 : /too large/i.test(msg) ? 413 : 400).json({ error: msg });
+    }
+  });
+
+  // Create or overwrite a config file (mkdir -p parent first).
+  router.post('/agent-config', async (req, res) => {
+    const parsed = configSaveSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid config' });
+      return;
+    }
+    try {
+      const file: ConfigFileDetail = await writeConfigFile(parsed.data);
+      res.json({ file });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'save failed';
+      res.status(/timed out/i.test(msg) ? 504 : /too large/i.test(msg) ? 413 : 400).json({ error: msg });
+    }
+  });
+
   // Begin the MCP-OAuth flow for a server: discover + register, return the
   // provider consent URL for the client to open in the user's browser.
   router.post('/mcp/oauth/start', async (req, res) => {
@@ -1112,7 +1194,9 @@ export function createApiRouter(): Router {
       res.status(404).json({ error: 'not found' });
       return;
     }
-    res.json({ session: toMeta(stored, hub.isRunning(stored.id)) });
+    res.json({
+      session: toMeta(stored, hub.isRunning(stored.id), 'vibe', hub.hasActiveBackgroundTasks(stored.id)),
+    });
   });
 
   router.patch('/sessions/:id', async (req, res) => {
@@ -1126,10 +1210,18 @@ export function createApiRouter(): Router {
     if (!sessionStore.get(id)) {
       const { host, claudeSessionId } = parseSessionId(id);
       const remoteHost = host ? hostRegistry.get(host) : undefined;
-      let info: DiscoveredSession | null = remoteHost
-        ? await getRemoteSessionInfo(remoteHost, claudeSessionId)
-        : await getClaudeSessionInfo(id);
       let agent: AgentKind = 'claude';
+      let info: DiscoveredSession | null = null;
+      if (remoteHost) {
+        // Remote: any agent's native session on that host.
+        const hit = await resolveRemoteSession(remoteHost, claudeSessionId);
+        if (hit) {
+          info = hit.session;
+          agent = hit.agent;
+        }
+      } else {
+        info = await getClaudeSessionInfo(id);
+      }
       // Not a Claude session — maybe another local agent's native session.
       if (!info && !host) {
         const c = resolveCursorSessionSync(id);
@@ -1179,7 +1271,9 @@ export function createApiRouter(): Router {
       return;
     }
     hub.broadcastMeta(updated.id);
-    res.json({ session: toMeta(updated, hub.isRunning(updated.id), 'vibe') });
+    res.json({
+      session: toMeta(updated, hub.isRunning(updated.id), 'vibe', hub.hasActiveBackgroundTasks(updated.id)),
+    });
   });
 
   // Favorite/pin toggle. A standalone id set (like `hidden`) so it works for
@@ -1233,6 +1327,69 @@ export function createApiRouter(): Router {
   // Surface available permission modes for the UI.
   router.get('/meta/permission-modes', (_req, res) => {
     res.json({ permissionModes });
+  });
+
+  // -- Vibot (the separate assistant interface) -----------------------------
+  // Its own config (LLM API + system prompt), conversations, and memories.
+  // The API key is masked on read; an empty apiKey on write keeps the stored one.
+
+  router.get('/vibot/config', (_req, res) => {
+    res.json({ config: vibotConfigClient(loadVibotConfig()) });
+  });
+
+  router.put('/vibot/config', (req, res) => {
+    const parsed = z
+      .object({
+        baseUrl: z.string().optional(),
+        apiKey: z.string().optional(),
+        model: z.string().optional(),
+        systemPrompt: z.string().optional(),
+        temperature: z.number().min(0).max(2).optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid config' });
+      return;
+    }
+    const updated = updateVibotConfig(parsed.data);
+    res.json({ config: vibotConfigClient(updated) });
+  });
+
+  router.get('/vibot/conversations', (_req, res) => {
+    res.json({ convs: vibotHub.listConversations() });
+  });
+
+  router.post('/vibot/conversations', (req, res) => {
+    const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
+    const conv = vibotHub.createConversation(title);
+    res.json({ conv });
+  });
+
+  router.patch('/vibot/conversations/:id', (req, res) => {
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    if (!title) {
+      res.status(400).json({ error: 'title required' });
+      return;
+    }
+    const conv = vibotHub.renameConversation(req.params.id, title);
+    if (!conv) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    res.json({ conv });
+  });
+
+  router.delete('/vibot/conversations/:id', (req, res) => {
+    vibotHub.deleteConversation(req.params.id);
+    res.json({ ok: true });
+  });
+
+  router.get('/vibot/conversations/:id/messages', async (req, res) => {
+    res.json(await vibotHub.snapshot(req.params.id));
+  });
+
+  router.get('/vibot/memories', (_req, res) => {
+    res.json({ memories: memoryStore.list() });
   });
 
   return router;

@@ -9,6 +9,7 @@ export interface MenuItem {
   label: string;
   hint?: string;
   active?: boolean;
+  icon?: ReactNode;
 }
 
 export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', searchable = false, allowCustom = false, customLabel }: {
@@ -119,6 +120,7 @@ export function Menu({ trigger, triggerLabel, items, onSelect, align = 'left', s
                 }}
                 className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-ink-700/45"
               >
+                {item.icon && <span className="shrink-0 text-slate-400">{item.icon}</span>}
                 <span className="flex-1">
                   <span className="block text-[13px] text-slate-200">{item.label}</span>
                   {item.hint && <span className="block text-[11px] text-slate-500">{item.hint}</span>}

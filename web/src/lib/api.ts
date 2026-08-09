@@ -15,8 +15,13 @@ import type {
   SkillDetail,
   SkillEntry,
   SkillScope,
+  ConfigFileDetail,
+  ConfigFileEntry,
   SessionMeta,
   SessionPreset,
+  VibotConfigClient,
+  VibotConvMeta,
+  VibotMemory,
 } from '@shared/protocol';
 import type { ModelOption, PermissionOption } from './format';
 
@@ -171,6 +176,23 @@ export const api = {
     return request<{ ok: boolean }>(`/skills?${qs.toString()}`, { method: 'DELETE' });
   },
 
+  // -- Agent config files (raw-text view/edit, local + remote) ----------------
+
+  listAgentConfig: (agent: AgentKind, host?: string) => {
+    const qs = new URLSearchParams({ agent });
+    if (host) qs.set('host', host);
+    return request<{ files: ConfigFileEntry[] }>(`/agent-config?${qs.toString()}`).then((r) => r.files);
+  },
+
+  readAgentConfig: (args: { agent: AgentKind; host?: string; id: string }) => {
+    const qs = new URLSearchParams({ agent: args.agent, id: args.id });
+    if (args.host) qs.set('host', args.host);
+    return request<{ file: ConfigFileDetail }>(`/agent-config/read?${qs.toString()}`).then((r) => r.file);
+  },
+
+  saveAgentConfig: (input: { agent: AgentKind; host?: string; id: string; content: string }) =>
+    request<{ file: ConfigFileDetail }>('/agent-config', { method: 'POST', body: JSON.stringify(input) }).then((r) => r.file),
+
   latestAgentVersions: () =>
     request<{ versions: AgentLatestVersions }>('/agents/latest').then((r) => r.versions),
 
@@ -284,4 +306,26 @@ export const api = {
       return res.json();
     });
   },
+
+  // -- Vibot (the separate assistant interface) ------------------------------
+  // Its own config (LLM API + system prompt), conversations, and memories.
+
+  getVibotConfig: () => request<{ config: VibotConfigClient }>('/vibot/config').then((r) => r.config),
+
+  saveVibotConfig: (input: { baseUrl?: string; apiKey?: string; model?: string; systemPrompt?: string; temperature?: number }) =>
+    request<{ config: VibotConfigClient }>('/vibot/config', { method: 'PUT', body: JSON.stringify(input) }).then((r) => r.config),
+
+  listVibotConversations: () => request<{ convs: VibotConvMeta[] }>('/vibot/conversations').then((r) => r.convs),
+
+  createVibotConversation: (title?: string) =>
+    request<{ conv: VibotConvMeta }>('/vibot/conversations', { method: 'POST', body: JSON.stringify({ title }) }).then((r) => r.conv),
+
+  renameVibotConversation: (id: string, title: string) =>
+    request<{ conv: VibotConvMeta }>(`/vibot/conversations/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }).then((r) => r.conv),
+
+  deleteVibotConversation: (id: string) => request<{ ok: boolean }>(`/vibot/conversations/${id}`, { method: 'DELETE' }),
+
+  getVibotMessages: (id: string) => request<{ blocks: ChatBlock[]; seq: number }>(`/vibot/conversations/${id}/messages`),
+
+  listVibotMemories: () => request<{ memories: VibotMemory[] }>('/vibot/memories').then((r) => r.memories),
 };

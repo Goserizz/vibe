@@ -1,0 +1,257 @@
+import { create } from 'zustand';
+import type {
+  ServerEvent,
+  VibotConfigClient,
+  VibotConvMeta,
+  VibotMemory,
+} from '@shared/protocol';
+import { api, ApiError } from '../lib/api';
+import { emptyView, reduceView, viewFromBlocks, type SessionView } from './blocks';
+// The single WebSocket is owned by the coding store; reach it via this accessor
+// (avoids a second socket). This creates a store↔vibot import cycle that is
+// safe because neither module uses the other's binding at load time.
+import { getSocket } from './store';
+
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+
+/**
+ * Separate store for the Vibot assistant interface. It never touches the coding
+ * `sessions`/`views` in `store.ts`: Vibot conversations live in their own
+ * `convs` list and `views` map, fed by the `vibot_*` WS frames the socket splits
+ * out in lib/ws.ts. The socket itself is owned by the coding store; we reach it
+ * through the `getSocket()` accessor.
+ */
+interface VibotState {
+  loaded: boolean;
+  convs: VibotConvMeta[];
+  activeConvId: string | null;
+  views: Record<string, SessionView>;
+  config: VibotConfigClient | null;
+  memories: VibotMemory[];
+  toast: string | null;
+
+  init: () => Promise<void>;
+  handleBatch: (events: ServerEvent[]) => void;
+  onReconnect: () => void;
+  loadConfig: () => Promise<void>;
+  saveConfig: (input: { baseUrl?: string; apiKey?: string; model?: string; systemPrompt?: string; temperature?: number }) => Promise<boolean>;
+  loadMemories: () => Promise<void>;
+  newConversation: () => Promise<void>;
+  openConversation: (id: string) => Promise<void>;
+  renameConversation: (id: string, title: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
+  sendMessage: (text: string) => void;
+  abort: () => void;
+  setToast: (msg: string | null) => void;
+}
+
+function sortConvs(convs: VibotConvMeta[]): VibotConvMeta[] {
+  return [...convs].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export const useVibotStore = create<VibotState>((set, get) => ({
+  loaded: false,
+  convs: [],
+  activeConvId: null,
+  views: {},
+  config: null,
+  memories: [],
+  toast: null,
+
+  async init() {
+    if (get().loaded) return;
+    const [config, convs, memories] = await Promise.all([
+      api.getVibotConfig().catch(() => null),
+      api.listVibotConversations().catch(() => []),
+      api.listVibotMemories().catch(() => []),
+    ]);
+    set({ loaded: true, config, convs: sortConvs(convs), memories });
+  },
+
+  handleBatch(events) {
+    const state = get();
+    const views = { ...state.views };
+    let convs = state.convs;
+    let convsDirty = false;
+    const setRunning: Record<string, boolean> = {};
+    const resetIds: string[] = [];
+
+    for (const msg of events) {
+      switch (msg.t) {
+        case 'vibot_event': {
+          const view = views[msg.convId] ?? emptyView();
+          views[msg.convId] = reduceView(view, [{ seq: msg.seq, ev: msg.ev }]);
+          break;
+        }
+        case 'vibot_subscribed':
+          setRunning[msg.convId] = msg.running;
+          if (msg.reset) resetIds.push(msg.convId);
+          break;
+        case 'vibot_conv_meta': {
+          const others = convs.filter((c) => c.id !== msg.conv.id);
+          convs = sortConvs([msg.conv, ...others]);
+          convsDirty = true;
+          break;
+        }
+        case 'vibot_conv_removed':
+          convs = convs.filter((c) => c.id !== msg.convId);
+          convsDirty = true;
+          break;
+        case 'vibot_conv_list':
+          convs = sortConvs(msg.convs);
+          convsDirty = true;
+          break;
+        case 'error':
+          set({ toast: msg.message });
+          break;
+      }
+    }
+
+    set((s) => {
+      for (const id of Object.keys(setRunning)) {
+        const v = views[id] ?? emptyView();
+        views[id] = { ...v, running: setRunning[id] };
+      }
+      return { views, convs: convsDirty ? convs : s.convs };
+    });
+
+    for (const id of resetIds) void reloadAndResubscribe(id);
+  },
+
+  onReconnect() {
+    void get().init().then(() => {
+      const id = get().activeConvId;
+      if (id) void get().openConversation(id);
+    });
+  },
+
+  async loadConfig() {
+    try {
+      set({ config: await api.getVibotConfig() });
+    } catch {
+      /* ignore */
+    }
+  },
+
+  async saveConfig(input) {
+    try {
+      const config = await api.saveVibotConfig(input);
+      set({ config });
+      return true;
+    } catch (err) {
+      set({ toast: err instanceof ApiError ? err.message : 'Failed to save Vibot config' });
+      return false;
+    }
+  },
+
+  async loadMemories() {
+    try {
+      set({ memories: await api.listVibotMemories() });
+    } catch {
+      /* ignore */
+    }
+  },
+
+  async newConversation() {
+    try {
+      const conv = await api.createVibotConversation();
+      set((s) => ({ convs: sortConvs([conv, ...s.convs.filter((c) => c.id !== conv.id)]) }));
+      await get().openConversation(conv.id);
+    } catch (err) {
+      set({ toast: err instanceof ApiError ? err.message : 'Failed to create conversation' });
+    }
+  },
+
+  async openConversation(id) {
+    const prev = get().activeConvId;
+    if (prev && prev !== id) {
+      getSocket()?.send({ t: 'vibot_unsubscribe', convId: prev });
+    }
+    set({ activeConvId: id });
+
+    const existing = get().views[id];
+    if (!existing?.loaded) {
+      try {
+        const { blocks, seq } = await api.getVibotMessages(id);
+        const running = get().convs.find((c) => c.id === id)?.running ?? false;
+        set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
+        getSocket()?.send({ t: 'vibot_subscribe', convId: id, lastSeq: seq });
+        return;
+      } catch {
+        set({ toast: 'Failed to load conversation' });
+        return;
+      }
+    }
+    getSocket()?.send({ t: 'vibot_subscribe', convId: id, lastSeq: existing.lastSeq });
+  },
+
+  async renameConversation(id, title) {
+    try {
+      const conv = await api.renameVibotConversation(id, title);
+      set((s) => ({ convs: sortConvs(s.convs.map((c) => (c.id === id ? conv : c))) }));
+    } catch {
+      set({ toast: 'Rename failed' });
+    }
+  },
+
+  async deleteConversation(id) {
+    try {
+      await api.deleteVibotConversation(id);
+    } catch {
+      /* server may already be gone */
+    }
+    set((s) => {
+      const convs = s.convs.filter((c) => c.id !== id);
+      const views = { ...s.views };
+      delete views[id];
+      const activeConvId = s.activeConvId === id ? (convs[0]?.id ?? null) : s.activeConvId;
+      return { convs, views, activeConvId };
+    });
+    const next = get().activeConvId;
+    if (next) void get().openConversation(next);
+  },
+
+  sendMessage(text) {
+    const trimmed = text.trim();
+    const id = get().activeConvId;
+    if (!trimmed || !id) return;
+    const clientMsgId = uid();
+    // Optimistic: show the user's message + running state immediately.
+    set((s) => {
+      const view = s.views[id] ?? emptyView();
+      const seq = view.lastSeq;
+      const next = reduceView(view, [
+        { seq, ev: { k: 'block', block: { id: clientMsgId, kind: 'user', text: trimmed, ts: Date.now() } } },
+        { seq, ev: { k: 'run_state', running: true } },
+      ]);
+      return { views: { ...s.views, [id]: next } };
+    });
+    getSocket()?.send({ t: 'vibot_send', convId: id, clientMsgId, text: trimmed });
+  },
+
+  abort() {
+    const id = get().activeConvId;
+    if (id) getSocket()?.send({ t: 'vibot_abort', convId: id });
+  },
+
+  setToast(msg) {
+    set({ toast: msg });
+  },
+}));
+
+/** Reload transcript then resubscribe (stale-replay recovery). */
+async function reloadAndResubscribe(id: string): Promise<void> {
+  try {
+    const { blocks, seq } = await api.getVibotMessages(id);
+    const running = useVibotStore.getState().convs.find((c) => c.id === id)?.running ?? false;
+    useVibotStore.setState((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
+    getSocket()?.send({ t: 'vibot_subscribe', convId: id, lastSeq: seq });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Entry point the coding store wires as the socket's `onVibotBatch` handler. */
+export function vibotHandleBatch(events: ServerEvent[]): void {
+  useVibotStore.getState().handleBatch(events);
+}

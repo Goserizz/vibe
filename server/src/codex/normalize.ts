@@ -33,6 +33,12 @@ function parseArgs(raw: unknown): unknown {
   }
 }
 
+function displayValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+}
+
 /** Join every text-like content part of a message into one string. */
 function joinContent(content: any, want: string[]): string {
   if (!Array.isArray(content)) return '';
@@ -71,8 +77,10 @@ export function parseCodexResponseItem(item: any): ParsedItem[] {
     return [];
   }
   if (type === 'reasoning') {
-    const summary = joinContent(item.summary, ['summary_text', 'text']);
-    const body = joinContent(item.content, ['reasoning_text', 'text']);
+    const summary = joinContent(item.summary, ['summary_text', 'text'])
+      || (Array.isArray(item.summary) ? item.summary.filter((part: unknown) => typeof part === 'string').join('\n') : '');
+    const body = joinContent(item.content, ['reasoning_text', 'text'])
+      || (Array.isArray(item.content) ? item.content.filter((part: unknown) => typeof part === 'string').join('\n') : '');
     // Rollout response_items store reasoning in `summary`/`content`, while the
     // current `codex exec --json` stream emits a flat `{ type: "reasoning",
     // text: "..." }` item. Accept both shapes so live summaries are not dropped.
@@ -100,6 +108,11 @@ export function parseCodexResponseItem(item: any): ParsedItem[] {
     const t = String(item.text ?? '').trim();
     return t ? [{ kind: 'assistant', text: t }] : [];
   }
+  // App Server v2 uses camelCase tagged items.
+  if (type === 'agentMessage') {
+    const t = String(item.text ?? '').trim();
+    return t ? [{ kind: 'assistant', text: t }] : [];
+  }
   if (type === 'agent_reasoning') {
     const t = String(item.text ?? '').trim();
     return t ? [{ kind: 'thinking', text: t }] : [];
@@ -116,6 +129,18 @@ export function parseCodexResponseItem(item: any): ParsedItem[] {
     }
     return parts;
   }
+  if (type === 'commandExecution') {
+    const id = String(item.id ?? '');
+    if (!id) return [];
+    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name: 'shell', input: { command: item.command, cwd: item.cwd } }];
+    const done = item.status === 'completed' || item.status === 'failed' || item.exitCode != null;
+    if (done) {
+      const out = typeof item.aggregatedOutput === 'string' && item.aggregatedOutput.length ? item.aggregatedOutput : '(no output)';
+      const isError = item.status === 'failed' || (typeof item.exitCode === 'number' && item.exitCode !== 0);
+      parts.push({ kind: 'toolResult', id, content: out, isError });
+    }
+    return parts;
+  }
   if (type === 'file_change') {
     const id = String(item.id ?? '');
     if (!id) return [];
@@ -124,6 +149,52 @@ export function parseCodexResponseItem(item: any): ParsedItem[] {
     if (item.status === 'completed') {
       const summary = changes.length ? changes.map((c: any) => `${c.kind || 'change'} ${c.path}`).join('\n') : '(no changes)';
       parts.push({ kind: 'toolResult', id, content: summary, isError: false });
+    }
+    return parts;
+  }
+  if (type === 'fileChange') {
+    const id = String(item.id ?? '');
+    if (!id) return [];
+    const changes = Array.isArray(item.changes) ? item.changes : [];
+    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name: 'edit', input: { changes: changes.map((c: any) => ({ path: c.path, kind: c.kind })) } }];
+    if (item.status === 'completed' || item.status === 'failed') {
+      const summary = changes.length ? changes.map((c: any) => `${c.kind || 'change'} ${c.path}`).join('\n') : '(no changes)';
+      parts.push({ kind: 'toolResult', id, content: summary, isError: item.status === 'failed' });
+    }
+    return parts;
+  }
+  if (type === 'mcpToolCall') {
+    const id = String(item.id ?? '');
+    if (!id) return [];
+    const name = [item.server, item.tool].filter(Boolean).join('.') || 'mcp';
+    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name, input: item.arguments ?? {} }];
+    if (item.status === 'completed' || item.status === 'failed') {
+      const isError = item.status === 'failed' || item.error != null;
+      parts.push({ kind: 'toolResult', id, content: displayValue(item.error ?? item.result) || '(no output)', isError });
+    }
+    return parts;
+  }
+  if (type === 'dynamicToolCall') {
+    const id = String(item.id ?? '');
+    if (!id) return [];
+    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name: String(item.tool ?? 'tool'), input: item.arguments ?? {} }];
+    if (item.status === 'completed' || item.status === 'failed') {
+      const isError = item.status === 'failed' || item.success === false;
+      parts.push({ kind: 'toolResult', id, content: displayValue(item.contentItems) || (isError ? 'failed' : '(no output)'), isError });
+    }
+    return parts;
+  }
+  if (type === 'collabToolCall') {
+    const id = String(item.id ?? '');
+    if (!id) return [];
+    const parts: ParsedItem[] = [{
+      kind: 'toolCall',
+      id,
+      name: String(item.tool ?? 'agent'),
+      input: { prompt: item.prompt, receiverThreadIds: item.receiverThreadIds, model: item.model },
+    }];
+    if (item.status === 'completed' || item.status === 'failed') {
+      parts.push({ kind: 'toolResult', id, content: displayValue(item.agentsStates) || item.status, isError: item.status === 'failed' });
     }
     return parts;
   }

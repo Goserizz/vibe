@@ -11,6 +11,8 @@ import { isClaudeSessionId, type DiscoveredSession } from '../sessions/discovery
 
 const MAX_FILES = 2000;
 const HEAD_BYTES = 64 * 1024;
+/** Context Codex injects as a "user" item — never the conversation's title. */
+const INJECTED_PREAMBLE = /^<(environment_context|recommended_plugins|user_instructions)\b/;
 
 /** Read up to HEAD_BYTES of a file, split into trimmed lines. */
 function readHeadLines(file: string): string[] {
@@ -27,7 +29,7 @@ function readHeadLines(file: string): string[] {
   }
 }
 
-interface RolloutMeta {
+export interface RolloutMeta {
   id: string;
   cwd: string;
   createdAt: number;
@@ -35,9 +37,11 @@ interface RolloutMeta {
   messageCount: number;
 }
 
-/** Parse a rollout's head for id/cwd/timestamp + the first user message (title). */
-function readRolloutMeta(file: string): RolloutMeta | null {
-  const lines = readHeadLines(file);
+/**
+ * Parse a rollout's head for id/cwd/timestamp + the first user message (title).
+ * Pure so the same logic serves local files and heads shipped over SSH.
+ */
+export function parseCodexRolloutHead(lines: string[]): RolloutMeta | null {
   let id = '';
   let cwd = '';
   let createdAt = 0;
@@ -56,9 +60,9 @@ function readRolloutMeta(file: string): RolloutMeta | null {
       if (payload?.type === 'message' && payload.role === 'user' && Array.isArray(payload.content)) {
         for (const part of payload.content) {
           if (part?.type === 'input_text' && typeof part.text === 'string') {
-            // Skip Codex's injected <environment_context> block; take the real prompt.
+            // Skip Codex's injected preamble blocks; take the real prompt.
             const t = part.text.trim();
-            if (t && !t.startsWith('<environment_context>')) { title = t.replace(/\s+/g, ' ').slice(0, 80); break; }
+            if (t && !INJECTED_PREAMBLE.test(t)) { title = t.replace(/\s+/g, ' ').slice(0, 80); break; }
           }
         }
       }
@@ -79,6 +83,20 @@ function parseIso(v: unknown): number {
   if (typeof v !== 'string') return 0;
   const t = Date.parse(v);
   return Number.isFinite(t) ? t : 0;
+}
+
+/** Turn a parsed rollout head + its mtime into a discovered session. */
+export function codexMetaToDiscovered(meta: RolloutMeta, mtime: number): DiscoveredSession | null {
+  if (!isClaudeSessionId(meta.id)) return null; // expect a UUID
+  return {
+    claudeSessionId: meta.id,
+    cwd: meta.cwd,
+    title: meta.title,
+    model: config.defaultCodexModel,
+    createdAt: meta.createdAt || mtime,
+    updatedAt: mtime || meta.createdAt,
+    messageCount: meta.messageCount,
+  };
 }
 
 /** Walk the sessions dir for rollout JSONL files (bounded). */
@@ -113,19 +131,9 @@ function mtimeMs(file: string): number {
 }
 
 function toDiscovered(file: string): DiscoveredSession | null {
-  const meta = readRolloutMeta(file);
+  const meta = parseCodexRolloutHead(readHeadLines(file));
   if (!meta) return null;
-  if (!isClaudeSessionId(meta.id)) return null; // expect a UUID
-  const mtime = mtimeMs(file);
-  return {
-    claudeSessionId: meta.id,
-    cwd: meta.cwd,
-    title: meta.title,
-    model: config.defaultCodexModel,
-    createdAt: meta.createdAt || mtime,
-    updatedAt: mtime || meta.createdAt,
-    messageCount: meta.messageCount,
-  };
+  return codexMetaToDiscovered(meta, mtimeMs(file));
 }
 
 /** Discover local Codex sessions whose cwd we can read (most-recent first). */

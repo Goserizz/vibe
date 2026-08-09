@@ -85,24 +85,27 @@ export function sshExec(
   const { bin, args } = sshArgv(target, remoteCmd);
   return new Promise((resolve) => {
     const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
+    // Collect output as Buffer chunks and concat once at the end. String += on
+    // a multi-MB stream (large remote transcripts) is O(n²) from repeated
+    // reallocation; Buffer push + concat keeps it linear.
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGKILL');
     }, opts.timeoutMs ?? 20_000);
 
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('error', (e) => {
+    child.stdout.on('data', (d: Buffer) => outChunks.push(d));
+    child.stderr.on('data', (d: Buffer) => errChunks.push(d));
+    const finish = (code: number | null, extraErr = ''): void => {
       clearTimeout(timer);
-      resolve({ code: -1, stdout, stderr: `${stderr}${e instanceof Error ? e.message : String(e)}`, timedOut });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr, timedOut });
-    });
+      const stdout = Buffer.concat(outChunks).toString('utf8');
+      const stderr = Buffer.concat(errChunks).toString('utf8');
+      resolve({ code, stdout, stderr: extraErr ? `${stderr}${extraErr}` : stderr, timedOut });
+    };
+    child.on('error', (e) => finish(-1, e instanceof Error ? e.message : String(e)));
+    child.on('close', (code) => finish(code));
 
     if (opts.input != null) child.stdin.write(opts.input);
     child.stdin.end();

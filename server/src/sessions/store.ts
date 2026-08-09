@@ -6,7 +6,7 @@ import { encodeRemoteId } from '../remote/sessionId.js';
 import { patchSessionListCache, removeSessionListCache, upsertSessionListCache } from './listCache.js';
 import type { AgentKind, EffortLevel, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
 
-/** Persisted shape (a superset of SessionMeta minus the live `running` flag). */
+/** Persisted shape (a superset of SessionMeta minus its live run/task flags). */
 export interface StoredSession {
   id: string;
   claudeSessionId?: string;
@@ -222,6 +222,7 @@ export function toMeta(
   s: StoredSession,
   running: boolean,
   source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' = 'vibe',
+  backgroundTasksRunning = false,
 ): SessionMeta {
   return {
     id: s.id,
@@ -235,6 +236,7 @@ export function toMeta(
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     messageCount: s.messageCount,
+    backgroundTasksRunning,
     running,
     source,
     host: s.host ?? config.localName,

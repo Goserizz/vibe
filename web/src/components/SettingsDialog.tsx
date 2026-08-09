@@ -1,4 +1,4 @@
-import { X, Settings, Volume2, Play, Plug, Bookmark, Palette, Sparkles } from 'lucide-react';
+import { X, Settings, Volume2, Play, Plug, Bookmark, Palette, Sparkles, FileCog } from 'lucide-react';
 import { useStore } from '../store/store';
 import { NOTIFY_SOUNDS, playNotifySound, type NotifySoundId } from '../lib/notifySound';
 import { ACCENT_PRESETS } from '../lib/systemAccent';
@@ -6,6 +6,7 @@ import { cn } from '../lib/format';
 import { McpServerRegistry, McpEnableList } from './McpControls';
 import { PresetRegistry } from './PresetControls';
 import { SkillRegistry } from './SkillControls';
+import { AgentConfigRegistry } from './AgentConfigControls';
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const notifySound = useStore((s) => s.notifySound);
@@ -202,6 +203,21 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 Skills compiled into an agent binary aren&apos;t on disk and can&apos;t be listed.
               </p>
               <SkillRegistry />
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <FileCog className="h-3.5 w-3.5 text-slate-400" />
+                <h3 className="text-xs font-medium text-slate-400">Agent config files</h3>
+              </div>
+              <p className="mb-3 text-[12px] leading-relaxed text-slate-600">
+                View and edit each agent&apos;s main config (e.g. Claude&apos;s{' '}
+                <span className="font-mono">~/.claude/settings.json</span>, Codex&apos;s{' '}
+                <span className="font-mono">~/.codex/config.toml</span>). Files are stored verbatim — JSON or TOML, comments
+                and formatting preserved. These often hold secrets (API keys, tokens); edits apply immediately and agents
+                pick them up on their next start or turn.
+              </p>
+              <AgentConfigRegistry />
             </section>
           </div>
         </div>

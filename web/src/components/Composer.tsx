@@ -27,6 +27,9 @@ interface PendingAttachment {
 
 export function Composer({ sessionId }: { sessionId: string }) {
   const running = useStore((s) => s.views[sessionId]?.running ?? false);
+  const activeTaskCount = useStore((s) => (s.tasks[sessionId] ?? []).filter((task) => (
+    task.status === 'pending' || task.status === 'running' || task.status === 'paused'
+  )).length);
   const agentName = useStore((s) => agentLabel(s.sessions.find((session) => session.id === sessionId)?.agent ?? 'claude'));
   const sendMessage = useStore((s) => s.sendMessage);
   const abort = useStore((s) => s.abort);
@@ -232,13 +235,18 @@ export function Composer({ sessionId }: { sessionId: string }) {
                   endedAtRef.current = Date.now();
                 }}
                 rows={1}
-                placeholder={running ? `${agentName} is working…` : isDesktop ? `Message ${agentName} — Enter to send, Shift+Enter for newline` : `Message ${agentName}`}
+                placeholder={running
+                  ? `${agentName} is working…`
+                  : activeTaskCount
+                    ? `Message ${agentName} — ${activeTaskCount} background task${activeTaskCount === 1 ? '' : 's'} still running`
+                    : isDesktop ? `Message ${agentName} — Enter to send, Shift+Enter for newline` : `Message ${agentName}`}
                 className="max-h-[220px] flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none"
               />
               {running ? (
                 <button
                   onClick={abort}
-                  title="Stop"
+                  title="Stop current response"
+                  aria-label="Stop current response"
                   className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-500/90 text-[#fff] transition hover:bg-rose-500"
                 >
                   <Square className="h-4 w-4 fill-current" />

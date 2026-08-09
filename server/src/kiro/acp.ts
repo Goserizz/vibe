@@ -152,7 +152,7 @@ export class KiroAcpClient {
   private closed = false;
   private sessionId: string | null = null;
   private stream: { id: string; kind: 'assistant' | 'thinking'; text: string } | null = null;
-  private tools = new Map<string, { name: string; input: Record<string, unknown> }>();
+  private tools = new Map<string, { name: string; rawName?: string; input: Record<string, unknown> }>();
 
   constructor(
     private readonly opts: KiroAcpRunOptions,
@@ -307,8 +307,12 @@ export class KiroAcpClient {
     }
     if (typeof message.method !== 'string') return;
 
-    if (message.method === 'session/update') {
+    // Kiro sends standard updates on `session/update` and a few extra ones on a
+    // vendor-prefixed method (`_kiro.dev/session/update`) — including the
+    // `tool_call_chunk` that carries the real tool name.
+    if (message.method === 'session/update' || message.method === '_kiro.dev/session/update') {
       if (!this.ignoreUpdates) this.handleUpdate(message.params?.update);
+      if (message.id != null) this.respond(message.id, {});
       return;
     }
     if (message.id == null) return;
@@ -338,15 +342,28 @@ export class KiroAcpClient {
       if (text) this.segment('thinking', text);
       return;
     }
+    if (kind === 'tool_call_chunk') {
+      // Announced before the tool_call itself and the only place the actual tool
+      // name appears (`todo_list`) — a tool_call's `title` is prose ("Creating
+      // task list: …"), which the UI can't map to a kind. Remember it as the
+      // fallback name for this call.
+      const id = String(update.toolCallId ?? '');
+      const rawName = toolNameFromUpdate(update);
+      if (id && rawName) {
+        const previous = this.tools.get(id);
+        this.tools.set(id, { name: previous?.name ?? rawName, rawName, input: previous?.input ?? {} });
+      }
+      return;
+    }
     if (kind === 'tool_call' || kind === 'tool_call_update') {
       this.flushStream();
       const id = String(update.toolCallId ?? '');
       if (!id) return;
       const previous = this.tools.get(id);
-      const name = toolNameFromUpdate(update) ?? previous?.name ?? 'tool';
+      const name = toolNameFromUpdate(update) ?? previous?.rawName ?? previous?.name ?? 'tool';
       const enriched = enrichToolInput(update);
       const input = enriched ? { ...(previous?.input ?? {}), ...enriched } : (previous?.input ?? {});
-      this.tools.set(id, { name, input });
+      this.tools.set(id, { name, rawName: previous?.rawName, input });
       const { content, isError } = toolResultFromUpdate(update);
       const status = update.status === 'completed' ? 'done' : update.status === 'failed' || isError ? 'error' : 'running';
       this.cb.onEvent({

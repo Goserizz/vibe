@@ -3,15 +3,50 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, sshConnectPrefix } from '../remote/ssh.js';
-import { DEFAULT_CONTEXT_WINDOW, type McpServerDef, type PermissionDecision, type PermissionMode, type PermissionRequest, type TokenUsage } from '../../../shared/protocol.js';
+import { DEFAULT_CONTEXT_WINDOW, type ChatBlock, type McpServerDef, type PermissionDecision, type PermissionMode, type PermissionRequest, type TokenUsage } from '../../../shared/protocol.js';
 import type { RunCallbacks } from '../claude/types.js';
 import { toAcpMcpServers } from '../mcp/apply.js';
+import { KimiTaskMonitor } from './tasks.js';
 
 type JsonRpcId = number | string;
 
 interface PendingRpc {
   resolve: (value: any) => void;
   reject: (error: Error) => void;
+}
+
+interface JsonRpcErrorPayload {
+  code?: unknown;
+  message?: unknown;
+  data?: unknown;
+}
+
+class AcpRpcError extends Error {
+  readonly code: unknown;
+  readonly data: unknown;
+
+  constructor(payload: JsonRpcErrorPayload) {
+    super(typeof payload.message === 'string' ? payload.message : JSON.stringify(payload));
+    this.name = 'AcpRpcError';
+    this.code = payload.code;
+    this.data = payload.data;
+  }
+}
+
+function busyTurn(error: unknown): { turnId?: string } | undefined {
+  if (error instanceof AcpRpcError) {
+    const data = error.data && typeof error.data === 'object'
+      ? error.data as { code?: unknown; details?: { turnId?: unknown } }
+      : undefined;
+    if (data?.code === 'turn.agent_busy') {
+      const value = data.details?.turnId;
+      return { turnId: value == null ? undefined : String(value) };
+    }
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/turn\.agent_busy|Cannot launch a new turn while another turn/i.test(message)) return undefined;
+  const match = message.match(/turn \(ID ([^)]+)\) is active/i);
+  return { turnId: match?.[1] };
 }
 
 export interface KimiAcpRunOptions {
@@ -111,6 +146,12 @@ function enrichToolInput(update: any): Record<string, unknown> | null {
   return Object.keys(input).length ? input : null;
 }
 
+function taskIdFromText(text: string): string | undefined {
+  const match = text.match(/\b(?:bash|agent|task)-[a-z0-9][a-z0-9_-]*\b/i)
+    ?? text.match(/(?:task[_\s-]*id|task)\s*[:=]\s*["']?([a-z0-9][a-z0-9_-]*)/i);
+  return match ? String(match[1] ?? match[0]) : undefined;
+}
+
 function permissionToKimiMode(mode: PermissionMode): string {
   if (mode === 'plan') return 'plan';
   if (mode === 'acceptEdits') return 'auto';
@@ -118,7 +159,8 @@ function permissionToKimiMode(mode: PermissionMode): string {
   return 'default';
 }
 
-/** One Kimi ACP process for one turn (initialize → new/resume → configure → prompt). */
+/** One task-aware Kimi ACP connection. It accepts serialized follow-up prompts
+ *  while native background tasks keep the session alive. */
 export class KimiAcpClient {
   private child: ChildProcess | null = null;
   private nextId = 1;
@@ -131,6 +173,14 @@ export class KimiAcpClient {
   private sessionId: string | null = null;
   private stream: { id: string; kind: 'assistant' | 'thinking'; text: string } | null = null;
   private tools = new Map<string, { name: string; input: Record<string, unknown> }>();
+  private taskMonitor: KimiTaskMonitor | undefined;
+  private readonly promptQueue: string[] = [];
+  private wakeIdle: (() => void) | undefined;
+  private acceptingPrompts = false;
+  private promptActive = false;
+  private nativeTurnActive = false;
+  private interruptRequested = false;
+  private readonly nativeBlockSignatures = new Map<string, string>();
 
   constructor(
     private readonly opts: KimiAcpRunOptions,
@@ -138,13 +188,33 @@ export class KimiAcpClient {
   ) {}
 
   abort(): void {
-    this.aborted = true;
-    if (this.sessionId && this.child?.stdin?.writable) this.notify('session/cancel', { sessionId: this.sessionId });
-    this.child?.kill('SIGTERM');
-    this.rejectAll(new Error('aborted'));
+    if (this.aborted || this.closed) return;
+    // ACP session/cancel targets the active turn. Keep the ACP process and task
+    // monitor alive so detached work can finish and wake the original session.
+    this.interruptRequested = true;
+    this.interruptCurrentTurn();
+    this.wakeIdle?.();
+  }
+
+  private interruptCurrentTurn(): void {
+    if (!this.interruptRequested || !this.sessionId || (!this.promptActive && !this.nativeTurnActive)) return;
+    if (this.child?.stdin?.writable) this.notify('session/cancel', { sessionId: this.sessionId });
+  }
+
+  async stopTask(taskId: string): Promise<void> {
+    if (!this.taskMonitor) throw new Error('Kimi task control is unavailable for this session');
+    await this.taskMonitor.stopTask(taskId);
+  }
+
+  sendMessage(text: string): boolean {
+    if (!text.trim() || !this.acceptingPrompts || this.promptActive || this.aborted || this.closed) return false;
+    this.promptQueue.push(text);
+    this.wakeIdle?.();
+    return true;
   }
 
   async run(): Promise<{ error?: string }> {
+    const runStartedAt = Date.now() - 1_000;
     const spawnSpec = buildAcpSpawn(this.opts);
     if (!spawnSpec.bin) return { error: 'kimi not found — install Kimi Code or set KIMI_CLI_PATH' };
 
@@ -186,12 +256,34 @@ export class KimiAcpClient {
       this.cb.onClaudeSessionId(this.sessionId);
       await this.applySessionConfig();
 
-      const result = await this.request('session/prompt', {
-        sessionId: this.sessionId,
-        prompt: [{ type: 'text', text: this.opts.prompt }],
-      });
-      this.flushStream();
-      if (result?.usage) this.emitUsage(result.usage);
+      // Kimi persists native task state under the session. Watching that stable
+      // interface gives ACP clients the same task pane the TUI exposes, while
+      // keeping permission requests and Vibe-managed MCP servers on ACP.
+      this.taskMonitor = new KimiTaskMonitor(
+        this.sessionId,
+        this.cb.onTask ?? (() => undefined),
+        this.opts.remote?.sshTarget,
+        {
+          onNativeTurnStart: () => {
+            this.nativeTurnActive = true;
+            this.cb.onTurnState?.(true);
+            this.interruptCurrentTurn();
+            this.wakeIdle?.();
+          },
+          onNativeTurnBlocks: (_turnId, blocks) => this.emitNativeBlocks(blocks),
+          onNativeTurnComplete: (turnId, blocks, outcome) =>
+            this.completeNativeTurn(turnId, blocks, outcome),
+        },
+      );
+      // Establish EOF before launching the first ACP prompt. From this point on
+      // the monitor can distinguish Vibe-owned turns from native task/cron turns
+      // and can wait on the exact turn reported by `turn.agent_busy`.
+      await this.taskMonitor.scan();
+      this.taskMonitor.start();
+
+      this.acceptingPrompts = true;
+      await this.runPrompt(this.opts.prompt);
+      await this.serviceBackgroundActivity(runStartedAt);
       return {};
     } catch (error) {
       if (this.aborted) return {};
@@ -199,6 +291,9 @@ export class KimiAcpClient {
       const detail = cleanRemoteStderr(this.stderr);
       return { error: detail && !message.includes(detail) ? `${message}\n${detail}` : message };
     } finally {
+      this.acceptingPrompts = false;
+      this.wakeIdle?.();
+      this.taskMonitor?.dispose();
       this.flushStream();
       try {
         this.child?.stdin?.end();
@@ -209,6 +304,173 @@ export class KimiAcpClient {
       await exitPromise.catch(() => undefined);
       clearTimeout(killer);
     }
+  }
+
+  /** Keep ACP attached while tasks or Kimi-native turns are active. Kimi itself
+   *  steers terminal task notifications into the original session; injecting a
+   *  second synthetic prompt here races that native turn and duplicates work. */
+  private async serviceBackgroundActivity(since: number): Promise<void> {
+    const monitor = this.taskMonitor;
+    if (!monitor || !this.sessionId) return;
+    // Also adopt tasks that were already active when this turn began (for
+    // example after a Vibe restart). Once followed, keep watching until their
+    // native terminal update arrives; do not replay older settled history.
+    const followed = new Set<string>();
+    let quietScans = 0;
+
+    while (!this.aborted && !this.closed) {
+      const queuedBeforeScan = this.promptQueue.shift();
+      if (queuedBeforeScan) {
+        await this.runPrompt(queuedBeforeScan);
+        quietScans = 0;
+        continue;
+      }
+
+      await monitor.scan();
+      const tasks = monitor.tasks();
+      const byId = new Map(tasks.map((task) => [task.id, task]));
+      for (const task of tasks) {
+        if (task.status === 'pending' || task.status === 'running' || task.status === 'paused') followed.add(task.id);
+      }
+      const ids = [...new Set([...monitor.observedTaskIds(since), ...followed])];
+      const active = ids
+        .map((id) => byId.get(id))
+        .filter((task) => task && (task.status === 'pending' || task.status === 'running' || task.status === 'paused'));
+
+      const queued = this.promptQueue.shift();
+      if (queued) {
+        await this.runPrompt(queued);
+        quietScans = 0;
+        continue;
+      }
+
+      if (active.length || monitor.hasNativeTurn() || this.nativeTurnActive) {
+        quietScans = 0;
+        await this.waitForWork(monitor.pollIntervalMs);
+        continue;
+      }
+
+      // Allow the atomic task file a short window to appear after prompt
+      // completion; after two quiet scans this run is genuinely quiescent.
+      if (quietScans++ < 2) {
+        await this.waitForWork(monitor.pollIntervalMs);
+        continue;
+      }
+      return;
+    }
+  }
+
+  private async runPrompt(text: string): Promise<void> {
+    if (!this.sessionId) throw new Error('Kimi session is not ready');
+    // Stop may be clicked while ACP is still initializing, before session/prompt
+    // exists. Consume that request instead of starting an answer the user has
+    // already cancelled.
+    if (this.interruptRequested) {
+      this.interruptRequested = false;
+      this.cb.onTurnState?.(false);
+      return;
+    }
+    this.promptActive = true;
+    this.cb.onTurnState?.(true);
+    try {
+      let retry = 0;
+      while (!this.aborted && this.acceptingPrompts) {
+        const promptAttempt = this.taskMonitor?.beginPromptAttempt();
+        try {
+          const result = await this.request('session/prompt', {
+            sessionId: this.sessionId,
+            prompt: [{ type: 'text', text }],
+          });
+          this.taskMonitor?.finishPromptAttempt(promptAttempt, true);
+          this.flushStream();
+          if (result?.usage) this.emitUsage(result.usage);
+          return;
+        } catch (error) {
+          if (this.interruptRequested) {
+            this.taskMonitor?.finishPromptAttempt(promptAttempt, true);
+            log.debug('kimi reply interrupted');
+            return;
+          }
+          const busy = busyTurn(error);
+          this.taskMonitor?.finishPromptAttempt(promptAttempt, !busy);
+          if (!busy) throw error;
+          retry += 1;
+          log.debug(`kimi session busy${busy.turnId ? ` with native turn ${busy.turnId}` : ''}; queued prompt will retry`);
+
+          // Kimi persists an end-of-step record for agent-initiated task/cron
+          // turns even though ACP does not expose their lifecycle. Waiting on
+          // that exact turn gives us one clean retry instead of polling
+          // session/prompt (every rejected poll would append another record).
+          const observed = busy.turnId
+            ? await this.taskMonitor?.waitForTurnEnd(busy.turnId)
+            : false;
+          if (this.aborted || !this.acceptingPrompts || this.interruptRequested) return;
+          if (!observed) {
+            const backoff = Math.min(5_000, 500 * 2 ** Math.min(retry - 1, 4));
+            await this.waitForWork(backoff);
+          }
+        }
+      }
+    } finally {
+      this.flushStream();
+      this.promptActive = false;
+      this.interruptRequested = false;
+      if (!this.nativeTurnActive) this.cb.onTurnState?.(false);
+    }
+  }
+
+  private emitNativeBlocks(blocks: ChatBlock[]): void {
+    this.flushStream();
+    for (const block of blocks) {
+      const signature = JSON.stringify(block);
+      if (this.nativeBlockSignatures.get(block.id) === signature) continue;
+      this.nativeBlockSignatures.set(block.id, signature);
+      this.cb.onEvent({ k: 'block', block });
+    }
+  }
+
+  private completeNativeTurn(
+    turnId: string,
+    blocks: ChatBlock[],
+    outcome: 'completed' | 'cancelled' | 'interrupted',
+  ): void {
+    const interruptedByUser = this.interruptRequested;
+    this.emitNativeBlocks(blocks);
+    this.nativeTurnActive = false;
+    // When an ACP prompt is waiting behind this native turn, preserve the Stop
+    // marker so runPrompt exits instead of retrying that prompt immediately.
+    if (!this.promptActive) this.interruptRequested = false;
+    if (outcome === 'cancelled' && !interruptedByUser && !this.aborted && this.acceptingPrompts) {
+      // A native task notification can exhaust its tool loop and end in
+      // turn.cancel without producing a final answer. Retry only that failure
+      // mode, in the same session, after any user message already queued.
+      this.promptQueue.push(
+        `<background-task-followup turn-id="${turnId}">\n` +
+        'The automatic background-task follow-up was cancelled before a final response. ' +
+        'Inspect the latest task state and output, then give a concise final update. ' +
+        'Do not restart completed work unless it is necessary.\n' +
+        '</background-task-followup>',
+      );
+    }
+    // Keep the foreground state continuously busy if a fallback/user prompt is
+    // already queued; runPrompt will own the eventual true→false transition.
+    if (!this.promptActive && this.promptQueue.length === 0) this.cb.onTurnState?.(false);
+    this.wakeIdle?.();
+  }
+
+  private waitForWork(timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (this.wakeIdle === finish) this.wakeIdle = undefined;
+        resolve();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      this.wakeIdle = finish;
+    });
   }
 
   private async openSession(cwd: string): Promise<string> {
@@ -281,7 +543,7 @@ export class KimiAcpClient {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error?.message ?? JSON.stringify(message.error)));
+      if (message.error) pending.reject(new AcpRpcError(message.error as JsonRpcErrorPayload));
       else pending.resolve(message.result);
       return;
     }
@@ -345,6 +607,25 @@ export class KimiAcpClient {
       });
       if (status === 'done' || status === 'error') {
         this.cb.onEvent({ k: 'tool_result', toolUseId: id, content: content || (status === 'error' ? 'failed' : ''), isError: status === 'error' });
+        // Publish a provisional remote task immediately from the tool result;
+        // the SSH task monitor replaces it with authoritative status/output on
+        // its next scan (and later keeps the native wake turn attached).
+        const background = input.run_in_background === true || input.runInBackground === true;
+        const taskId = background && this.opts.remote ? taskIdFromText(content) : undefined;
+        if (taskId && this.cb.onTask) {
+          const description = String(input.description ?? input.command ?? input.prompt ?? `${name} background task`);
+          this.cb.onTask({
+            id: taskId,
+            agent: 'kimi',
+            kind: /agent/i.test(name) ? 'subagent' : 'command',
+            status: status === 'error' ? 'failed' : 'running',
+            description,
+            startedAt: Date.now(),
+            updatedAt: Date.now(),
+            output: content || undefined,
+            canStop: false,
+          });
+        }
       }
       return;
     }
