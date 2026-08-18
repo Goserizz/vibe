@@ -17,7 +17,7 @@ import {
   Image,
   ArrowLeftRight,
   Clock,
-} from 'lucide-react';
+} from '../lib/icons';
 import type {
   AssistantBlock,
   ChatBlock,
@@ -28,7 +28,7 @@ import type {
   UserBlock,
 } from '@shared/protocol';
 import { Markdown } from './Markdown';
-import { cn, formatTokens } from '../lib/format';
+import { beijingClock, cn, formatTokens } from '../lib/format';
 import { stripAttachments } from '../lib/attachments';
 
 export const BlockView = memo(function BlockView({ block }: { block: ChatBlock }) {
@@ -166,6 +166,106 @@ const TOOL_KIND_ALIASES: Record<string, ToolKind> = {
 export function toolKind(name: string): ToolKind {
   const key = String(name ?? '').toLowerCase().replace(/[_\-\s]/g, '');
   return TOOL_KIND_ALIASES[key] ?? 'other';
+}
+
+export type EditChange = { op: '+' | '-'; text: string };
+
+function looksLikeUnifiedDiff(text: string): boolean {
+  return text.includes('@@') || text.startsWith('---') || text.startsWith('diff ');
+}
+
+/** Added/removed lines only — no file headers, hunk marks, or context. */
+export function editChangeLines(resultText: string, input: unknown): EditChange[] {
+  let text = resultText;
+  if (text.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      if (parsed && typeof parsed.diffString === 'string') text = parsed.diffString;
+    } catch {
+      /* not a JSON envelope */
+    }
+  }
+  if (text && looksLikeUnifiedDiff(text)) {
+    const out: EditChange[] = [];
+    for (const line of text.split('\n')) {
+      if (
+        line.startsWith('+++') ||
+        line.startsWith('---') ||
+        line.startsWith('@@') ||
+        line.startsWith('diff ') ||
+        line.startsWith('index ')
+      ) {
+        continue;
+      }
+      if (line.startsWith('+')) out.push({ op: '+', text: line.slice(1) });
+      else if (line.startsWith('-')) out.push({ op: '-', text: line.slice(1) });
+    }
+    if (out.length) return out;
+  }
+  if (input && typeof input === 'object') {
+    const i = input as Record<string, unknown>;
+    const oldS = [i.old_string, i.oldString, i.old_str].find((v) => typeof v === 'string') as string | undefined;
+    const newS = [i.new_string, i.newString, i.new_str].find((v) => typeof v === 'string') as string | undefined;
+    if (oldS != null && newS != null) {
+      return [
+        ...oldS.split('\n').map((text) => ({ op: '-' as const, text })),
+        ...newS.split('\n').map((text) => ({ op: '+' as const, text })),
+      ];
+    }
+    if (Array.isArray(i.edits)) {
+      const out: EditChange[] = [];
+      for (const entry of i.edits) {
+        if (!entry || typeof entry !== 'object') continue;
+        const e = entry as Record<string, unknown>;
+        const o = [e.old_string, e.oldString, e.old_str].find((v) => typeof v === 'string') as string | undefined;
+        const n = [e.new_string, e.newString, e.new_str].find((v) => typeof v === 'string') as string | undefined;
+        if (o == null || n == null) continue;
+        out.push(
+          ...o.split('\n').map((text) => ({ op: '-' as const, text })),
+          ...n.split('\n').map((text) => ({ op: '+' as const, text })),
+        );
+      }
+      if (out.length) return out;
+    }
+  }
+  return [];
+}
+
+const WRITE_CONTENT_KEYS = ['contents', 'content', 'file_text', 'fileText', 'text'];
+
+function pickStringField(src: unknown, keys: string[]): string | undefined {
+  if (!src || typeof src !== 'object') return undefined;
+  const o = src as Record<string, unknown>;
+  const v = keys.map((k) => o[k]).find((x) => typeof x === 'string');
+  return typeof v === 'string' ? v : undefined;
+}
+
+/** Write is all additions — show the new file in green. */
+export function writeChangeLines(resultText: string, input: unknown): EditChange[] {
+  let content = pickStringField(input, WRITE_CONTENT_KEYS);
+  if (content == null && resultText.trim().startsWith('{')) {
+    try {
+      content = pickStringField(JSON.parse(resultText), WRITE_CONTENT_KEYS);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (content != null) return content.split('\n').map((text) => ({ op: '+' as const, text }));
+  return editChangeLines(resultText, input);
+}
+
+export function CompactEditDiff({ changes, className }: { changes: EditChange[]; className?: string }) {
+  if (changes.length === 0) return null;
+  return (
+    <pre className={cn('min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono', className)}>
+      {changes.map((c, idx) => (
+        <div key={idx} className={c.op === '+' ? 'text-emerald-300' : 'text-rose-300'}>
+          {c.op}
+          {c.text || ' '}
+        </div>
+      ))}
+    </pre>
+  );
 }
 
 /** First non-empty value among the given keys — detail extraction then works
@@ -306,14 +406,22 @@ export function toolMeta(name: string, input: unknown): ToolMeta {
 }
 
 function ToolView({ block }: { block: ToolBlock }) {
-  const [open, setOpen] = useState(false);
+  const kind = toolKind(block.name);
+  const fileChanges =
+    kind === 'edit'
+      ? editChangeLines(block.result ?? '', block.input)
+      : kind === 'write'
+        ? writeChangeLines(block.result ?? '', block.input)
+        : [];
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? fileChanges.length > 0;
   const meta = toolMeta(block.name, block.input);
   const Icon = meta.icon;
 
   return (
     <div className="animate-fade-in overflow-hidden rounded-xl border border-white/5 bg-ink-900/50">
       <button
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setManual(!open)}
         className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-ink-800/40"
       >
         <Icon className="h-4 w-4 shrink-0 text-slate-500" />
@@ -328,10 +436,16 @@ function ToolView({ block }: { block: ToolBlock }) {
       </button>
       {open && (
         <div className="space-y-2 border-t border-white/5 px-3 py-2.5">
-          <pre className="overflow-x-auto rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] leading-relaxed text-slate-400">
-            {JSON.stringify(block.input, null, 2)}
-          </pre>
-          <ToolResultBody block={block} />
+          {fileChanges.length > 0 ? (
+            <CompactEditDiff changes={fileChanges} className="max-h-80 text-[12px] leading-relaxed" />
+          ) : (
+            <>
+              <pre className="overflow-x-auto rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] leading-relaxed text-slate-400">
+                {JSON.stringify(block.input, null, 2)}
+              </pre>
+              <ToolResultBody block={block} />
+            </>
+          )}
         </div>
       )}
     </div>
@@ -355,16 +469,8 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function editSummary(p: Record<string, any>): string | undefined {
-  const add = typeof p.linesAdded === 'number' ? p.linesAdded : undefined;
-  const rem = typeof p.linesRemoved === 'number' ? p.linesRemoved : undefined;
-  if (add == null && rem == null) return undefined;
-  return `+${add ?? 0} −${rem ?? 0} lines`;
-}
-
 /** Renders a tool result, pulling the meaningful payload out of Cursor's JSON
- *  envelope (a unified diff for edits, file content for reads) so Cursor shows
- *  what it actually did — matching (and for edits, exceeding) Claude's display.
+ *  envelope (file content for reads) so Cursor shows what it actually did.
  *  Falls back to the raw result text for Claude and anything unrecognized. */
 function ToolResultBody({ block }: { block: ToolBlock }) {
   const raw = block.result ?? '';
@@ -373,16 +479,6 @@ function ToolResultBody({ block }: { block: ToolBlock }) {
 
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     const p = parsed as Record<string, any>;
-    // Edit: Cursor returns a unified diff. Require it to actually look like one
-    // so we never misread a JSON file the model happened to Read.
-    if (kind === 'edit' && typeof p.diffString === 'string') {
-      const d = p.diffString;
-      if (d.trim() && (d.includes('@@') || d.startsWith('---'))) {
-        return <DiffView diff={d} summary={editSummary(p)} />;
-      }
-    }
-    // Read: Cursor returns { content, totalLines, fileSize, ... }. Gate on the
-    // envelope markers so a JSON file with a `content` key isn't misread.
     if (
       kind === 'read' &&
       typeof p.content === 'string' &&
@@ -402,32 +498,6 @@ function ToolResultBody({ block }: { block: ToolBlock }) {
     >
       {raw}
     </pre>
-  );
-}
-
-/** Line-by-line unified-diff renderer (added lines green, removed red). */
-function DiffView({ diff, summary }: { diff: string; summary?: string }) {
-  const lines = diff.split('\n');
-  return (
-    <div className="overflow-hidden rounded-lg border border-white/5 bg-ink-950">
-      {summary && (
-        <div className="border-b border-white/5 px-3 py-1.5 font-mono text-[11px] text-slate-500">{summary}</div>
-      )}
-      <div className="max-h-80 overflow-auto py-1.5 font-mono text-[12px] leading-relaxed">
-        {lines.map((ln, idx) => {
-          let cls = 'text-slate-500';
-          if (ln.startsWith('+++') || ln.startsWith('---')) cls = 'text-slate-400';
-          else if (ln.startsWith('@@')) cls = 'text-accent/80';
-          else if (ln.startsWith('+')) cls = 'bg-emerald-500/10 text-emerald-300';
-          else if (ln.startsWith('-')) cls = 'bg-rose-500/10 text-rose-300';
-          return (
-            <div key={idx} className={cn('whitespace-pre-wrap break-words px-3', cls)}>
-              {ln || ' '}
-            </div>
-          );
-        })}
-      </div>
-    </div>
   );
 }
 
@@ -482,18 +552,20 @@ function StatusDot({ block }: { block: ToolBlock }) {
 }
 
 function ResultView({ block }: { block: ResultBlock }) {
+  // Cost is deliberately not shown — only how long the turn ran, when it ended,
+  // and the API-reported context size. The turn separator above the next user
+  // message draws the boundary line, so this renders as a plain footnote.
   const parts: string[] = [];
-  if (block.usage) parts.push(`${formatTokens(block.usage.contextUsed)} ctx`);
-  if (typeof block.costUsd === 'number' && block.costUsd > 0) parts.push(`$${block.costUsd.toFixed(4)}`);
   if (typeof block.durationMs === 'number') parts.push(`${(block.durationMs / 1000).toFixed(1)}s`);
-  if (parts.length === 0) return null;
-  return (
-    <div className="flex items-center gap-2 py-1 text-[11px] text-slate-600">
-      <span className="h-px flex-1 bg-white/5" />
-      <span>{parts.join('  ·  ')}</span>
-      <span className="h-px flex-1 bg-white/5" />
-    </div>
-  );
+  const ended = beijingClock(block.ts);
+  if (ended) parts.push(ended);
+  const used = formatTokens(block.contextUsed ?? 0);
+  if (used) {
+    const window = formatTokens(block.contextWindow ?? 0);
+    parts.push(window ? `${used} / ${window} tokens` : `${used} tokens`);
+  }
+  if (!parts.length) return null;
+  return <div className="py-1 text-[11px] text-slate-600">{parts.join(' · ')}</div>;
 }
 
 function ErrorView({ block }: { block: ErrorBlock }) {

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { X, SquareTerminal, FolderOpen, Loader2 } from 'lucide-react';
+import { X, SquareTerminal, FolderOpen, Loader2 } from '../lib/icons';
 import { useStore } from '../store/store';
 import { cn } from '../lib/format';
 import { TerminalPane } from './TerminalPane';

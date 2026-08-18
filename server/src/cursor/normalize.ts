@@ -1,22 +1,5 @@
 import crypto from 'node:crypto';
-import { DEFAULT_CONTEXT_WINDOW, type TokenUsage } from '../../../shared/protocol.js';
-import type { NormalizerCallbacks } from '../claude/normalize.js';
-
-function num(v: unknown): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-/** Cursor reports usage in camelCase (vs Claude's snake_case). */
-export function extractCursorUsage(usage: Record<string, unknown> | undefined): TokenUsage | null {
-  if (!usage) return null;
-  const inputTokens = num(usage.inputTokens ?? usage.input_tokens);
-  const outputTokens = num(usage.outputTokens ?? usage.output_tokens);
-  const cacheReadTokens = num(usage.cacheReadTokens ?? usage.cache_read_input_tokens);
-  const cacheCreationTokens = num(usage.cacheWriteTokens ?? usage.cache_creation_input_tokens);
-  const contextUsed = inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens;
-  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, contextUsed, contextWindow: DEFAULT_CONTEXT_WINDOW };
-}
+import { type NormalizerCallbacks, usageContextTokens } from '../claude/normalize.js';
 
 /** The `tool_call` payload is keyed by tool type, e.g. `{ shellToolCall: {...} }`. */
 function pickTool(toolCall: Record<string, any>): { name: string; payload: any } {
@@ -67,6 +50,8 @@ export class CursorStreamNormalizer {
   private readonly prefix = crypto.randomUUID();
   /** Whether any assistant text was emitted this turn — gates the result-text fallback. */
   private producedAssistantText = false;
+  /** input+cache+output of the last model request (context watermark). */
+  private lastRequestTokens?: number;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -150,6 +135,10 @@ export class CursorStreamNormalizer {
     // Partial fragments carry a timestamp; the final full-text message does not.
     const partial = typeof message.timestamp_ms === 'number';
     if (!Array.isArray(content)) return;
+    // Prefer the last per-request usage as the context watermark; the result
+    // event's usage sums the turn's requests and overcounts multi-round turns.
+    const used = usageContextTokens(message.message?.usage);
+    if (used) this.lastRequestTokens = used;
     for (const part of content) {
       if (!part || typeof part !== 'object') continue;
       if (part.type === 'text') this.segment('assistant', String(part.text ?? ''), partial);
@@ -188,8 +177,6 @@ export class CursorStreamNormalizer {
 
   private handleResult(message: any): void {
     this.flushStream();
-    const usage = extractCursorUsage(message.usage);
-    if (usage) this.cb.onEvent({ k: 'token_usage', usage });
     const isError = Boolean(message.is_error) || message.subtype === 'error';
     // Fallback: if no assistant text streamed this turn but the result carries
     // the reply, surface it so the turn is never left visually empty.
@@ -205,10 +192,10 @@ export class CursorStreamNormalizer {
       block: {
         id: `result_${crypto.randomUUID()}`,
         kind: 'result',
-        usage: usage ?? undefined,
         durationMs: typeof message.duration_ms === 'number' ? message.duration_ms : undefined,
         isError,
         subtype: typeof message.subtype === 'string' ? message.subtype : undefined,
+        contextUsed: this.lastRequestTokens ?? usageContextTokens(message.usage),
         ts: Date.now(),
       },
     });

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore } from './store/store';
 import { useVibotStore } from './store/vibot';
-import { resolveToken, setToken } from './lib/token';
+import { resolveToken } from './lib/token';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { NewSessionDialog } from './components/NewSessionDialog';
@@ -9,7 +9,7 @@ import { RightPanel } from './components/RightPanel';
 import { FilePreview } from './components/FilePreview';
 import { Toast } from './components/Toast';
 import { Logo } from './components/Logo';
-import { Glass } from './components/LiquidGlass';
+import { LoginGate } from './components/LoginGate';
 import { VibotView } from './components/vibot/VibotView';
 
 const MODE_KEY = 'vibe-mode';
@@ -28,6 +28,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mode, setMode] = useState<'coding' | 'vibot'>(loadMode);
   const activeId = useStore((s) => s.activeId);
+  const isAdmin = useStore((s) => s.isAdmin);
   const activeTab = useStore((s) => (s.activeId ? s.rightTabs[s.activeId] ?? null : null));
   // The panel stays mounted while ANY session has it open (so a live terminal
   // in another session survives a switch); it's shown only for the active one.
@@ -80,11 +81,13 @@ export default function App() {
   }, []);
 
   if (phase === 'loading') return <SplashScreen />;
-  if (phase === 'unauthorized') return <TokenGate />;
+  if (phase === 'unauthorized') return <LoginGate />;
 
   // Vibot is a completely separate interface — its own sidebar, chat, and
-  // settings, reached by the toggle in the coding sidebar.
-  if (mode === 'vibot') {
+  // settings, reached via the toggle in the coding sidebar. Admin-only: its
+  // tools can drive any host, so non-admin accounts never enter this mode
+  // (even via a stale localStorage preference).
+  if (mode === 'vibot' && isAdmin) {
     return <VibotView onBack={() => switchMode('coding')} />;
   }
 
@@ -129,54 +132,3 @@ function SplashScreen() {
   );
 }
 
-function TokenGate() {
-  const init = useStore((s) => s.init);
-  const [value, setValue] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const token = value.trim();
-    if (!token) return;
-    setBusy(true);
-    setToken(token);
-    useStore.setState({ phase: 'loading' });
-    await init(token);
-  };
-
-  return (
-    <div className="app-shell flex w-full items-center justify-center px-6">
-      <form onSubmit={submit} className="w-full max-w-sm">
-        <Glass className="rounded-2xl" cornerRadius={16}>
-        <div className="p-7">
-        <div className="mb-5 flex items-center gap-3">
-          <Logo className="h-8 w-8 text-accent" />
-          <div>
-            <h1 className="text-lg font-semibold text-slate-100">Vibe</h1>
-            <p className="text-xs text-slate-500">Remote multi-agent vibe coding</p>
-          </div>
-        </div>
-        <label className="mb-1.5 block text-xs font-medium text-slate-400">Access token</label>
-        <input
-          autoFocus
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="Paste the token from your terminal"
-          className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2.5 text-sm text-slate-200 outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
-        />
-        <button
-          type="submit"
-          disabled={busy || !value.trim()}
-          className="mt-4 w-full rounded-lg bg-accent py-2.5 text-sm font-semibold text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {busy ? 'Connecting…' : 'Connect'}
-        </button>
-        <p className="mt-4 text-center text-[11px] leading-relaxed text-slate-600">
-          The server prints a ready-to-use link with the token on startup.
-        </p>
-        </div>
-        </Glass>
-      </form>
-    </div>
-  );
-}

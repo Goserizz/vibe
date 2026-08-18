@@ -1,11 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import {
-  DEFAULT_CONTEXT_WINDOW,
   type BackgroundTask,
   type BackgroundTaskStatus,
   type LiveEvent,
-  type TokenUsage,
 } from '../../../shared/protocol.js';
 
 export interface NormalizerCallbacks {
@@ -17,6 +15,36 @@ export interface NormalizerCallbacks {
 function num(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Context tokens for a turn from API-reported usage, so the number matches
+ *  what the model actually saw (local tokenizers only approximate it). Handles
+ *  Anthropic-style input/cache/output splits, Codex's cached_input_tokens, and
+ *  OpenAI-style prompt/completion pairs. Returns undefined when no usage. */
+export function usageContextTokens(usage: any): number | undefined {
+  if (!usage || typeof usage !== 'object') return undefined;
+  const split =
+    num(usage.input_tokens)
+    + num(usage.cache_creation_input_tokens)
+    + num(usage.cache_read_input_tokens)
+    + num(usage.cached_input_tokens)
+    + num(usage.output_tokens);
+  if (split > 0) return split;
+  // OpenAI-compatible: prompt_tokens already includes cached tokens.
+  const flat = num(usage.prompt_tokens ?? usage.inputTokens) + num(usage.completion_tokens ?? usage.outputTokens);
+  return flat > 0 ? flat : undefined;
+}
+
+/** Claude Code ≥2.1 reports each model's context window on the result event's
+ *  `modelUsage` map (verified against a live stream-json session). */
+function modelContextWindow(message: any): number | undefined {
+  const modelUsage = message?.modelUsage;
+  if (!modelUsage || typeof modelUsage !== 'object') return undefined;
+  for (const entry of Object.values(modelUsage)) {
+    const w = (entry as { contextWindow?: unknown } | null)?.contextWindow;
+    if (typeof w === 'number' && Number.isFinite(w)) return w;
+  }
+  return undefined;
 }
 
 function readOutputTail(file: unknown, maxBytes = 16_000): string | undefined {
@@ -41,16 +69,6 @@ function readOutputTail(file: unknown, maxBytes = 16_000): string | undefined {
   }
 }
 
-export function extractUsage(usage: Record<string, unknown> | undefined): TokenUsage | null {
-  if (!usage) return null;
-  const inputTokens = num(usage.input_tokens);
-  const outputTokens = num(usage.output_tokens);
-  const cacheReadTokens = num(usage.cache_read_input_tokens);
-  const cacheCreationTokens = num(usage.cache_creation_input_tokens);
-  const contextUsed = inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens;
-  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, contextUsed, contextWindow: DEFAULT_CONTEXT_WINDOW };
-}
-
 /**
  * Translates the Claude Code stream-json message stream into normalized
  * `LiveEvent`s. Shared by the local SDK runner and the remote (SSH+CLI) runner
@@ -69,6 +87,10 @@ export class StreamNormalizer {
   private readonly streamTextById = new Map<string, string>();
   private readonly assistantOffset = new Map<string, number>();
   private readonly tasks = new Map<string, BackgroundTask>();
+  /** input+cache+output of the last assistant message (= final model request).
+   *  The result event's usage sums every request in the turn, which overcounts
+   *  the context on multi-round agentic turns. */
+  private lastRequestTokens?: number;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -207,6 +229,8 @@ export class StreamNormalizer {
     const msgId = message.message?.id || this.currentMessageId;
     const content = message.message?.content;
     const ts = Date.now();
+    const used = usageContextTokens(message.message?.usage);
+    if (used) this.lastRequestTokens = used;
     if (Array.isArray(content)) {
       const base = this.assistantOffset.get(msgId) ?? 0;
       content.forEach((part: any, i: number) => {
@@ -222,8 +246,6 @@ export class StreamNormalizer {
       });
       this.assistantOffset.set(msgId, base + content.length);
     }
-    const usage = extractUsage(message.message?.usage);
-    if (usage) this.cb.onEvent({ k: 'token_usage', usage });
   }
 
   private handleUser(message: any): void {
@@ -238,18 +260,17 @@ export class StreamNormalizer {
   }
 
   private handleResult(message: any): void {
-    const usage = extractUsage(message.usage);
-    if (usage) this.cb.onEvent({ k: 'token_usage', usage });
     this.cb.onEvent({
       k: 'block',
       block: {
         id: `result_${crypto.randomUUID()}`,
         kind: 'result',
-        usage: usage ?? undefined,
         costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : undefined,
         durationMs: typeof message.duration_ms === 'number' ? message.duration_ms : undefined,
         isError: Boolean(message.is_error),
         subtype: typeof message.subtype === 'string' ? message.subtype : undefined,
+        contextUsed: this.lastRequestTokens ?? usageContextTokens(message.usage),
+        contextWindow: modelContextWindow(message),
         ts: Date.now(),
       },
     });

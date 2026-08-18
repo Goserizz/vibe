@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Plus, Trash2, Loader2, Pencil, Check, X, Bookmark } from 'lucide-react';
+import { Plus, Trash2, Loader2, Pencil, Check, X, Bookmark } from '../lib/icons';
 import type { AgentKind, EffortLevel, PermissionMode, SessionPreset } from '@shared/protocol';
 import { useStore } from '../store/store';
 import {
   AGENTS,
+  defaultEffortForAgent,
   effortLabel,
   effortLevelsForAgent,
   modelsForAgent,
@@ -26,6 +27,7 @@ export function PresetForm({ def, onDone }: { def?: SessionPreset; onDone: () =>
   const kimiPermissionModes = useStore((s) => s.kimiPermissionModes);
   const kiroModels = useStore((s) => s.kiroModels);
   const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
+  const grokModels = useStore((s) => s.grokModels);
   const upsertPreset = useStore((s) => s.upsertPreset);
   const setToast = useStore((s) => s.setToast);
 
@@ -37,7 +39,7 @@ export function PresetForm({ def, onDone }: { def?: SessionPreset; onDone: () =>
   const [saving, setSaving] = useState(false);
 
   const codexModelOpt = codexModels.find((m) => m.value === model) ?? null;
-  const modelOptions = modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels);
+  const modelOptions = modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels);
   const permissionOptions = permissionModesForAgent(agent, kimiPermissionModes, kiroPermissionModes);
   const effortLevels = effortLevelsForAgent(agent, codexModelOpt);
 
@@ -48,7 +50,7 @@ export function PresetForm({ def, onDone }: { def?: SessionPreset; onDone: () =>
     const custom = a !== 'claude';
     setModel(custom ? 'auto' : defaultModel);
     setPermissionMode(custom ? 'default' : 'bypassPermissions');
-    setEffort(a === 'codex' ? 'xhigh' : 'max');
+    setEffort(defaultEffortForAgent(a));
   };
 
   const submit = async () => {
@@ -134,6 +136,8 @@ export function PresetRegistry() {
   const kimiPermissionModes = useStore((s) => s.kimiPermissionModes);
   const kiroModels = useStore((s) => s.kiroModels);
   const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
+  const grokModels = useStore((s) => s.grokModels);
+  const zcodeModels = useStore((s) => s.zcodeModels);
   const remove = useStore((s) => s.deletePreset);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
@@ -155,12 +159,12 @@ export function PresetRegistry() {
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13px] text-slate-200">{p.name}</div>
               <div className="truncate font-mono text-[11px] text-slate-500">
-                {`${p.agent} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels)} · ${permissionModeLabel(
+                {`${p.agent} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels)} · ${permissionModeLabel(
                   p.permissionMode,
                   p.agent,
                   kimiPermissionModes,
                   kiroPermissionModes,
-                )} · ${effortLabel(p.effort)}`}
+                )} · ${effortLabel(p.effort, p.agent)}`}
               </div>
             </div>
             <button

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from '../lib/icons';
 import type { EffortLevel, PermissionMode } from '@shared/protocol';
 import { api } from '../lib/api';
 import { useStore } from '../store/store';
@@ -8,7 +8,6 @@ import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
 import { latestTodos, TodoPane } from './TodoPane';
 import { BackgroundTasksPane } from './BackgroundTasksPane';
-import { ContextMeter } from './ContextMeter';
 import { Menu } from './Menu';
 import { Logo } from './Logo';
 import {
@@ -41,6 +40,7 @@ const TASK_RAIL_WIDTH_KEY = 'vibe.taskRailWidth';
 export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTerminal, onToggleFiles }: ChatViewProps) {
   const activeId = useStore((s) => s.activeId);
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
+  const viewMode = useStore((s) => s.viewMode);
   // The composer stack floats over the message list, so the list needs bottom
   // padding equal to its height. It grows and shrinks (task pane expanded,
   // attachments, permission prompts), so measure instead of guessing.
@@ -61,7 +61,7 @@ export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTermin
   }
 
   return (
-    <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-950">
+    <main className={cn('relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-950', viewMode === 'cli' && 'cli-surface')}>
       <Header onOpenSidebar={onOpenSidebar} rightTab={rightTab} onToggleTerminal={onToggleTerminal} onToggleFiles={onToggleFiles} />
       <div className="flex min-h-0 flex-1">
         <section className="relative flex min-w-0 flex-1 flex-col">
@@ -69,7 +69,7 @@ export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTermin
           {/* Composer (+ permission prompts) floats over the conversation. On
               compact viewports the task panes stay in this stack; wide desktop
               moves them into DesktopTaskRail instead. */}
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+          <div className={cn('pointer-events-none absolute inset-x-0 bottom-0 z-20', viewMode === 'cli' && 'border-t border-ink-700 bg-ink-950')}>
             <div ref={overlayRef} className="pointer-events-auto">
               <PermissionPrompt sessionId={activeId} />
               <div className="lg:hidden">
@@ -209,12 +209,63 @@ function DesktopTaskRail({ sessionId }: { sessionId: string }) {
   );
 }
 
+function useMdUp() {
+  const [md, setMd] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)');
+    const onChange = () => setMd(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return md;
+}
+
+function ControlChip({
+  children,
+  title,
+  active,
+  danger,
+}: {
+  children: ReactNode;
+  title: string;
+  active?: boolean;
+  danger?: boolean;
+}) {
+  const cli = useStore((s) => s.viewMode) === 'cli';
+  return (
+    <span
+      title={title}
+      className={cn(
+        'inline-flex min-w-0 shrink-0 items-center justify-center transition',
+        cli
+          ? 'h-6 max-w-[8rem] overflow-hidden border px-1.5 font-mono text-[10px]'
+          : 'h-8 w-8 rounded-lg border',
+        danger
+          ? 'border-rose-500/30 text-rose-300'
+          : active
+            ? 'border-accent/50 bg-accent/15 text-accent-soft'
+            : 'border-ink-700 text-slate-300 hover:border-ink-600',
+      )}
+    >
+      <span className="min-w-0 truncate">{children}</span>
+    </span>
+  );
+}
+
 function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { onOpenSidebar: () => void; rightTab?: 'terminal' | 'files' | null; onToggleTerminal?: () => void; onToggleFiles?: () => void }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const cli = useStore((s) => s.viewMode) === 'cli';
+  const desktop = useMdUp();
+  const align = desktop ? 'right' : 'left';
 
   return (
     <header className="absolute inset-x-0 top-0 z-30">
-      <Glass className="app-titlebar flex items-center gap-3 border-b border-white/5 px-3 py-2.5 md:px-5" cornerRadius={0} thin>
+      <Glass
+        className="app-titlebar flex flex-col gap-2 border-b border-white/5 px-3 py-2.5 md:flex-row md:items-center md:gap-3 md:px-5"
+        cornerRadius={0}
+        thin
+      >
+      <div className="flex min-w-0 flex-1 items-center gap-3">
       <button onClick={onOpenSidebar} className="rounded-lg p-1.5 text-slate-400 hover:bg-ink-800 md:hidden">
         <MenuIcon className="h-5 w-5" />
       </button>
@@ -233,7 +284,11 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
                     ? 'bg-sky-500/15 text-sky-300'
                     : session.agent === 'kiro'
                       ? 'bg-violet-500/15 text-violet-300'
-                      : 'bg-ink-700 text-slate-300',
+                      : session.agent === 'grok'
+                        ? 'bg-amber-500/15 text-amber-300'
+                        : session.agent === 'zcode'
+                          ? 'bg-rose-500/15 text-rose-300'
+                          : 'bg-ink-700 text-slate-300',
             )}
           >
             {agentLabel(session.agent)}
@@ -244,128 +299,113 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
           <span className="truncate font-mono">{shortenPath(session.cwd, 3)}</span>
         </div>
       </div>
+      </div>
 
-      <ContextMeter sessionId={session.id} />
-      <ModelControl />
-      {session.agent !== 'cursor' && session.agent !== 'kimi' && <EffortControl />}
-      <PermissionControl />
-      <button
-        type="button"
-        onClick={onToggleTerminal}
-        aria-label="Terminal"
-        title="Terminal"
-        className={cn(
-          'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition',
-          rightTab === 'terminal'
-            ? 'border-accent/50 bg-accent/15 text-accent-soft'
-            : 'border-ink-700 text-slate-300 hover:border-ink-600',
-        )}
-      >
-        <SquareTerminal className="h-4 w-4" />
+      <div className="flex flex-wrap items-center gap-1.5 pl-10 md:justify-end md:pl-0">
+      <ModelControl align={align} />
+      {session.agent !== 'cursor' && session.agent !== 'kimi' && session.agent !== 'zcode' && <EffortControl align={align} />}
+      <PermissionControl align={align} />
+      <button type="button" onClick={onToggleTerminal} aria-label="Terminal" title="Terminal">
+        <ControlChip title="Terminal" active={rightTab === 'terminal'}>
+          {cli ? 'term' : <SquareTerminal className="h-4 w-4" />}
+        </ControlChip>
       </button>
-      <button
-        type="button"
-        onClick={onToggleFiles}
-        aria-label="Files"
-        title="Files"
-        className={cn(
-          'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition',
-          rightTab === 'files'
-            ? 'border-accent/50 bg-accent/15 text-accent-soft'
-            : 'border-ink-700 text-slate-300 hover:border-ink-600',
-        )}
-      >
-        <FolderOpen className="h-4 w-4" />
+      <button type="button" onClick={onToggleFiles} aria-label="Files" title="Files">
+        <ControlChip title="Files" active={rightTab === 'files'}>
+          {cli ? 'files' : <FolderOpen className="h-4 w-4" />}
+        </ControlChip>
       </button>
+      </div>
       </Glass>
     </header>
   );
 }
 
-function ModelControl() {
+function ModelControl({ align }: { align: 'left' | 'right' }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const cli = useStore((s) => s.viewMode) === 'cli';
   const cursorModels = useStore((s) => s.cursorModels);
   const codexModels = useStore((s) => s.codexModels);
   const kimiModels = useStore((s) => s.kimiModels);
   const kiroModels = useStore((s) => s.kiroModels);
+  const grokModels = useStore((s) => s.grokModels);
+  const zcodeModels = useStore((s) => s.zcodeModels);
   const loadCursorModels = useStore((s) => s.loadCursorModels);
   const loadCodexModels = useStore((s) => s.loadCodexModels);
   const loadKimiCapabilities = useStore((s) => s.loadKimiCapabilities);
   const loadKiroModels = useStore((s) => s.loadKiroModels);
-  // Cursor's model list is large (search it); Codex/Claude are short. Headless
-  // agents accept custom model ids or aliases, including Kimi/Kiro.
+  const loadGrokModels = useStore((s) => s.loadGrokModels);
+  const loadZcodeModels = useStore((s) => s.loadZcodeModels);
   const usePicker = session.agent !== 'claude';
+  const label = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels);
 
-  // Reload this agent's model list for the session's host: Cursor's egress/proxy
-  // can hide region-gated ids; Codex caches per host (~/.codex/models_cache.json).
   useEffect(() => {
     const h = session.host || undefined;
     if (session.agent === 'cursor') void loadCursorModels(h);
     else if (session.agent === 'codex') void loadCodexModels(h);
     else if (session.agent === 'kimi') void loadKimiCapabilities(h);
     else if (session.agent === 'kiro') void loadKiroModels(h);
-  }, [session.agent, session.host, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels]);
+    else if (session.agent === 'grok') void loadGrokModels(h);
+    else if (session.agent === 'zcode') void loadZcodeModels(h);
+  }, [session.agent, session.host, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels]);
 
   return (
     <Menu
-      align="right"
-      triggerLabel={`Model: ${modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels)}`}
+      align={align}
+      triggerLabel={`Model: ${label}`}
       searchable={usePicker}
       allowCustom={usePicker}
-      items={modelsForAgent(session.agent, cursorModels, codexModels, kimiModels, kiroModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
+      items={modelsForAgent(session.agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
       onSelect={(value) => void patchSession(session.id, { model: value })}
       trigger={
-        <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-300 transition hover:border-ink-600">
-          <Cpu className="h-4 w-4 text-slate-400" />
-        </span>
+        <ControlChip title={`Model: ${label}`}>
+          {cli ? label : <Cpu className="h-4 w-4 text-slate-400" />}
+        </ControlChip>
       }
     />
   );
 }
 
-function EffortControl() {
+function EffortControl({ align }: { align: 'left' | 'right' }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const cli = useStore((s) => s.viewMode) === 'cli';
   const codexModels = useStore((s) => s.codexModels);
   const codexModelOpt = codexModels.find((m) => m.value === session.model) ?? null;
+  const label = effortLabel(session.effort, session.agent);
 
   return (
     <Menu
-      align="right"
-      triggerLabel={`Effort: ${effortLabel(session.effort)}`}
+      align={align}
+      triggerLabel={`Effort: ${label}`}
       items={effortLevelsForAgent(session.agent, codexModelOpt).map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
       onSelect={(value) => void patchSession(session.id, { effort: value as EffortLevel })}
       trigger={
-        <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-300 transition hover:border-ink-600">
-          <Gauge className="h-4 w-4 text-slate-400" />
-        </span>
+        <ControlChip title={`Effort: ${label}`}>
+          {cli ? label : <Gauge className="h-4 w-4 text-slate-400" />}
+        </ControlChip>
       }
     />
   );
 }
 
-function PermissionControl() {
+function PermissionControl({ align }: { align: 'left' | 'right' }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const cli = useStore((s) => s.viewMode) === 'cli';
   const kimiPermissionModes = useStore((s) => s.kimiPermissionModes);
   const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
   const mode = session.permissionMode;
+  const label = permissionModeLabel(mode, session.agent, kimiPermissionModes, kiroPermissionModes);
 
   return (
     <Menu
-      align="right"
-      triggerLabel={`Permissions: ${permissionModeLabel(mode, session.agent, kimiPermissionModes, kiroPermissionModes)}`}
+      align={align}
+      triggerLabel={`Permissions: ${label}`}
       items={permissionModesForAgent(session.agent, kimiPermissionModes, kiroPermissionModes).map((m) => ({ value: m.value, label: m.label, hint: m.hint, active: m.value === mode }))}
       onSelect={(value) => void patchSession(session.id, { permissionMode: value as PermissionMode })}
       trigger={
-        <span
-          className={cn(
-            'inline-flex h-8 w-8 items-center justify-center rounded-lg border transition',
-            mode === 'bypassPermissions'
-              ? 'border-rose-500/30 text-rose-300'
-              : 'border-ink-700 text-slate-300 hover:border-ink-600',
-          )}
-        >
-          <ShieldCheck className={cn('h-4 w-4', mode === 'bypassPermissions' ? 'text-rose-300' : 'text-slate-400')} />
-        </span>
+        <ControlChip title={`Permissions: ${label}`} danger={mode === 'bypassPermissions'}>
+          {cli ? label : <ShieldCheck className={cn('h-4 w-4', mode === 'bypassPermissions' ? 'text-rose-300' : 'text-slate-400')} />}
+        </ControlChip>
       }
     />
   );
@@ -382,23 +422,30 @@ async function patchSession(id: string, patch: { model?: string; permissionMode?
 }
 
 function EmptyState({ onOpenSidebar, onNewSession }: ChatViewProps) {
+  const cli = useStore((s) => s.viewMode) === 'cli';
   return (
     <main className="relative flex min-w-0 flex-1 flex-col items-center justify-center bg-ink-950 px-6">
       <button onClick={onOpenSidebar} className="absolute left-3 top-3 rounded-lg p-1.5 text-slate-400 hover:bg-ink-800 md:hidden">
         <MenuIcon className="h-5 w-5" />
       </button>
-      <div className="flex flex-col items-center text-center">
-        <Logo className="mb-5 h-12 w-12 text-accent/80" />
-        <h2 className="text-lg font-semibold text-slate-200">Start vibe coding</h2>
-        <p className="mt-1.5 max-w-xs text-sm text-slate-500">
-          Spin up an agent session in any directory and drive it from anywhere.
+      <div className={cn('flex flex-col', cli ? 'max-w-md font-mono text-left' : 'items-center text-center')}>
+        {!cli && <Logo className="mb-5 h-12 w-12 text-accent/80" />}
+        <h2 className={cn(cli ? 'text-[13.5px] text-slate-200' : 'text-lg font-semibold text-slate-200')}>
+          {cli ? '// start a session' : 'Start vibe coding'}
+        </h2>
+        <p className={cn('mt-1.5 max-w-xs text-slate-500', cli ? 'text-[12.5px]' : 'text-sm')}>
+          {cli
+            ? 'Pick a directory and an agent. Output renders as a terminal transcript.'
+            : 'Spin up an agent session in any directory and drive it from anywhere.'}
         </p>
         <button
           onClick={onNewSession}
-          className="mt-5 flex items-center gap-2 rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-accent-fg transition hover:bg-accent-soft"
+          className={cn(
+            'mt-5 flex items-center gap-2 font-semibold text-accent-fg transition hover:bg-accent-soft',
+            cli ? 'h-8 bg-accent px-3 font-mono text-[12px]' : 'rounded-xl bg-accent px-4 py-2.5 text-sm',
+          )}
         >
-          <Plus className="h-4 w-4" />
-          New session
+          {cli ? '> new session' : <><Plus className="h-4 w-4" />New session</>}
         </button>
       </div>
     </main>

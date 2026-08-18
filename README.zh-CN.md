@@ -4,7 +4,7 @@
 
 [English](README.md) · **简体中文**
 
-**优雅、低延迟的 Web 界面,在任意机器上驱动 Claude Code、Codex、Cursor 和 Kimi。**
+**优雅、低延迟的 Web 界面,在任意机器上驱动 Claude Code、Codex、Cursor、Kimi、Kiro、Grok 和 ZCode。**
 
 在你代码所在的机器上运行它,用任意浏览器(笔记本、手机、平板)打开启动时打印的链接,
 即可远程 vibe coding —— 流畅的流式输出 + 简洁的界面。
@@ -40,10 +40,10 @@
 
 ## 简介
 
-Vibe 在你的机器上运行一个小型服务器,连接 Claude Code、Codex、Cursor 或 Kimi Code,
+Vibe 在你的机器上运行一个小型服务器,连接 Claude Code、Codex、Cursor、Kimi Code、Kiro、Grok 或 ZCode,
 把各 agent 的输出归一化为同一套结构化对话,再通过单条 WebSocket 推送给 React Web 客户端。
 Claude 使用官方 [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
-Codex 使用长驻 App Server,Cursor、Kimi 与 Kiro 使用各自的结构化 CLI / ACP 通道。
+Codex 使用长驻 App Server,Cursor、Kimi、Kiro 与 Grok 使用各自的结构化 CLI / ACP 通道,ZCode 走其 ZCode Protocol app-server。
 
 它专为解决远程 coding-agent UI 的两个卡顿痛点而生:
 
@@ -51,8 +51,7 @@ Codex 使用长驻 App Server,Cursor、Kimi 与 Kiro 使用各自的结构化 CL
   而不是重新拉取整段对话;流式文本按动画帧合并;当客户端跟不上时,具备背压感知的发送器
   只丢弃尽力而为的增量帧(绝不丢弃结构性帧)。
 - **顺手的界面。** 沉静的深色 / 浅色主题,实时的 token / 思考 / 工具流式展示,思考过程在
-  Claude 思考时自动展开、结束后自动折叠,带实时状态的工具卡片,内联权限确认,上下文用量
-  计量,以及内置终端。
+  Claude 思考时自动展开、结束后自动折叠,带实时状态的工具卡片,内联权限确认,以及内置终端。
 
 ## 功能特性
 
@@ -62,20 +61,25 @@ Codex 使用长驻 App Server,Cursor、Kimi 与 Kiro 使用各自的结构化 CL
   可展开查看命令/指令、进程信息与捕获的输出,agent 提供单任务控制时可直接停止,任务结束后会自动
   唤醒 agent 生成后续回复;前台回复结束后可继续发送消息,无需等待后台任务完成;停止当前回复不会
   停止后台任务,也不会丢失其完成通知
-- 🤖 **多 Agent** —— 每个会话可选择 Claude、Codex、Cursor、Kimi 或 Kiro
+- 🤖 **多 Agent** —— 每个会话可选择 Claude、Codex、Cursor、Kimi、Kiro、Grok 或 ZCode
 - 🔐 **权限控制** —— Claude 支持内联允许 / 始终允许 / 拒绝;Kimi 会从当前主机自动发现模型及
-  Default / Plan / Auto / YOLO 模式,并通过 ACP 处理授权;Kiro 通过 ACP 支持 Ask / Plan / Auto-edit / Bypass
+  Default / Plan / Auto / YOLO 模式,并通过 ACP 处理授权;Kiro 通过 ACP 支持 Ask / Plan / Auto-edit / Bypass;
+  Grok 通过 ACP 支持 Ask / Plan / Auto / Always-approve;ZCode 支持 Ask / Plan / Edit / Yolo
+  (模型来自 `~/.zcode/cli/config.json`)
 - 🗂 **会话管理** —— 在任意目录创建、恢复、重命名、删除;可读取各 agent 的本地历史
-- 🖥️ **自动接管你的 CLI 会话** —— 终端中由 `claude`、`codex`、`cursor-agent`、`kimi` 或 `kiro-cli` 创建的对话可自动出现;
+- 🖥️ **自动接管你的 CLI 会话** —— 终端中由 `claude`、`codex`、`cursor-agent`、`kimi`、`kiro-cli`、`grok` 或 `zcode` 创建的对话可自动出现;
   打开即可阅读完整历史并继续对话,并沿用该会话当时使用的模型
 - 🌐 **通过 SSH 管理远程主机** —— 添加可通过 SSH 访问的机器,它们上面由 Claude、Codex、Cursor、
-  Kimi、Kiro 各自 CLI 创建的会话都会出现在同一侧栏(各自标注主机名与 agent);像本地会话一样
+  Kimi、Kiro、Grok 各自 CLI 创建的会话都会出现在同一侧栏(ZCode 支持本地发现;各自标注主机名与 agent);像本地会话一样
   打开和继续(全部在该机器上通过 SSH 运行)
 - 💻 **内置终端** —— 一键在会话所在主机上打开真实的交互式 shell(本地登录 shell,或 `ssh`
   进入远端),工作目录即会话目录,位于可调宽度的侧栏面板中
+- ⌨️ **CLI / TUI 视图** —— 在设置中切换为命令行风格的对话记录,排版与 Claude Code /
+  Cursor 等 CLI 一致(`❯` 提示、`⏺` 回复与工具、`⎿` 结果);TUI 使用
+  [Sarasa Term SC Nerd](https://github.com/laishulu/Sarasa-Term-SC-Nerd) 作为中文回退,英文仍为 JetBrains Mono;偏好会记住
 - 🎛 **按会话切换模型、推理强度(effort)与权限模式**,直接在顶栏操作
 - 🌗 **深色 / 浅色主题**,一键切换(记住你的选择)
-- 📈 **上下文用量计量**,以及每轮的花费 / 耗时
+- 📈 **每轮的花费 / 耗时**
 - 🔁 **健壮的重连**,基于 seq 重放(消息不丢失、不重复)
 - 📱 **响应式** —— 桌面和移动端浏览器均可用
 - 🤖 **Telegram bot** —— 用 Telegram 创建 / 切换会话、流式对话、处理权限确认
@@ -83,9 +87,9 @@ Codex 使用长驻 App Server,Cursor、Kimi 与 Kiro 使用各自的结构化 CL
 ## 环境要求
 
 - **Node.js 20+**
-- 至少安装并认证一个受支持的 agent CLI: `claude`、`codex`、`cursor-agent`、`kimi` 或 `kiro-cli`。
-  Vibe 会从 `PATH` 和常见安装位置自动检测,包括 Kimi 原生安装路径 `~/.kimi-code/bin/kimi`
-  以及 Kiro 默认路径 `~/.local/bin/kiro-cli`。
+- 至少安装并认证一个受支持的 agent CLI: `claude`、`codex`、`cursor-agent`、`kimi`、`kiro-cli`、`grok` 或 `zcode`(ZCode 桌面版内提取的 CLI,需 Node ≥ 22.5 并在 `~/.zcode/cli/config.json` 配置好 provider 与模型)。
+  Vibe 会从 `PATH` 和常见安装位置自动检测,包括 Kimi 原生安装路径 `~/.kimi-code/bin/kimi`、
+  Kiro 默认路径 `~/.local/bin/kiro-cli`、Grok 默认路径 `~/.local/bin/grok`,以及 ZCode 常见路径 `/usr/local/bin/zcode`。
 
 ## 快速开始
 
@@ -102,6 +106,17 @@ npm run serve        # 构建 Web 客户端并启动服务器
 ```
 
 打开其中任意一个即可开始会话。
+
+## 多账号（按账号隔离 hosts）
+
+Vibe 支持多账号, 每个账号管理自己的 SSH 主机:
+
+- **admin** 是内置账号 —— 它的 token 就是上面打印的服务器 token, 负责通过侧栏菜单 → **Accounts** 管理账号（用「名称 + 密码」创建、重置 token、设置密码、删除；删除账号会一并删除其主机）, 并独占本机、维护共享 MCP 注册表和 Vibot/Telegram。
+- 其他账号在登录页用**账号密码**（或自己的访问 token）登录。各账号完全对等: 包括 admin 在内, 每个账号只能看到和管理**自己添加过**的主机（多账号升级前的存量主机默认归属 admin）, 以及这些主机上的会话。主机名跨账号全局唯一。
+- 运行 Vibe 的本机**仅 admin 可用**: 其他账号不能在本机开会话、浏览本机文件或看到本机发现的 CLI 会话。
+- MCP 服务器定义、presets、skills 保持全局共享（MCP 注册表由 admin 维护）, 每个账号可为自己的主机单独启用 MCP。Vibot 仅 admin 可用。
+
+账号数据（scrypt 密码哈希 + 各账号 token）存储在 `~/.vibe/accounts.json`（权限 0600）。
 
 ### 开发
 
@@ -134,12 +149,16 @@ Vibe 采用**直连**模式 —— 浏览器直接连接服务器。在同一局
 | `VIBE_DEFAULT_CODEX_MODEL` | `auto` | Codex 新会话的默认模型 |
 | `VIBE_DEFAULT_KIMI_MODEL` | `auto` | Kimi 新会话的默认模型别名;`auto` 沿用 Kimi 配置 |
 | `VIBE_DEFAULT_KIRO_MODEL` | `auto` | Kiro 新会话的默认模型;`auto` 由 Kiro 自行选择 |
-| `VIBE_DEFAULT_AGENT` | `claude` | 默认 agent(`claude`/`cursor`/`codex`/`kimi`/`kiro`) |
+| `VIBE_DEFAULT_GROK_MODEL` | `auto` | Grok 新会话的默认模型;`auto` 由 Grok 自行选择 |
+| `VIBE_DEFAULT_ZCODE_MODEL` | `auto` | ZCode 新会话的默认模型(`providerID/modelID`);`auto` 由 ZCode 自行选择 |
+| `VIBE_DEFAULT_AGENT` | `claude` | 默认 agent(`claude`/`cursor`/`codex`/`kimi`/`kiro`/`grok`/`zcode`) |
 | `CLAUDE_CLI_PATH` | 自动检测 | `claude` 可执行文件的显式路径 |
 | `CURSOR_CLI_PATH` | 自动检测 | `cursor-agent` 可执行文件的显式路径 |
 | `CODEX_CLI_PATH` | 自动检测 | `codex` 可执行文件的显式路径 |
 | `KIMI_CLI_PATH` | 自动检测 | `kimi` 可执行文件的显式路径 |
 | `KIRO_CLI_PATH` | 自动检测 | `kiro-cli` 可执行文件的显式路径 |
+| `GROK_CLI_PATH` | 自动检测 | `grok` 可执行文件的显式路径 |
+| `ZCODE_CLI_PATH` | 自动检测 | `zcode` 可执行文件的显式路径 |
 | `VIBE_LOCAL_NAME` | 机器主机名 | 本机显示的名称 |
 | `VIBE_SSH_HOSTS` | – | 预置远程主机,例如 `prod=user@1.2.3.4,gpu=mygpu-alias` |
 | `VIBE_SSH` | `ssh` | 使用的 SSH 命令(可覆盖以自定义参数) |
@@ -184,11 +203,11 @@ npm run serve
 ## 远程主机(SSH)
 
 在侧栏打开 **Hosts**,用 `~/.ssh/config` 别名或 `user@host` 添加一台机器。Vibe 可通过 SSH
-在该机器上运行 Claude、Codex、Cursor、Kimi 或 Kiro;你直接在该主机的 CLI 里创建的会话也会自动
+在该机器上运行 Claude、Codex、Cursor、Kimi、Kiro 或 Grok;你直接在该主机的 CLI 里创建的会话也会自动
 出现在侧栏(标注主机名与所属 agent)。
 
 远程发现会通过 SSH 读取各 agent 的原生存储:`~/.claude/projects`(Claude)、`~/.codex/sessions`
-(Codex)、`$KIMI_CODE_HOME` 下的会话索引(Kimi)、`~/.kiro/sessions/cli`(Kiro)与
+(Codex)、`$KIMI_CODE_HOME` 下的会话索引(Kimi)、`~/.kiro/sessions/cli`(Kiro)、`~/.grok/sessions`(Grok)与
 `~/.cursor/chats`(Cursor)。有两点与本地行为一致:Cursor 只记录工作目录的哈希,因此只有 Vibe
 能推断出目录的会话才可恢复;渲染远端 Cursor 自身的历史还需要该主机上有 `sqlite3`。
 
@@ -196,7 +215,7 @@ npm run serve
 
 - **基于密钥的认证 / ssh-agent** —— Vibe 以非交互方式连接(`BatchMode`),因此主机必须无需
   密码提示即可认证。
-- **远端已安装所选 agent CLI**(`claude` / `codex` / `cursor-agent` / `kimi` / `kiro-cli`)。Hosts 弹窗会探测各 agent 的安装与版本,并支持更新。
+- **远端已安装所选 agent CLI**(`claude` / `codex` / `cursor-agent` / `kimi` / `kiro-cli` / `grok`)。Hosts 弹窗会探测各 agent 的安装与版本,并支持更新。
 - 远程对话遵循会话的**权限模式**(`default`/`acceptEdits`/`plan`/`bypass`);交互式的逐工具
   确认仅在本地可用。
 
@@ -216,14 +235,14 @@ Browser (React + Vite)
    │  WebSocket  /ws  (seq‑tagged events, rAF‑coalesced)  +  /terminal  (PTY stream)
    ▼
 Vibe server (Node + Express + ws)
-   │  local: Claude SDK; Codex / Cursor / Kimi structured CLI output
+   │  local: Claude SDK; Codex / Cursor / Kimi / Kiro / Grok structured CLI output
    │  remote: ssh → selected agent CLI        terminal: node-pty (local shell / ssh -tt)
    ▼
 Agent CLI  (在选定目录运行;历史来自 agent 原生存储或 Vibe transcript)
 ```
 
 - **`shared/protocol.ts`** —— 线路协议的唯一权威定义。
-- **`server/`** —— 令牌认证、Claude SDK 与 Codex/Cursor/Kimi CLI 运行器(本地或远程 `ssh`,全部归一化为同一套块流)、
+- **`server/`** —— 令牌认证、Claude SDK 与 Codex/Cursor/Kimi/Kiro/Grok CLI 运行器(本地或远程 `ssh`,全部归一化为同一套块流)、
   按会话的事件中枢(seq 日志、重放、背压)、会话元数据存储、读取历史的 transcript 解析器、
   对已有 agent 会话的发现,以及终端 PTY 通道。删除一个被发现的会话只是把它从 Vibe 中移除
   —— 底层的 agent transcript 绝不会被触碰。

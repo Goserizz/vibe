@@ -19,7 +19,6 @@ import type {
   SkillScope,
   ConfigFileDetail,
   ConfigFileEntry,
-  TokenUsage,
 } from '@shared/protocol';
 import { compareSessions } from '@shared/protocol';
 import { api, ApiError, setApiToken } from '../lib/api';
@@ -28,6 +27,8 @@ import { VibeSocket, type ConnStatus } from '../lib/ws';
 import { clearToken } from '../lib/token';
 import { resolveFilePath } from '../lib/paths';
 import { loadNotifySound, playNotifySound, saveNotifySound, type NotifySoundId } from '../lib/notifySound';
+import { applyViewModeClass, loadViewMode, saveViewMode, type ViewMode } from '../lib/viewMode';
+import { loadContrast, saveContrast, type Contrast } from '../lib/contrast';
 import {
   applyAccent,
   loadAccentPreference,
@@ -57,6 +58,8 @@ let cursorModelsGen = 0;
 let codexModelsGen = 0;
 let kimiModelsGen = 0;
 let kiroModelsGen = 0;
+let grokModelsGen = 0;
+let zcodeModelsGen = 0;
 const MODEL_REPULL_MS = 2_500;
 
 // Sessions the user aborted this turn. Their end-of-turn chime is suppressed
@@ -79,17 +82,27 @@ interface StoreState {
   status: ConnStatus;
   serverVersion: string;
   defaultModel: string;
+  /** Account resolved from the login token ('admin' = the server superuser). */
+  account: string;
+  /** True for the admin token holder: sees every host/session, manages accounts. */
+  isAdmin: boolean;
   cursorModels: ModelOption[];
   codexModels: ModelOption[];
   kimiModels: ModelOption[];
   kimiPermissionModes: PermissionOption[];
   kiroModels: ModelOption[];
   kiroPermissionModes: PermissionOption[];
+  grokModels: ModelOption[];
+  zcodeModels: ModelOption[];
   theme: Theme;
   /** Sound played when a model turn finishes. Persisted in localStorage. */
   notifySound: NotifySoundId;
+  /** Conversation chrome: card UI vs CLI-style transcript. Persisted. */
+  viewMode: ViewMode;
   /** Accent color: follow OS or a manual hex. Persisted in localStorage. */
   accent: AccentPreference;
+  /** UI contrast: default glassy look or pure-white/black hairlines. Persisted. */
+  contrast: Contrast;
 
   sessions: SessionMeta[];
   projects: ProjectDir[];
@@ -115,7 +128,6 @@ interface StoreState {
   localName: string;
   activeId: string | null;
   views: Record<string, SessionView>;
-  usage: Record<string, TokenUsage | undefined>;
   pending: Record<string, PermissionRequest[]>;
   /** Native background tasks keyed by session. */
   tasks: Record<string, BackgroundTask[]>;
@@ -155,6 +167,10 @@ interface StoreState {
   loadKimiCapabilities: (host?: string) => Promise<void>;
   /** Load Kiro models (and fixed permission modes) for local or remote CLI. */
   loadKiroModels: (host?: string) => Promise<void>;
+  /** Load Grok models for local or remote CLI. */
+  loadGrokModels: (host?: string) => Promise<void>;
+  /** Load ZCode models for local or remote CLI (from its config.json). */
+  loadZcodeModels: (host?: string) => Promise<void>;
   addHost: (host: RemoteHost) => Promise<boolean>;
   updateHost: (name: string, patch: { ssh?: string; proxy?: string; proxyByAgent?: Partial<Record<AgentKind, string>> }) => Promise<boolean>;
   removeHost: (name: string) => Promise<void>;
@@ -197,7 +213,9 @@ interface StoreState {
   setToast: (msg: string | null) => void;
   setRightTab: (id: string, tab: 'terminal' | 'files' | null) => void;
   setNotifySound: (id: NotifySoundId) => void;
+  setViewMode: (mode: ViewMode) => void;
   setAccent: (pref: AccentPreference) => void;
+  setContrast: (contrast: Contrast) => void;
 }
 
 export const useStore = create<StoreState>((set, get) => {
@@ -225,7 +243,6 @@ export const useStore = create<StoreState>((set, get) => {
     const state = get();
     // Collected mutations applied in a single set() at the end (one render).
     const eventsBySession = new Map<string, { seq: number; ev: import('@shared/protocol').LiveEvent }[]>();
-    const usagePatch: Record<string, TokenUsage> = {};
     const pendingPatch: Record<string, PermissionRequest[]> = {};
     const taskPatch: Record<string, BackgroundTask[]> = {};
     let sessions = state.sessions;
@@ -251,7 +268,6 @@ export const useStore = create<StoreState>((set, get) => {
     for (const msg of events) {
       switch (msg.t) {
         case 'event':
-          if (msg.ev.k === 'token_usage') usagePatch[msg.sessionId] = msg.ev.usage;
           if (msg.ev.k === 'task_upsert') {
             const task = msg.ev.task;
             const current = taskPatch[msg.sessionId] ?? state.tasks[msg.sessionId] ?? [];
@@ -329,7 +345,6 @@ export const useStore = create<StoreState>((set, get) => {
         const view = views[sid] ?? emptyView();
         views[sid] = { ...view, running: setRunning[sid] };
       }
-      const usage = Object.keys(usagePatch).length ? { ...s.usage, ...usagePatch } : s.usage;
       const pending = Object.keys(pendingPatch).length ? { ...s.pending, ...pendingPatch } : s.pending;
       const tasks = Object.keys(taskPatch).length ? { ...s.tasks, ...taskPatch } : s.tasks;
       const unread = finishedUnreadIds.length
@@ -337,7 +352,6 @@ export const useStore = create<StoreState>((set, get) => {
         : s.unread;
       return {
         views,
-        usage,
         pending,
         tasks,
         unread,
@@ -371,15 +385,21 @@ export const useStore = create<StoreState>((set, get) => {
     status: 'connecting',
     serverVersion: '',
     defaultModel: 'opus',
+    account: '',
+    isAdmin: false,
     cursorModels: [],
     codexModels: [],
     kimiModels: [],
     kimiPermissionModes: [],
     kiroModels: [],
     kiroPermissionModes: [],
+    grokModels: [],
+    zcodeModels: [],
     theme: initialTheme(),
     notifySound: loadNotifySound(),
+    viewMode: loadViewMode(),
     accent: loadAccentPreference(),
+    contrast: loadContrast(),
     sessions: [],
     projects: [],
     hosts: [],
@@ -394,7 +414,6 @@ export const useStore = create<StoreState>((set, get) => {
     localName: 'local',
     activeId: null,
     views: {},
-    usage: {},
     pending: {},
     tasks: {},
     unread: {},
@@ -409,7 +428,7 @@ export const useStore = create<StoreState>((set, get) => {
       setApiToken(token);
       try {
         const me = await api.me();
-        set({ defaultModel: me.defaultModel, serverVersion: me.serverVersion });
+        set({ defaultModel: me.defaultModel, serverVersion: me.serverVersion, account: me.account, isAdmin: me.isAdmin });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           set({ phase: 'unauthorized' });
@@ -421,9 +440,11 @@ export const useStore = create<StoreState>((set, get) => {
       socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus, onVibotBatch: vibotHandleBatch });
       socket.connect(token);
 
+      const admin = get().isAdmin;
       await Promise.all([
         get().refreshSessions(),
-        get().loadProjects(),
+        // Recent projects + local CLI probing are local-machine features.
+        ...(admin ? [get().loadProjects()] : []),
         get().loadHosts(),
         get().loadMcp(),
         get().loadPresets(),
@@ -432,10 +453,16 @@ export const useStore = create<StoreState>((set, get) => {
 
       // Model lists never gate the splash — server serves cache/fallback instantly
       // and refreshes CLIs in the background; these fill the pickers when ready.
-      void get().loadCursorModels();
-      void get().loadCodexModels();
-      void get().loadKimiCapabilities();
-      void get().loadKiroModels();
+      // Skipped for non-admin accounts (local machine is admin-only); their
+      // pickers fill from the per-host loads in the New Session dialog.
+      if (admin) {
+        void get().loadCursorModels();
+        void get().loadCodexModels();
+        void get().loadKimiCapabilities();
+        void get().loadKiroModels();
+        void get().loadGrokModels();
+        void get().loadZcodeModels();
+      }
 
       const { sessions, activeId } = get();
       if (!activeId && sessions.length > 0) void get().openSession(sessions[0].id);
@@ -537,6 +564,44 @@ export const useStore = create<StoreState>((set, get) => {
           .listKiroModels(host)
           .then(({ models, permissions }) => {
             if (gen === kiroModelsGen) set({ kiroModels: models, kiroPermissionModes: permissions });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
+    },
+
+    async loadGrokModels(host?: string) {
+      const gen = ++grokModelsGen;
+      try {
+        const { models } = await api.listGrokModels(host);
+        if (gen === grokModelsGen) set({ grokModels: models });
+      } catch {
+        /* ignore — picker falls back to Auto + static Grok models */
+      }
+      window.setTimeout(() => {
+        if (gen !== grokModelsGen) return;
+        void api
+          .listGrokModels(host)
+          .then(({ models }) => {
+            if (gen === grokModelsGen) set({ grokModels: models });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
+    },
+
+    async loadZcodeModels(host?: string) {
+      const gen = ++zcodeModelsGen;
+      try {
+        const { models } = await api.listZcodeModels(host);
+        if (gen === zcodeModelsGen) set({ zcodeModels: models });
+      } catch {
+        /* ignore — picker falls back to Auto + static ZCode models */
+      }
+      window.setTimeout(() => {
+        if (gen !== zcodeModelsGen) return;
+        void api
+          .listZcodeModels(host)
+          .then(({ models }) => {
+            if (gen === zcodeModelsGen) set({ zcodeModels: models });
           })
           .catch(() => {});
       }, MODEL_REPULL_MS);
@@ -892,10 +957,20 @@ export const useStore = create<StoreState>((set, get) => {
       set({ notifySound: id });
     },
 
+    setViewMode(mode) {
+      saveViewMode(mode);
+      set({ viewMode: mode });
+    },
+
     setAccent(pref) {
       saveAccentPreference(pref);
       applyAccent(pref);
       set({ accent: pref });
+    },
+
+    setContrast(contrast) {
+      saveContrast(contrast);
+      set({ contrast });
     },
 
     setSearchQuery(q) {
@@ -926,6 +1001,11 @@ export const useStore = create<StoreState>((set, get) => {
   };
 });
 
+// Match the persisted CLI/chat chrome before the first paint of ChatView.
+if (typeof document !== 'undefined') {
+  applyViewModeClass(loadViewMode());
+}
+
 // Keep the theme in sync with the device's color-scheme preference. The inline
 // script in index.html sets the initial class before paint; this updates it
 // (and the store) live when the system theme changes.
@@ -936,6 +1016,8 @@ if (typeof window !== 'undefined' && window.matchMedia) {
     el.classList.remove('dark', 'light');
     el.classList.add(next);
     useStore.setState({ theme: next });
+    // The TUI ground follows the theme, so its status-bar color flips too.
+    applyViewModeClass(useStore.getState().viewMode);
     // System accent can shift with appearance mode; custom prefs stay put.
     applyAccent();
   });

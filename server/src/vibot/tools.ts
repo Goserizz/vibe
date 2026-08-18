@@ -22,7 +22,7 @@ function clip(s: string): string {
   return s.length > MAX_RESULT ? `${s.slice(0, MAX_RESULT)}\n…(truncated)` : s;
 }
 
-const agents: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro'];
+const agents: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
 function isAgent(v: unknown): v is AgentKind {
   return typeof v === 'string' && (agents as string[]).includes(v);
 }
@@ -42,7 +42,7 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
         type: 'object',
         properties: {
           host: { type: 'string', description: 'Filter to a host name (e.g. the local machine name or a remote host).' },
-          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro'], description: 'Filter to one agent.' },
+          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'], description: 'Filter to one agent.' },
           limit: { type: 'integer', description: 'Max rows to return.', default: 40 },
         },
       },
@@ -101,7 +101,7 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
         type: 'object',
         properties: {
           prompt: { type: 'string', description: 'The coding task to hand to the agent. Be specific and complete.' },
-          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro'], description: 'Which coding agent. Defaults to claude.' },
+          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'], description: 'Which coding agent. Defaults to claude.' },
           cwd: { type: 'string', description: 'Working directory for the session. Omit to auto-create a throwaway folder.' },
           host: { type: 'string', description: 'Remote host name to run on. Omit for the local machine.' },
           model: { type: 'string', description: 'Model for the agent (e.g. "opus", "auto"). Omit for the agent default.' },
@@ -260,7 +260,11 @@ function createCodingSession(input: {
           ? config.defaultKimiModel
           : agent === 'kiro'
             ? config.defaultKiroModel
-            : config.defaultModel);
+            : agent === 'grok'
+              ? config.defaultGrokModel
+              : agent === 'zcode'
+                ? config.defaultZcodeModel
+                : config.defaultModel);
 
   // autoApprove 'all' (or the safe-mode watcher) both want the agent to run
   // autonomously. 'all' skips prompts entirely (bypass); 'safe' keeps prompts so
@@ -323,6 +327,8 @@ function configSummary(): string {
         codex: Boolean(config.codexExecutable),
         kimi: Boolean(config.kimiExecutable),
         kiro: Boolean(config.kiroExecutable),
+        grok: Boolean(config.grokExecutable),
+        zcode: Boolean(config.zcodeExecutable),
       },
       hosts: hostRegistry.list().map((h) => ({ name: h.name, ssh: h.ssh, proxy: h.proxy })),
       mcp: {

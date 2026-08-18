@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Menu as MenuIcon } from 'lucide-react';
+import { Menu as MenuIcon } from '../../lib/icons';
 import { useVibotStore } from '../../store/vibot';
 import { VibotSidebar } from './VibotSidebar';
 import { VibotChat } from './VibotChat';

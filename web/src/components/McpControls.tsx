@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Trash2, Loader2, Pencil, Check, X, Plug, LogIn, LogOut } from 'lucide-react';
+import { Plus, Trash2, Loader2, Pencil, Check, X, Plug, LogIn, LogOut } from '../lib/icons';
 import type { McpServerDef, McpTransport } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';

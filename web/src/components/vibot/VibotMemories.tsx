@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Brain, ChevronRight } from 'lucide-react';
+import { X, Brain, ChevronRight } from '../../lib/icons';
 import { useVibotStore } from '../../store/vibot';
 import { cn } from '../../lib/format';
 

@@ -114,7 +114,7 @@ export class CursorTranscriptBuilder {
         this.upsert({ id: `err_${this.blocks.length}_${Date.now()}`, kind: 'error', text: ev.text, ts: Date.now() });
         break;
       default:
-        // run_state / token_usage are not persisted as blocks
+        // run_state is not persisted as a block
         break;
     }
   }

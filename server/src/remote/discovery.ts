@@ -6,6 +6,8 @@ import { sessionStore } from '../sessions/store.js';
 import { listRemoteCodexSessions, readRemoteCodexTranscript } from '../codex/remote.js';
 import { listRemoteKimiSessions, readRemoteKimiTranscript } from '../kimi/remote.js';
 import { listRemoteKiroSessions, readRemoteKiroTranscript } from '../kiro/remote.js';
+import { listRemoteGrokSessions, readRemoteGrokTranscript } from '../grok/remote.js';
+import { listRemoteZcodeSessions, readRemoteZcodeTranscript } from '../zcode/remote.js';
 import { listRemoteCursorSessions, readRemoteCursorTranscript } from '../cursor/remote.js';
 import type { AgentKind, ChatBlock, RemoteHost } from '../../../shared/protocol.js';
 import { loginShellCommand, sshExec } from './ssh.js';
@@ -84,7 +86,7 @@ function knownCwds(hostName: string): string[] {
 /**
  * Discover sessions started directly on a remote host's CLIs, for every agent.
  *
- * Claude/Codex/Kimi/Kiro are probed in parallel (SSH ControlMaster keeps the
+ * Claude/Codex/Kimi/Kiro/Grok are probed in parallel (SSH ControlMaster keeps the
  * extra round-trips cheap); Cursor runs last because it can only find chats
  * whose cwd we can name, and the other agents' results are the best source of
  * cwds actually used on that host.
@@ -118,6 +120,8 @@ export async function listRemoteAgentSessions(host: RemoteHost): Promise<RemoteD
     safely('codex', () => listRemoteCodexSessions(host)),
     safely('kimi', () => listRemoteKimiSessions(host)),
     safely('kiro', () => listRemoteKiroSessions(host)),
+    safely('grok', () => listRemoteGrokSessions(host)),
+    safely('zcode', () => listRemoteZcodeSessions(host)),
   ]);
   const found = groups.flat();
 
@@ -195,6 +199,10 @@ export async function readRemoteAgentTranscript(
         return await readRemoteKimiTranscript(host, sessionId);
       case 'kiro':
         return await readRemoteKiroTranscript(host, sessionId);
+      case 'grok':
+        return await readRemoteGrokTranscript(host, sessionId);
+      case 'zcode':
+        return await readRemoteZcodeTranscript(host, sessionId);
       case 'cursor':
         return await readRemoteCursorTranscript(host, sessionId, cwd);
       default:

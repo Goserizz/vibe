@@ -13,3 +13,7 @@ reference_projects/
 
 # Local secrets / notes — NEVER publish
 CLAUDE.md
+
+# Generated TUI webfont (Sarasa Term SC Nerd). Rebuild with:
+#   node scripts/fetch-tui-font.mjs
+web/public/fonts/sarasa-term-sc-nerd/

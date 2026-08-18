@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { X, Copy, Check, Download, Loader2, CircleAlert, FileText } from 'lucide-react';
+import { X, Copy, Check, Download, Loader2, CircleAlert, FileText } from '../lib/icons';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
 

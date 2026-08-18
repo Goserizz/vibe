@@ -13,7 +13,6 @@
  */
 
 export const PROTOCOL_VERSION = 2;
-export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 export type Role = 'user' | 'assistant';
 
@@ -24,17 +23,7 @@ export type PermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermiss
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
 /** Which CLI engine drives a session. */
-export type AgentKind = 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro';
-
-export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  /** Running context-window occupancy reported by the model. */
-  contextUsed: number;
-  contextWindow: number;
-}
+export type AgentKind = 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode';
 
 // ---------------------------------------------------------------------------
 // Normalized conversation blocks (what the client renders)
@@ -78,11 +67,16 @@ export interface ToolBlock extends BaseBlock {
 
 export interface ResultBlock extends BaseBlock {
   kind: 'result';
-  usage?: TokenUsage;
   costUsd?: number;
   durationMs?: number;
   isError?: boolean;
   subtype?: string;
+  /** Context tokens the model saw on this turn's final request, plus the turn's
+   *  output — i.e. the context the next turn starts from. API-reported, absent
+   *  when the agent exposes no usage. */
+  contextUsed?: number;
+  /** Model context window, when the agent reports it alongside usage. */
+  contextWindow?: number;
 }
 
 export interface ErrorBlock extends BaseBlock {
@@ -122,7 +116,8 @@ export interface SessionMeta {
    *  Claude session id itself. */
   id: string;
   /** Native engine session id used to resume the conversation (Claude session
-   *  id, Cursor chat id, Codex thread id, Kimi session id, or Kiro session id). */
+   *  id, Cursor chat id, Codex thread id, Kimi session id, Kiro session id, or
+   *  Grok session id). */
   claudeSessionId?: string;
   title: string;
   cwd: string;
@@ -139,7 +134,7 @@ export interface SessionMeta {
   backgroundTasksRunning: boolean;
   running: boolean;
   /** 'vibe' = managed in Vibe; otherwise discovered from that CLI. */
-  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro';
+  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode';
   /** Which machine the project lives on (local machine name, or an SSH host). */
   host: string;
   /** True when the cwd is an auto-created throwaway folder under the fixed
@@ -149,6 +144,10 @@ export interface SessionMeta {
    *  sidebar ahead of recency. Stored as an id set on the server, so it applies
    *  to discovered (non-adopted) sessions too. */
   pinned?: boolean;
+  /** Account that owns this session (server-side visibility filter; the client
+   *  never renders it). Undefined on discovered local CLI sessions, which every
+   *  account on the shared local machine can see. */
+  owner?: string;
 }
 
 /** Sidebar display order: favorited (pinned) sessions first, then most-recently-
@@ -167,8 +166,12 @@ export interface RemoteHost {
   name: string;
   /** SSH target: an `~/.ssh/config` alias or `user@host[:port]`. */
   ssh: string;
+  /** Account that manages this host (server-side; the client never renders it).
+   *  Host names are globally unique across accounts because remote session ids
+   *  are `host::sessionId`. */
+  owner?: string;
   /** Optional HTTP(S) proxy the remote agent (claude / cursor-agent / codex /
-   *  kimi / kiro-cli) routes its API traffic through when launched on this host.
+   *  kimi / kiro-cli / grok) routes its API traffic through when launched on this host.
    *  Injected as HTTP_PROXY / HTTPS_PROXY (both cases) into the remote process
    *  env. This is the default for every agent; a value in `proxyByAgent`
    *  overrides it. */
@@ -351,6 +354,49 @@ export interface AgentUpdateResult {
   log?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Accounts & login (multi-account host isolation)
+// ---------------------------------------------------------------------------
+
+/** The built-in superuser account; its access token is the server token from
+ *  `~/.vibe/token` (or VIBE_TOKEN) and it can see every host and session. */
+export const ADMIN_ACCOUNT = 'admin';
+
+/** Login credentials for `POST /api/auth/login`. */
+export interface LoginRequest {
+  name: string;
+  password: string;
+}
+
+/** Successful login response; the token doubles as the Bearer credential for
+ *  REST and the `?token=` for WebSockets. */
+export interface LoginResponse {
+  token: string;
+  account: string;
+  isAdmin: boolean;
+}
+
+/** A user account row as listed for the admin. Secrets (password hash, token)
+ *  are never included; the token is only shown once, at create/reset time. */
+export interface AccountInfo {
+  name: string;
+  createdAt: number;
+  hasPassword: boolean;
+}
+
+/** Body for creating an account. The generated token comes back once. */
+export interface AccountCreateRequest {
+  name: string;
+  password: string;
+}
+
+/** Response of account create / token reset — display the token immediately,
+ * it is not retrievable afterwards. */
+export interface AccountTokenResponse {
+  name: string;
+  token: string;
+}
+
 export interface ProjectDir {
   path: string;
   name: string;
@@ -517,7 +563,6 @@ export type LiveEvent =
   | { k: 'block_end'; id: string; text?: string }
   | { k: 'tool_result'; toolUseId: string; content: string; isError: boolean }
   | { k: 'run_state'; running: boolean }
-  | { k: 'token_usage'; usage: TokenUsage }
   | { k: 'task_upsert'; task: BackgroundTask }
   | { k: 'error'; text: string };
 

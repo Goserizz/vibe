@@ -11,7 +11,7 @@ import {
   Square,
   TerminalSquare,
   Users,
-} from 'lucide-react';
+} from '../lib/icons';
 import type { BackgroundTask, BackgroundTaskStatus } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { cn } from '../lib/format';

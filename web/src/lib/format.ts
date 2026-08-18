@@ -14,12 +14,6 @@ export function shortenPath(p: string, max = 3): string {
   return '…/' + parts.slice(-max).join('/');
 }
 
-export function formatTokens(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
 export function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
   const s = Math.floor(diff / 1000);
@@ -33,12 +27,35 @@ export function relativeTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
+/** End-of-turn clock, always Beijing time (UTC+8) regardless of viewer locale. */
+const beijingTime = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Shanghai',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+export function beijingClock(ts: number): string {
+  return Number.isFinite(ts) ? `${beijingTime.format(ts)} UTC+8` : '';
+}
+
+/** Compact token count: 950 → "950", 84213 → "84.2k", 1250000 → "1.3M". */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 100_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
 export const AGENTS: { value: AgentKind; label: string }[] = [
   { value: 'claude', label: 'Claude' },
   { value: 'cursor', label: 'Cursor' },
   { value: 'codex', label: 'Codex' },
   { value: 'kimi', label: 'Kimi' },
   { value: 'kiro', label: 'Kiro' },
+  { value: 'grok', label: 'Grok' },
+  { value: 'zcode', label: 'ZCode' },
 ];
 
 export const MODELS: { value: string; label: string }[] = [
@@ -94,6 +111,22 @@ export const KIMI_MODELS: ModelOption[] = [{ value: 'auto', label: 'Auto' }];
 /** Fallback Kiro models until `kiro-cli chat --list-models` loads. */
 export const KIRO_MODELS: ModelOption[] = [{ value: 'auto', label: 'Auto' }];
 
+/** Fallback Grok models until `grok models` loads. */
+export const GROK_MODELS: ModelOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'grok-build', label: 'Grok Build' },
+  { value: 'grok-4.6', label: 'Grok 4.6' },
+];
+
+/** Fallback ZCode models until ~/.zcode/cli/config.json loads. Values are
+ *  `providerID/modelID` — the format ZCode's config uses for `model.main`. */
+export const ZCODE_MODELS: ModelOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'bigmodel/GLM-5.3', label: 'GLM-5.3' },
+  { value: 'bigmodel/GLM-5.2', label: 'GLM-5.2' },
+  { value: 'bigmodel/GLM-5-Turbo', label: 'GLM-5-Turbo' },
+];
+
 /** Model options for an agent. */
 export function modelsForAgent(
   agent: AgentKind,
@@ -101,11 +134,15 @@ export function modelsForAgent(
   codexModels?: ModelOption[],
   kimiModels?: ModelOption[],
   kiroModels?: ModelOption[],
+  grokModels?: ModelOption[],
+  zcodeModels?: ModelOption[],
 ): ModelOption[] {
   if (agent === 'cursor') return cursorModels && cursorModels.length ? cursorModels : CURSOR_MODELS;
   if (agent === 'codex') return codexModels && codexModels.length ? codexModels : CODEX_MODELS;
   if (agent === 'kimi') return kimiModels && kimiModels.length ? kimiModels : KIMI_MODELS;
   if (agent === 'kiro') return kiroModels && kiroModels.length ? kiroModels : KIRO_MODELS;
+  if (agent === 'grok') return grokModels && grokModels.length ? grokModels : GROK_MODELS;
+  if (agent === 'zcode') return zcodeModels && zcodeModels.length ? zcodeModels : ZCODE_MODELS;
   return MODELS;
 }
 
@@ -142,6 +179,22 @@ export const KIRO_PERMISSION_MODES: PermissionOption[] = [
   { value: 'bypassPermissions', label: 'Bypass', hint: 'Trust all tools (careful)' },
 ];
 
+/** Grok Build: Ask / Plan / Auto / Always-approve. */
+export const GROK_PERMISSION_MODES: PermissionOption[] = [
+  { value: 'default', label: 'Ask', hint: 'Prompt before tool use' },
+  { value: 'plan', label: 'Plan', hint: 'Read-only planning; edit the plan file only' },
+  { value: 'acceptEdits', label: 'Auto', hint: 'Classifier auto-approves safe tools' },
+  { value: 'bypassPermissions', label: 'Always-approve', hint: 'Auto-approve tool calls (careful)' },
+];
+
+/** ZCode modes: build / edit / plan / yolo. */
+export const ZCODE_PERMISSION_MODES: PermissionOption[] = [
+  { value: 'default', label: 'Ask', hint: 'Approve risky tools before they run' },
+  { value: 'plan', label: 'Plan', hint: 'Read-only planning' },
+  { value: 'acceptEdits', label: 'Edit', hint: 'Auto-approve edits and safe tools' },
+  { value: 'bypassPermissions', label: 'Yolo', hint: 'Auto-approve tool calls (careful)' },
+];
+
 export function permissionModesForAgent(
   agent: AgentKind,
   kimiPermissions?: PermissionOption[],
@@ -151,6 +204,8 @@ export function permissionModesForAgent(
   if (agent === 'codex') return CODEX_PERMISSION_MODES;
   if (agent === 'kimi') return kimiPermissions && kimiPermissions.length ? kimiPermissions : KIMI_PERMISSION_MODES;
   if (agent === 'kiro') return kiroPermissions && kiroPermissions.length ? kiroPermissions : KIRO_PERMISSION_MODES;
+  if (agent === 'grok') return GROK_PERMISSION_MODES;
+  if (agent === 'zcode') return ZCODE_PERMISSION_MODES;
   return PERMISSION_MODES;
 }
 
@@ -173,6 +228,8 @@ export function modelLabel(
   codexModels?: ModelOption[],
   kimiModels?: ModelOption[],
   kiroModels?: ModelOption[],
+  grokModels?: ModelOption[],
+  zcodeModels?: ModelOption[],
 ): string {
   return (
     MODELS.find((m) => m.value === value)?.label ??
@@ -180,10 +237,14 @@ export function modelLabel(
     codexModels?.find((m) => m.value === value)?.label ??
     kimiModels?.find((m) => m.value === value)?.label ??
     kiroModels?.find((m) => m.value === value)?.label ??
+    grokModels?.find((m) => m.value === value)?.label ??
+    zcodeModels?.find((m) => m.value === value)?.label ??
     CURSOR_MODELS.find((m) => m.value === value)?.label ??
     CODEX_MODELS.find((m) => m.value === value)?.label ??
     KIMI_MODELS.find((m) => m.value === value)?.label ??
     KIRO_MODELS.find((m) => m.value === value)?.label ??
+    GROK_MODELS.find((m) => m.value === value)?.label ??
+    ZCODE_MODELS.find((m) => m.value === value)?.label ??
     value
   );
 }
@@ -198,19 +259,41 @@ export function permissionModeLabel(
   return modes.find((m) => m.value === value)?.label ?? value;
 }
 
-export function effortLabel(value: EffortLevel): string {
+/** Grok Build `/effort`: low / medium / high / xhigh (Extra High). No max/ultra. */
+export const GROK_EFFORT_LEVELS: { value: EffortLevel; label: string; hint: string }[] = [
+  { value: 'low', label: 'Low', hint: 'Quick, fast implementations' },
+  { value: 'medium', label: 'Medium', hint: 'Balanced effort with standard testing' },
+  { value: 'high', label: 'High', hint: 'Higher quality with extensive reasoning' },
+  { value: 'xhigh', label: 'Extra High', hint: 'Highest effort and reasoning level' },
+];
+
+export function effortLabel(value: EffortLevel, agent?: AgentKind): string {
+  if (agent) {
+    const hit = effortLevelsForAgent(agent).find((e) => e.value === value);
+    if (hit) return hit.label;
+  }
   return EFFORT_LEVELS.find((e) => e.value === value)?.label ?? value;
+}
+
+/** Sensible default when switching the New Session / preset agent picker. */
+export function defaultEffortForAgent(agent: AgentKind): EffortLevel {
+  if (agent === 'codex') return 'xhigh';
+  if (agent === 'grok') return 'high';
+  return 'max';
 }
 
 /** Effort levels an agent exposes. For Codex these are per-model — each model's
  *  cached `supported_reasoning_levels` (5.6 models add `max`/`ultra`); pass the
  *  selected model so the picker matches what the CLI offers for it. Cursor and
- *  Kimi do not expose a separate effort switch here. Kiro supports the Claude ladder. */
+ *  Kimi do not expose a separate effort switch here. Kiro uses the Claude ladder.
+ *  Grok is low / medium / high / extra-high. ZCode's thought level is per-model
+ *  (not wired) — no separate switch. */
 export function effortLevelsForAgent(
   agent: AgentKind,
   codexModel?: ModelOption | null,
 ): { value: EffortLevel; label: string; hint: string }[] {
-  if (agent === 'cursor' || agent === 'kimi') return [];
+  if (agent === 'cursor' || agent === 'kimi' || agent === 'zcode') return [];
+  if (agent === 'grok') return GROK_EFFORT_LEVELS;
   if (agent === 'codex') {
     const efforts = codexModel?.efforts;
     if (efforts?.length) {

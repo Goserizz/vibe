@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { CheckCircle2, ChevronRight, Circle, ListTodo, Loader2 } from 'lucide-react';
+import { CheckCircle2, ChevronRight, Circle, ListTodo, Loader2 } from '../lib/icons';
 import type { ChatBlock, Todo, TodoStatus, ToolBlock } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { toolKind } from './blocks';
@@ -15,11 +15,23 @@ function pickString(obj: Record<string, any>, keys: string[]): string | undefine
 
 /** A todo plus the id engines use to address it in follow-up calls (Kiro's
  *  `completed_task_ids` / `remove_task_ids`). */
-interface TodoEntry extends Todo {
+export interface TodoEntry extends Todo {
   id: string;
 }
 
 const CONTENT_KEYS = ['content', 'text', 'title', 'subject', 'description', 'task', 'task_description', 'taskDescription'];
+
+/** Normalize engine status strings, including Cursor/Grok `TODO_STATUS_COMPLETED`. */
+export function parseTodoStatus(raw: unknown, completedFlag?: boolean): TodoStatus {
+  let s = String(raw ?? '')
+    .toLowerCase()
+    .replace(/[_\-\s]/g, '');
+  if (s.startsWith('todostatus')) s = s.slice('todostatus'.length);
+  if (s === 'completed' || s === 'done' || s === 'complete') return 'completed';
+  if (s === 'inprogress' || s === 'active' || s === 'running' || s === 'started') return 'in_progress';
+  if (completedFlag === true) return 'completed';
+  return 'pending';
+}
 
 /** Tolerant parse of one todo item — accepts the field-name variants different
  *  engines emit (content/text/title/task_description, status/state/completed,
@@ -30,19 +42,13 @@ function parseTodo(raw: unknown, index: number): TodoEntry | null {
   const obj = raw as Record<string, any>;
   const content = pickString(obj, CONTENT_KEYS);
   if (content == null) return null;
-  const rawStatus = String(obj.status ?? obj.state ?? '')
-    .toLowerCase()
-    .replace(/[_\-\s]/g, '');
-  let status: TodoStatus = 'pending';
-  if (rawStatus === 'completed' || rawStatus === 'done' || rawStatus === 'complete') status = 'completed';
-  else if (rawStatus === 'inprogress' || rawStatus === 'active' || rawStatus === 'running') status = 'in_progress';
-  else if (obj.completed === true) status = 'completed';
+  const status = parseTodoStatus(obj.status ?? obj.state, obj.completed === true);
   const activeForm = pickString(obj, ['activeForm', 'active_form', 'activeform']);
   const id = obj.id != null ? String(obj.id) : String(index + 1);
   return { id, content, status, activeForm };
 }
 
-function parseList(arr: unknown): TodoEntry[] | null {
+export function parseList(arr: unknown): TodoEntry[] | null {
   if (!Array.isArray(arr)) return null;
   const todos = arr.map((item, idx) => parseTodo(item, idx)).filter((t): t is TodoEntry => t !== null);
   return todos.length ? todos : null;
@@ -85,6 +91,16 @@ function snapshotFromResult(result: string | undefined): TodoEntry[] | null {
     return null;
   }
   return findTaskArray(parsed, 0);
+}
+
+/** Prefer the tool result's merged list (UpdateTodos `wasMerge`) over the input. */
+export function todoSnapshotFromBlock(block: ToolBlock): TodoEntry[] | null {
+  const input = (block.input ?? {}) as Record<string, unknown>;
+  if (!block.isError) {
+    const fromResult = snapshotFromResult(block.result);
+    if (fromResult) return fromResult;
+  }
+  return parseList(input.todos);
 }
 
 const TODO_COMMANDS = new Set(['create', 'add', 'complete', 'remove', 'list']);
@@ -130,8 +146,9 @@ export function latestTodos(blocks: ChatBlock[] | undefined): Todo[] | null {
     const input = (b.input ?? {}) as Record<string, any>;
     const command = String(input.command ?? '').toLowerCase();
 
-    // Snapshots (Claude's input, or the list Kiro echoes back) win outright.
-    const snapshot = parseList(input.todos) ?? (b.isError ? null : snapshotFromResult(b.result));
+    // Snapshots win outright. Prefer the tool result when it carries the
+    // merged list (Cursor/Grok UpdateTodos); otherwise Claude's input.todos.
+    const snapshot = todoSnapshotFromBlock(b);
     if (snapshot) {
       list = snapshot;
       seen = true;
@@ -184,6 +201,7 @@ function StatusIcon({ status }: { status: TodoStatus }) {
 export function TodoPane({ sessionId, layout = 'composer' }: { sessionId: string; layout?: 'composer' | 'rail' }) {
   const blocks = useStore((s) => s.views[sessionId]?.blocks);
   const running = useStore((s) => s.views[sessionId]?.running ?? false);
+  const cli = useStore((s) => s.viewMode) === 'cli';
   const derived = useMemo(() => latestTodos(blocks), [blocks]);
   const [open, setOpen] = useState(true);
 
@@ -206,40 +224,69 @@ export function TodoPane({ sessionId, layout = 'composer' }: { sessionId: string
     <div className={cn(layout === 'composer' && 'px-4 md:px-6')}>
       <div
         className={cn(
-          'animate-fade-in overflow-hidden rounded-xl border border-white/5 bg-ink-900/80 backdrop-blur-sm',
-          layout === 'composer' && 'mx-auto mb-2 max-w-3xl',
+          'animate-fade-in overflow-hidden',
+          cli
+            ? 'font-mono'
+            : 'rounded-xl border border-white/5 bg-ink-900/80 backdrop-blur-sm',
+          layout === 'composer' && cn('mx-auto mb-2', cli ? 'max-w-4xl' : 'max-w-3xl'),
         )}
       >
         <button
           onClick={() => setOpen((o) => !o)}
-          className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-ink-800/40"
+          className={cn(
+            'flex w-full items-center gap-2 text-left transition',
+            cli ? 'gap-2 py-1 text-slate-400 hover:text-slate-200' : 'px-3 py-2 hover:bg-ink-800/40',
+          )}
         >
-          <ListTodo className="h-4 w-4 shrink-0 text-accent-soft" />
-          <span className="text-[12.5px] font-medium text-slate-200">Tasks</span>
-          <span className="rounded-full bg-white/5 px-1.5 py-px text-[10px] font-medium text-slate-400">
+          {cli ? (
+            <span className="cli-gutter select-none text-accent-soft">■</span>
+          ) : (
+            <ListTodo className="h-4 w-4 shrink-0 text-accent-soft" />
+          )}
+          <span className={cn(cli ? 'text-[13px] text-slate-300' : 'text-[12.5px] font-medium text-slate-200')}>
+            {cli ? `TodoWrite` : 'Tasks'}
+          </span>
+          <span className={cn(cli ? 'text-[12px] text-slate-600' : 'rounded-full bg-white/5 px-1.5 py-px text-[10px] font-medium text-slate-400')}>
             {done}/{todos.length}
           </span>
-          <ChevronRight className={cn('ml-auto h-3.5 w-3.5 text-slate-600 transition-transform', open && 'rotate-90')} />
+          {!cli && <ChevronRight className={cn('ml-auto h-3.5 w-3.5 text-slate-600 transition-transform', open && 'rotate-90')} />}
         </button>
-        {/* Progress bar — always visible so a collapsed pane still shows progress. */}
-        <div className="h-1 w-full bg-white/5">
-          <div className="h-1 bg-accent/70 transition-all" style={{ width: `${pct}%` }} />
-        </div>
+        {!cli && (
+          <div className="h-1 w-full bg-white/5">
+            <div className="h-1 bg-accent/70 transition-all" style={{ width: `${pct}%` }} />
+          </div>
+        )}
         {open && (
-          <ul className={cn('px-1.5 py-1.5', layout === 'composer' && 'max-h-48 overflow-y-auto')}>
+          <ul className={cn(cli ? 'pl-[1.75rem]' : 'px-1.5 py-1.5', layout === 'composer' && 'max-h-48 overflow-y-auto')}>
             {todos.map((t, idx) => {
               const label = t.status === 'in_progress' ? t.activeForm || t.content : t.content;
+              const mark = t.status === 'completed' ? '☒' : t.status === 'in_progress' ? '■' : '☐';
               return (
-                <li key={idx} className="flex items-start gap-2 rounded-lg px-1.5 py-1">
-                  <StatusIcon status={t.status} />
-                  <span
-                    className={cn(
-                      'text-[12.5px] leading-relaxed',
-                      t.status === 'completed' ? 'text-slate-500 line-through' : 'text-slate-300',
-                    )}
-                  >
-                    {label}
-                  </span>
+                <li key={idx} className={cn('flex items-start gap-2', !cli && 'rounded-lg px-1.5 py-1')}>
+                  {cli ? (
+                    <span
+                      className={cn(
+                        'text-[13px] leading-relaxed',
+                        t.status === 'completed' && 'text-slate-600',
+                        t.status === 'in_progress' && 'text-accent-soft',
+                        t.status === 'pending' && 'text-slate-400',
+                      )}
+                    >
+                      <span className={cn(t.status === 'in_progress' && 'animate-pulse-dot')}>{mark}</span> {label}
+                    </span>
+                  ) : (
+                    <>
+                      <StatusIcon status={t.status} />
+                      <span
+                        className={cn(
+                          'text-[12.5px] leading-relaxed',
+                          t.status === 'completed' ? 'text-slate-500 line-through' : 'text-slate-300',
+                        )}
+                      >
+                        {label}
+                      </span>
+                    </>
+                  )}
                 </li>
               );
             })}

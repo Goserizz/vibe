@@ -12,7 +12,7 @@ import {
 import { CodexStreamNormalizer } from './normalize.js';
 import type { CodexRunOptions } from './runner.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
-import type { BackgroundTask, TokenUsage } from '../../../shared/protocol.js';
+import type { BackgroundTask } from '../../../shared/protocol.js';
 
 type RpcId = number | string;
 
@@ -50,23 +50,6 @@ function buildSpawn(opts: CodexRunOptions): { bin?: string; args: string[]; cwd?
   const remoteCmd = proxyEnvPrefix(opts.remote.proxy) + loginShellCommand(inner);
   const { bin, opts: sshOpts } = sshConnectPrefix();
   return { bin, args: [...sshOpts, '-T', opts.remote.sshTarget, remoteCmd], remote: true };
-}
-
-function appUsage(params: any): TokenUsage | null {
-  const usage = params?.tokenUsage;
-  const value = usage?.last ?? usage?.total;
-  if (!value) return null;
-  const inputTokens = Number(value.inputTokens) || 0;
-  const outputTokens = Number(value.outputTokens) || 0;
-  const cacheReadTokens = Number(value.cachedInputTokens) || 0;
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheCreationTokens: 0,
-    contextUsed: Number(value.totalTokens) || inputTokens + outputTokens,
-    contextWindow: Number(usage.modelContextWindow) || 200_000,
-  };
 }
 
 function terminal(status: BackgroundTask['status']): boolean {
@@ -447,8 +430,6 @@ class CodexAppServerRun {
       return;
     }
     if (method === 'thread/tokenUsage/updated') {
-      const usage = appUsage(params);
-      if (usage) this.cb.onEvent({ k: 'token_usage', usage });
       return;
     }
     if (method === 'turn/completed') {

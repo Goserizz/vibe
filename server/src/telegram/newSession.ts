@@ -7,6 +7,8 @@ import { listCursorModels, listRemoteCursorModels } from '../cursor/models.js';
 import { listCodexModels, listRemoteCodexModels } from '../codex/models.js';
 import { discoverKimiCapabilities, discoverRemoteKimiCapabilities } from '../kimi/capabilities.js';
 import { KIRO_PERMISSIONS, listKiroModels, listRemoteKiroModels } from '../kiro/models.js';
+import { GROK_PERMISSIONS, listGrokModels, listRemoteGrokModels } from '../grok/models.js';
+import { ZCODE_PERMISSIONS, listRemoteZcodeModels, listZcodeModels } from '../zcode/models.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import { hub } from '../ws/hub.js';
 import type { AgentKind, EffortLevel, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
@@ -47,6 +49,8 @@ const PERMISSIONS: Record<AgentKind, { value: PermissionMode; label: string }[]>
     { value: 'bypassPermissions', label: 'YOLO' },
   ],
   kiro: KIRO_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
+  grok: GROK_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
+  zcode: ZCODE_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
 };
 
 const EFFORTS_CLAUDE: { value: EffortLevel; label: string }[] = [
@@ -65,6 +69,32 @@ const EFFORTS_CODEX: { value: EffortLevel; label: string }[] = [
   { value: 'max', label: 'Max' },
   { value: 'ultra', label: 'Ultra' },
 ];
+
+const EFFORTS_GROK: { value: EffortLevel; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' },
+];
+
+function defaultEffort(agent: AgentKind): EffortLevel {
+  if (agent === 'codex') return 'xhigh';
+  if (agent === 'grok') return 'high';
+  return (config.defaultEffort as EffortLevel) || 'max';
+}
+
+function clampEffort(agent: AgentKind, effort: EffortLevel | undefined): EffortLevel {
+  const levels = effortsFor(agent);
+  if (effort && (levels.length === 0 || levels.some((e) => e.value === effort))) return effort;
+  return defaultEffort(agent);
+}
+
+function effortsFor(agent: AgentKind): { value: EffortLevel; label: string }[] {
+  if (agent === 'kimi' || agent === 'cursor' || agent === 'zcode') return [];
+  if (agent === 'codex') return EFFORTS_CODEX;
+  if (agent === 'grok') return EFFORTS_GROK;
+  return EFFORTS_CLAUDE;
+}
 
 /** Per-chat option lists for compact callback_data (Telegram max 64 bytes). */
 const pickCache = new Map<number, { models: string[]; cwds: string[] }>();
@@ -104,12 +134,14 @@ function defaultDraft(chatId?: number): NewDraft {
             ? config.defaultKimiModel
             : agent === 'kiro'
               ? config.defaultKiroModel
-              : config.defaultModel),
+              : agent === 'grok'
+                ? config.defaultGrokModel
+                : agent === 'zcode'
+                  ? config.defaultZcodeModel
+                  : config.defaultModel),
     permissionMode:
       saved?.permissionMode || (agent === 'claude' ? 'bypassPermissions' : 'default'),
-    effort:
-      saved?.effort ||
-      (agent === 'codex' ? 'xhigh' : ((config.defaultEffort as EffortLevel) || 'max')),
+    effort: clampEffort(agent, saved?.effort as EffortLevel | undefined),
     cwd,
   };
 }
@@ -141,9 +173,8 @@ function permissionLabel(agent: AgentKind, mode: PermissionMode | undefined): st
 }
 
 function effortLabel(agent: AgentKind, effort: EffortLevel | undefined): string {
-  const value = effort ?? (agent === 'codex' ? 'xhigh' : 'max');
-  const levels = agent === 'kimi' || agent === 'cursor' ? [] : agent === 'codex' ? EFFORTS_CODEX : EFFORTS_CLAUDE;
-  return levels.find((e) => e.value === value)?.label ?? value;
+  const value = effort ?? defaultEffort(agent);
+  return effortsFor(agent).find((e) => e.value === value)?.label ?? value;
 }
 
 function draftSummary(d: NewDraft): string {
@@ -156,7 +187,7 @@ function draftSummary(d: NewDraft): string {
     `<b>Model</b>: <code>${escHtml(d.model ?? '')}</code>`,
     `<b>Permission</b>: ${escHtml(permissionLabel(agent, d.permissionMode as PermissionMode | undefined))}`,
   ];
-  if (agent !== 'cursor' && agent !== 'kimi') {
+  if (agent !== 'cursor' && agent !== 'kimi' && agent !== 'zcode') {
     lines.push(`<b>Effort</b>: ${escHtml(effortLabel(agent, d.effort as EffortLevel | undefined))}`);
   }
   lines.push(`<b>Directory</b>: ${d.autoCwd ? '<i>auto (throwaway)</i>' : d.cwd ? `<code>${escHtml(d.cwd)}</code>` : '<i>not set</i>'}`);
@@ -173,7 +204,7 @@ function formKeyboard(d: NewDraft): InlineKeyboard {
     .text('Model', 'ns:pick:model')
     .row()
     .text('Permission', 'ns:pick:perm')
-    .text(agent === 'cursor' || agent === 'kimi' ? 'Effort (n/a)' : 'Effort', 'ns:pick:effort')
+    .text(agent === 'cursor' || agent === 'kimi' || agent === 'zcode' ? 'Effort (n/a)' : 'Effort', 'ns:pick:effort')
     .row()
     .text(d.autoCwd ? 'Directory: auto' : d.cwd ? 'Change directory' : 'Set directory…', 'ns:pick:cwd')
     .text(d.title ? 'Change title' : 'Set title…', 'ns:pick:title')
@@ -195,7 +226,7 @@ function hostKeyboard(d: NewDraft): InlineKeyboard {
 
 function agentKeyboard(d: NewDraft): InlineKeyboard {
   const kb = new InlineKeyboard();
-  for (const a of ['claude', 'cursor', 'codex', 'kimi', 'kiro'] as AgentKind[]) {
+  for (const a of ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'] as AgentKind[]) {
     kb.text(mark(d.agent, a, a[0]!.toUpperCase() + a.slice(1)), `ns:set:agent:${a}`);
   }
   kb.row().text('← Back', 'ns:back');
@@ -218,7 +249,7 @@ async function permKeyboard(d: NewDraft): Promise<InlineKeyboard> {
 
 function effortKeyboard(d: NewDraft): InlineKeyboard {
   const agent = (d.agent ?? 'claude') as AgentKind;
-  const levels = agent === 'kimi' || agent === 'cursor' ? [] : agent === 'codex' ? EFFORTS_CODEX : EFFORTS_CLAUDE;
+  const levels = effortsFor(agent);
   const kb = new InlineKeyboard();
   for (const e of levels) {
     kb.text(mark(d.effort, e.value, e.label), `ns:set:effort:${e.value}`);
@@ -239,6 +270,12 @@ async function modelOptions(d: NewDraft): Promise<{ value: string; label: string
   }
   if (agent === 'kiro') {
     return host ? await listRemoteKiroModels(host) : await listKiroModels();
+  }
+  if (agent === 'grok') {
+    return host ? await listRemoteGrokModels(host) : await listGrokModels();
+  }
+  if (agent === 'zcode') {
+    return host ? await listRemoteZcodeModels(host) : await listZcodeModels();
   }
   return host ? await listRemoteCodexModels(host) : listCodexModels();
 }
@@ -330,9 +367,13 @@ export async function createSessionFromDraft(d: NewDraft): Promise<SessionMeta> 
             ? config.defaultKimiModel
             : agent === 'kiro'
               ? config.defaultKiroModel
-              : config.defaultModel),
+              : agent === 'grok'
+                ? config.defaultGrokModel
+                : agent === 'zcode'
+                  ? config.defaultZcodeModel
+                  : config.defaultModel),
     permissionMode: (d.permissionMode as PermissionMode) || 'default',
-    effort: (d.effort as EffortLevel) || (config.defaultEffort as EffortLevel),
+    effort: clampEffort(agent, d.effort as EffortLevel | undefined),
     agent,
     title: d.title?.trim() || basename(cwd),
     host,
@@ -466,12 +507,14 @@ export async function handleNewSessionCallback(ctx: BotContext): Promise<boolean
   }
   if (data === 'ns:pick:effort') {
     const agent = d!.agent ?? 'claude';
-    if (agent === 'cursor' || agent === 'kimi') {
+    if (agent === 'cursor' || agent === 'kimi' || agent === 'zcode') {
       await replyPlain(
         ctx,
         agent === 'cursor'
           ? 'Cursor embeds effort in the model id — pick a model instead.'
-          : 'Kimi prompt mode does not expose a separate effort setting.',
+          : agent === 'zcode'
+            ? 'ZCode thought level is per-model — pick a model instead.'
+            : 'Kimi prompt mode does not expose a separate effort setting.',
       );
       await showForm(ctx, chatId, d!, true);
       return true;
@@ -542,9 +585,13 @@ export async function handleNewSessionCallback(ctx: BotContext): Promise<boolean
             ? config.defaultKimiModel
             : agent === 'kiro'
               ? config.defaultKiroModel
-              : config.defaultModel;
+              : agent === 'grok'
+                ? config.defaultGrokModel
+                : agent === 'zcode'
+                  ? config.defaultZcodeModel
+                  : config.defaultModel;
     d!.permissionMode = agent === 'claude' ? 'bypassPermissions' : 'default';
-    d!.effort = agent === 'codex' ? 'xhigh' : 'max';
+    d!.effort = defaultEffort(agent);
     saveDraft(chatId, d!);
     await showForm(ctx, chatId, d!, true);
     return true;

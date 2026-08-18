@@ -3,10 +3,12 @@ import path from 'node:path';
 import os from 'node:os';
 import express, { Router } from 'express';
 import { z } from 'zod';
-import { requireAuth } from '../auth.js';
+import { requireAdmin, requireAuth, accountOf } from '../auth.js';
+import { accountManager, AccountError } from '../accounts.js';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
+import { sessionVisible } from '../sessions/visibility.js';
 import { createLocalWorkdir, getRecentProjects, validateDir } from '../projects.js';
 import { getClaudeSessionInfo, type DiscoveredSession } from '../sessions/discovery.js';
 import { listAllSessions } from '../sessions/list.js';
@@ -29,10 +31,26 @@ import {
   listKiroModels,
   listRemoteKiroModels,
 } from '../kiro/models.js';
-import { prefetchAgentModels } from '../agents/prefetchModels.js';
 import { deleteKiroTranscript } from '../kiro/transcript.js';
+import { resolveGrokSessionSync } from '../grok/discovery.js';
+import {
+  GROK_PERMISSIONS,
+  invalidateGrokModelsCache,
+  listGrokModels,
+  listRemoteGrokModels,
+} from '../grok/models.js';
+import { deleteGrokTranscript } from '../grok/transcript.js';
+import { resolveZcodeSessionSync } from '../zcode/discovery.js';
+import {
+  ZCODE_PERMISSIONS,
+  invalidateZcodeModelsCache,
+  listRemoteZcodeModels,
+  listZcodeModels,
+} from '../zcode/models.js';
+import { deleteZcodeTranscript } from '../zcode/transcript.js';
+import { prefetchAgentModels } from '../agents/prefetchModels.js';
 import { searchConversations } from '../sessions/search.js';
-import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
+import { hostRegistry, proxyForAgent, HostRegistryError } from '../remote/hosts.js';
 import { mcpRegistry } from '../mcp/registry.js';
 import { oauthStore } from '../mcp/oauth.js';
 import { presetRegistry } from '../presets/registry.js';
@@ -97,7 +115,7 @@ const createSchema = z
     permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']).optional(),
     effort: z.enum(effortLevels).optional(),
     /** Engine to drive the session; defaults to the server's default agent. */
-    agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro']).optional(),
+    agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode']).optional(),
     title: z.string().optional(),
     /** Remote host name to create the session on; omit for local. */
     host: z.string().optional(),
@@ -117,7 +135,15 @@ const pinSchema = z.object({ pinned: z.boolean() });
 // `z.record(enumKeys, value)` would require *every* enum key to be present, so
 // model it as a partial object instead (unknown keys are stripped by default).
 const proxyByAgentSchema = z
-  .object({ claude: z.string(), cursor: z.string(), codex: z.string(), kimi: z.string(), kiro: z.string() })
+  .object({
+    claude: z.string(),
+    cursor: z.string(),
+    codex: z.string(),
+    kimi: z.string(),
+    kiro: z.string(),
+    grok: z.string(),
+    zcode: z.string(),
+  })
   .partial();
 
 const hostSchema = z.object({
@@ -149,16 +175,16 @@ const mcpServerSchema = z.object({
 // Saved New-session engine preset (agent + model + permission + effort).
 const presetSchema = z.object({
   name: z.string().min(1),
-  agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro']),
+  agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode']),
   model: z.string().min(1),
   permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']),
   effort: z.enum(effortLevels),
 });
 
 // Agent skills (personal CRUD + read-only system view) for Claude/Cursor/Codex/
-// Kimi/Kiro. Skill names become directory names under the agent's user skills dir,
+// Kimi/Kiro/Grok. Skill names become directory names under the agent's user skills dir,
 // so the charset is locked down here and re-checked server-side (no traversal).
-const skillAgentSchema = z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro']);
+const skillAgentSchema = z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode']);
 const skillNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'invalid skill name');
 const skillSaveSchema = z.object({
   agent: skillAgentSchema,
@@ -372,6 +398,25 @@ function oauthResultPage(title: string, message: string): string {
 <script>try{setTimeout(()=>window.close(),1500);}catch(e){}</script></body></html>`;
 }
 
+/** Reject a ?host= request when the acting account can't use that host. An
+ *  empty host means the local machine, which is admin-only. Returns true when
+ *  the response was sent (caller should return). */
+function hostForbidden(res: express.Response, account: string, host?: string): boolean {
+  if (hostRegistry.visibleTo(account, host?.trim() || 'local')) return false;
+  res.status(403).json({
+    error: host?.trim() ? 'this host is not available for your account' : 'the local machine is admin-only',
+  });
+  return true;
+}
+
+/** Reject a session-scoped request the account can't see. Returns true when
+ *  the response was sent. Uses 404 (not 403) so session existence isn't leaked. */
+function sessionForbidden(res: express.Response, account: string, sessionId: string): boolean {
+  if (sessionVisible(account, sessionId)) return false;
+  res.status(404).json({ error: 'not found' });
+  return true;
+}
+
 export function createApiRouter(): Router {
   const router = Router();
 
@@ -397,13 +442,98 @@ export function createApiRouter(): Router {
     }
   });
 
-  router.use(requireAuth);
-
-  router.get('/me', (_req, res) => {
-    res.json({ ok: true, serverVersion: config.serverVersion, defaultModel: config.defaultModel });
+  // Password login — must sit before requireAuth (the caller has no token yet).
+  // Rate-limited inside the account manager (5 failures ⇒ 60s lock per name).
+  router.post('/auth/login', (req, res) => {
+    const parsed = z.object({ name: z.string().min(1), password: z.string().min(1) }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid body' });
+      return;
+    }
+    try {
+      const ref = accountManager.verifyLogin(parsed.data.name, parsed.data.password);
+      res.json({ token: accountManager.tokenFor(ref.name), account: ref.name, isAdmin: ref.isAdmin });
+    } catch (err) {
+      const status = err instanceof AccountError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'login failed' });
+    }
   });
 
-  router.get('/projects', (_req, res) => {
+  router.use(requireAuth);
+
+  // -- Accounts (admin only) --------------------------------------------------
+
+  router.get('/accounts', requireAdmin, (_req, res) => {
+    res.json({ accounts: accountManager.list() });
+  });
+
+  router.post('/accounts', requireAdmin, (req, res) => {
+    const parsed = z
+      .object({ name: z.string().min(1), password: z.string().min(6) })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid body' });
+      return;
+    }
+    try {
+      res.json(accountManager.create(parsed.data.name, parsed.data.password));
+    } catch (err) {
+      const status = err instanceof AccountError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'create failed' });
+    }
+  });
+
+  router.delete('/accounts/:name', requireAdmin, (req, res) => {
+    try {
+      const name = String(req.params.name);
+      accountManager.remove(name);
+      // Accounts are peers — nobody inherits the deleted account's hosts, so
+      // they (and their sessions) go away with it.
+      const removed = hostRegistry.removeOwnedBy(name);
+      res.json({ ok: true, hostsRemoved: removed });
+    } catch (err) {
+      const status = err instanceof AccountError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'delete failed' });
+    }
+  });
+
+  router.post('/accounts/:name/token', requireAdmin, (req, res) => {
+    try {
+      res.json(accountManager.resetToken(String(req.params.name)));
+    } catch (err) {
+      const status = err instanceof AccountError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'reset failed' });
+    }
+  });
+
+  router.put('/accounts/:name/password', requireAdmin, (req, res) => {
+    const parsed = z.object({ password: z.string().min(6) }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid body' });
+      return;
+    }
+    try {
+      accountManager.setPassword(String(req.params.name), parsed.data.password);
+      res.json({ ok: true });
+    } catch (err) {
+      const status = err instanceof AccountError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'update failed' });
+    }
+  });
+
+  router.get('/me', (req, res) => {
+    const account = accountOf(req);
+    res.json({
+      ok: true,
+      serverVersion: config.serverVersion,
+      defaultModel: config.defaultModel,
+      account: account.name,
+      isAdmin: account.isAdmin,
+    });
+  });
+
+  // Recent local working directories — local machine info, admin-only.
+  router.get('/projects', requireAdmin, (_req, res) => {
     res.json({ projects: getRecentProjects() });
   });
 
@@ -413,6 +543,7 @@ export function createApiRouter(): Router {
   // models match what a turn on that host can actually use.
   router.get('/cursor/models', async (req, res) => {
     const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
     const models = host ? await listRemoteCursorModels(host) : await listCursorModels();
     res.json({ models });
   });
@@ -423,6 +554,7 @@ export function createApiRouter(): Router {
   // can actually use — same rationale as Cursor above.
   router.get('/codex/models', async (req, res) => {
     const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
     const models = host ? await listRemoteCodexModels(host) : listCodexModels();
     res.json({ models });
   });
@@ -431,6 +563,7 @@ export function createApiRouter(): Router {
   // by flags/ACP support advertised by that exact local or remote CLI build.
   router.get('/kimi/capabilities', async (req, res) => {
     const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
     const capabilities = host ? await discoverRemoteKimiCapabilities(host) : await discoverKimiCapabilities();
     res.json(capabilities);
   });
@@ -438,11 +571,29 @@ export function createApiRouter(): Router {
   // Kiro CLI lists models as JSON; permission modes are fixed (spawn trust flags + planner mode).
   router.get('/kiro/models', async (req, res) => {
     const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
     const models = host ? await listRemoteKiroModels(host) : await listKiroModels();
     res.json({ models, permissions: KIRO_PERMISSIONS });
   });
 
-  router.post('/projects/validate', (req, res) => {
+  // Grok Build lists models via `grok models`; permission modes are fixed (Ask / Plan / Auto / Always-approve).
+  router.get('/grok/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    const models = host ? await listRemoteGrokModels(host) : await listGrokModels();
+    res.json({ models, permissions: GROK_PERMISSIONS });
+  });
+
+  // ZCode models come from ~/.zcode/cli/config.json (no CLI spawn needed);
+  // permission modes are fixed (Ask / Plan / Edit / Yolo).
+  router.get('/zcode/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    const models = host ? await listRemoteZcodeModels(host) : await listZcodeModels();
+    res.json({ models, permissions: ZCODE_PERMISSIONS });
+  });
+
+  router.post('/projects/validate', requireAdmin, (req, res) => {
     const path = typeof req.body?.path === 'string' ? req.body.path : '';
     res.json(validateDir(path));
   });
@@ -457,6 +608,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: 'invalid body' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     const { remote, target } = resolveFileTarget(parsed.data.host);
     const { stem, prefix } = splitCompletionInput(parsed.data.path);
     const pfx = prefix.toLowerCase();
@@ -512,6 +664,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     const dirPath = parsed.data.path;
     const { remote, target } = resolveFileTarget(parsed.data.host);
     try {
@@ -561,6 +714,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     const filePath = parsed.data.path;
     const { remote, target } = resolveFileTarget(parsed.data.host);
     try {
@@ -613,6 +767,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     const filePath = parsed.data.path;
     const { remote, target } = resolveFileTarget(parsed.data.host);
     try {
@@ -636,6 +791,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     const filePath = parsed.data.path;
     const { remote, target } = resolveFileTarget(parsed.data.host);
     try {
@@ -661,6 +817,7 @@ export function createApiRouter(): Router {
       res.status(422).json({ error: 'cannot write binary content' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, host)) return;
     const { remote, target } = resolveFileTarget(host);
     try {
       if (remote) {
@@ -710,6 +867,7 @@ export function createApiRouter(): Router {
         return;
       }
       const { dir, host } = parsed.data;
+      if (hostForbidden(res, accountOf(req).name, host)) return;
       const name = path.basename(parsed.data.name) || 'upload';
       const dest = path.posix.join(dir, name);
       const { remote, target } = resolveFileTarget(host);
@@ -747,6 +905,7 @@ export function createApiRouter(): Router {
     express.raw({ type: () => true, limit: UPLOAD_BODY_LIMIT }),
     async (req, res) => {
       const id = req.params.id;
+      if (sessionForbidden(res, accountOf(req).name, id)) return;
       const rawName = typeof req.query.name === 'string' ? req.query.name : '';
       const name = path.basename(rawName) || 'upload';
       const body = req.body;
@@ -778,8 +937,8 @@ export function createApiRouter(): Router {
 
   // -- Remote hosts ---------------------------------------------------------
 
-  router.get('/hosts', (_req, res) => {
-    res.json({ hosts: hostRegistry.list(), localName: config.localName });
+  router.get('/hosts', (req, res) => {
+    res.json({ hosts: hostRegistry.listFor(accountOf(req).name), localName: config.localName });
   });
 
   router.post('/hosts', (req, res) => {
@@ -788,10 +947,15 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid host' });
       return;
     }
-    const host = hostRegistry.add(parsed.data);
-    // Warm remote model caches so the new-session picker never waits on SSH.
-    prefetchAgentModels([host.name]);
-    res.json({ host });
+    try {
+      const host = hostRegistry.add(parsed.data, accountOf(req).name);
+      // Warm remote model caches so the new-session picker never waits on SSH.
+      prefetchAgentModels([host.name]);
+      res.json({ host });
+    } catch (err) {
+      const status = err instanceof HostRegistryError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'invalid host' });
+    }
   });
 
   // Patch an existing host's ssh target and/or proxy (e.g. set/clear the proxy
@@ -802,7 +966,14 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid host' });
       return;
     }
-    const updated = hostRegistry.update(req.params.name, parsed.data);
+    let updated;
+    try {
+      updated = hostRegistry.update(req.params.name, parsed.data, accountOf(req).name);
+    } catch (err) {
+      const status = err instanceof HostRegistryError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'invalid host' });
+      return;
+    }
     if (!updated) {
       res.status(404).json({ error: 'unknown host' });
       return;
@@ -819,6 +990,7 @@ export function createApiRouter(): Router {
     if (proxyChanged) {
       invalidateCursorModelsCache(updated.name);
       invalidateCodexModelsCache(updated.name);
+      invalidateGrokModelsCache(updated.name);
     }
     if (parsed.data.ssh !== undefined || proxyChanged) {
       prefetchAgentModels([updated.name]);
@@ -827,18 +999,30 @@ export function createApiRouter(): Router {
   });
 
   router.delete('/hosts/:name', (req, res) => {
-    hostRegistry.remove(req.params.name);
-    res.json({ ok: true });
+    try {
+      const ok = hostRegistry.remove(req.params.name, accountOf(req).name);
+      if (!ok) {
+        res.status(404).json({ error: 'unknown host' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      const status = err instanceof HostRegistryError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'invalid host' });
+    }
   });
 
   // -- MCP servers (global registry + per-scope enable) --------------------
 
+  // The MCP server registry is the shared toolbox — every account can read it
+  // and toggle per-scope enablement for scopes it owns, but only admin edits
+  // definitions (env vars may carry secrets) and manages OAuth connections.
   router.get('/mcp', (_req, res) => {
     res.json(mcpRegistry.snapshot());
   });
 
   // Insert or update a server definition in the global registry.
-  router.post('/mcp/servers', (req, res) => {
+  router.post('/mcp/servers', requireAdmin, (req, res) => {
     const parsed = mcpServerSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid server' });
@@ -852,8 +1036,8 @@ export function createApiRouter(): Router {
     res.json({ server });
   });
 
-  router.delete('/mcp/servers/:name', (req, res) => {
-    mcpRegistry.remove(req.params.name);
+  router.delete('/mcp/servers/:name', requireAdmin, (req, res) => {
+    mcpRegistry.remove(String(req.params.name));
     res.json({ ok: true });
   });
 
@@ -864,6 +1048,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid enable list' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, req.params.scope)) return;
     mcpRegistry.setEnabled(req.params.scope, parsed.data.names);
     res.json({ enabled: mcpRegistry.enabledFor(req.params.scope) });
   });
@@ -906,6 +1091,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     try {
       res.json({ skills: await listSkills({ agent: parsed.data.agent, host: parsed.data.host }) });
     } catch (err) {
@@ -926,6 +1112,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     try {
       const skill = await readSkill({
         agent: parsed.data.agent,
@@ -952,6 +1139,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: 'invalid skill name' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     try {
       const skill: SkillDetail = await writeSkill(parsed.data);
       res.json({ skill });
@@ -973,6 +1161,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid skill' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     try {
       await deleteSkill({ agent: parsed.data.agent, host: parsed.data.host, name: parsed.data.name });
       res.json({ ok: true });
@@ -996,6 +1185,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     try {
       const files: ConfigFileEntry[] = await listConfigFiles({ agent: parsed.data.agent, host: parsed.data.host });
       res.json({ files });
@@ -1013,6 +1203,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     try {
       const file: ConfigFileDetail = await readConfigFile({ agent: parsed.data.agent, host: parsed.data.host, id: parsed.data.id });
       res.json({ file });
@@ -1029,6 +1220,7 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid config' });
       return;
     }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host)) return;
     try {
       const file: ConfigFileDetail = await writeConfigFile(parsed.data);
       res.json({ file });
@@ -1040,7 +1232,7 @@ export function createApiRouter(): Router {
 
   // Begin the MCP-OAuth flow for a server: discover + register, return the
   // provider consent URL for the client to open in the user's browser.
-  router.post('/mcp/oauth/start', async (req, res) => {
+  router.post('/mcp/oauth/start', requireAdmin, async (req, res) => {
     const name = typeof req.body?.name === 'string' ? req.body.name : '';
     const def = mcpRegistry.get(name);
     if (!def || def.transport === 'stdio' || def.auth !== 'oauth' || !def.url) {
@@ -1058,15 +1250,17 @@ export function createApiRouter(): Router {
   });
 
   // Drop stored tokens for an OAuth server (best-effort revocation).
-  router.post('/mcp/oauth/disconnect/:name', async (req, res) => {
-    await oauthStore.disconnect(req.params.name);
+  router.post('/mcp/oauth/disconnect/:name', requireAdmin, async (req, res) => {
+    await oauthStore.disconnect(String(req.params.name));
     res.json({ ok: true, oauth: oauthStore.snapshotStatus() });
   });
 
   // Reachability + per-agent install/version probe for a host (by name or raw ssh target).
-  // `local` / the configured localName probes this machine without SSH.
+  // `local` / the configured localName probes this machine without SSH —
+  // admin-only, like every other use of the local machine.
   router.get('/hosts/:name/check', async (req, res) => {
     const name = req.params.name;
+    if (hostForbidden(res, accountOf(req).name, name)) return;
     if (name === 'local' || name === config.localName) {
       const result = await localProbeAgents();
       res.json({ name: config.localName, ssh: 'local', ...result });
@@ -1088,10 +1282,11 @@ export function createApiRouter(): Router {
   router.post('/hosts/:name/agents/:agent/update', async (req, res) => {
     const agentParam = req.params.agent;
     if (!isAgentKind(agentParam)) {
-      res.status(400).json({ error: 'agent must be claude, cursor, codex, kimi, or kiro' });
+      res.status(400).json({ error: 'agent must be claude, cursor, codex, kimi, kiro, grok, or zcode' });
       return;
     }
     const name = req.params.name;
+    if (hostForbidden(res, accountOf(req).name, name)) return;
     const isLocal = name === 'local' || name === config.localName;
     if (!isLocal && !hostRegistry.get(name)) {
       res.status(404).json({ error: 'unknown host' });
@@ -1107,6 +1302,8 @@ export function createApiRouter(): Router {
       }
       if (agentParam === 'kimi') invalidateKimiCapabilitiesCache(isLocal ? undefined : name);
       if (agentParam === 'kiro') invalidateKiroModelsCache(isLocal ? undefined : name);
+      if (agentParam === 'grok') invalidateGrokModelsCache(isLocal ? undefined : name);
+      if (agentParam === 'zcode') invalidateZcodeModelsCache(isLocal ? undefined : name);
       // Re-warm in the background; the update response itself stays snappy.
       prefetchAgentModels(isLocal ? [] : [name]);
       res.json(result);
@@ -1121,9 +1318,10 @@ export function createApiRouter(): Router {
   });
 
   // Unified list: local Vibe-managed + local CLI-discovered + every remote
-  // host's sessions, deduped and tagged with their host.
-  router.get('/sessions', async (_req, res) => {
-    res.json({ sessions: await listAllSessions() });
+  // host's sessions, deduped and tagged with their host — filtered down to the
+  // hosts and sessions the acting account may see.
+  router.get('/sessions', async (req, res) => {
+    res.json({ sessions: await listAllSessions(accountOf(req).name) });
   });
 
   router.post('/sessions', async (req, res) => {
@@ -1132,12 +1330,14 @@ export function createApiRouter(): Router {
       res.status(400).json({ error: 'invalid body', details: parsed.error.issues });
       return;
     }
+    const account = accountOf(req).name;
     const { host } = parsed.data;
     // autoCwd only applies when the caller didn't also hand us an explicit path.
     const wantAuto = !!parsed.data.autoCwd && !parsed.data.cwd?.trim();
     let cwd = parsed.data.cwd?.trim() ?? '';
     if (host) {
       // Remote: trust the path (validated lazily when the turn runs over SSH).
+      if (hostForbidden(res, account, host)) return;
       const remoteHost = hostRegistry.get(host);
       if (!remoteHost) {
         res.status(400).json({ error: 'unknown host' });
@@ -1152,15 +1352,19 @@ export function createApiRouter(): Router {
           return;
         }
       }
-    } else if (wantAuto) {
-      cwd = createLocalWorkdir();
     } else {
-      const check = validateDir(cwd);
-      if (!check.ok) {
-        res.status(400).json({ error: check.error || 'invalid cwd' });
-        return;
+      // No host = the local machine, which is admin-only.
+      if (hostForbidden(res, account)) return;
+      if (wantAuto) {
+        cwd = createLocalWorkdir();
+      } else {
+        const check = validateDir(cwd);
+        if (!check.ok) {
+          res.status(400).json({ error: check.error || 'invalid cwd' });
+          return;
+        }
+        cwd = check.path;
       }
-      cwd = check.path;
     }
     const agent: AgentKind = parsed.data.agent ?? config.defaultAgent;
     const session = sessionStore.create({
@@ -1175,12 +1379,19 @@ export function createApiRouter(): Router {
               ? config.defaultKimiModel
               : agent === 'kiro'
                 ? config.defaultKiroModel
-                : config.defaultModel),
+                : agent === 'grok'
+                  ? config.defaultGrokModel
+                  : agent === 'zcode'
+                    ? config.defaultZcodeModel
+                    : config.defaultModel),
       permissionMode: (parsed.data.permissionMode as PermissionMode) || 'default',
       effort: (parsed.data.effort as EffortLevel) || (config.defaultEffort as EffortLevel),
       agent,
       title: parsed.data.title,
       host,
+      // Local New-Session rows are private to their creator; remote rows follow
+      // the host's owner (the field is bookkeeping there).
+      owner: account,
       ephemeral: wantAuto || undefined,
     });
     const meta = toMeta(session, false, 'vibe');
@@ -1189,6 +1400,7 @@ export function createApiRouter(): Router {
   });
 
   router.get('/sessions/:id', (req, res) => {
+    if (sessionForbidden(res, accountOf(req).name, req.params.id)) return;
     const stored = sessionStore.get(req.params.id);
     if (!stored) {
       res.status(404).json({ error: 'not found' });
@@ -1206,6 +1418,7 @@ export function createApiRouter(): Router {
       return;
     }
     const id = req.params.id;
+    if (sessionForbidden(res, accountOf(req).name, id)) return;
     // Editing a discovered CLI session (local or remote) adopts it so the change persists.
     if (!sessionStore.get(id)) {
       const { host, claudeSessionId } = parseSessionId(id);
@@ -1243,6 +1456,18 @@ export function createApiRouter(): Router {
               if (r) {
                 info = r;
                 agent = 'kiro';
+              } else {
+                const g = resolveGrokSessionSync(id);
+                if (g) {
+                  info = g;
+                  agent = 'grok';
+                } else {
+                  const z = resolveZcodeSessionSync(id);
+                  if (z) {
+                    info = z;
+                    agent = 'zcode';
+                  }
+                }
               }
             }
           }
@@ -1286,6 +1511,7 @@ export function createApiRouter(): Router {
       return;
     }
     const id = req.params.id;
+    if (sessionForbidden(res, accountOf(req).name, id)) return;
     if (parsed.data.pinned) sessionStore.pin(id);
     else sessionStore.unpin(id);
     const meta = peekSessionListCache()?.find((s) => s.id === id);
@@ -1297,10 +1523,13 @@ export function createApiRouter(): Router {
   // transcript; instead we dismiss it (so discovery won't resurface it).
   router.delete('/sessions/:id', (req, res) => {
     const id = req.params.id;
+    if (sessionForbidden(res, accountOf(req).name, id)) return;
     const stored = sessionStore.get(id);
     sessionStore.remove(id);
     if (stored?.agent === 'kimi') deleteKimiTranscript(id);
     if (stored?.agent === 'kiro') deleteKiroTranscript(id);
+    if (stored?.agent === 'grok') deleteGrokTranscript(id);
+    if (stored?.agent === 'zcode') deleteZcodeTranscript(id);
     // Dismiss every form discovery might resurface it under (the list id and,
     // for local sessions, the bare Claude id).
     sessionStore.hide(id);
@@ -1312,6 +1541,7 @@ export function createApiRouter(): Router {
   // Conversation history + the seq to subscribe from (see Hub.snapshot).
   // Works for local Vibe-managed, local CLI, and remote sessions.
   router.get('/sessions/:id/messages', async (req, res) => {
+    if (sessionForbidden(res, accountOf(req).name, req.params.id)) return;
     await ensureRemoteCached(req.params.id);
     res.json(await hub.snapshot(req.params.id));
   });
@@ -1321,7 +1551,7 @@ export function createApiRouter(): Router {
     const q = typeof req.query.q === 'string' ? req.query.q : '';
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 200) : 50;
-    res.json({ results: await searchConversations(q, limit) });
+    res.json({ results: await searchConversations(q, limit, accountOf(req).name) });
   });
 
   // Surface available permission modes for the UI.
@@ -1332,6 +1562,9 @@ export function createApiRouter(): Router {
   // -- Vibot (the separate assistant interface) -----------------------------
   // Its own config (LLM API + system prompt), conversations, and memories.
   // The API key is masked on read; an empty apiKey on write keeps the stored one.
+  // Admin-only: Vibot's tools can drive any host's sessions, so it stays with
+  // the superuser account.
+  router.use('/vibot', requireAdmin);
 
   router.get('/vibot/config', (_req, res) => {
     res.json({ config: vibotConfigClient(loadVibotConfig()) });

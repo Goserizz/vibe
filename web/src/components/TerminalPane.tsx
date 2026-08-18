@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { useStore } from '../store/store';
 import { resolveToken } from '../lib/token';
+import { CHAT_MONO_FAMILY, TUI_FONT_FAMILY } from '../lib/viewMode';
 import type { ITheme } from '@xterm/xterm';
 
 const DARK_THEME: ITheme = {
@@ -18,6 +19,22 @@ const LIGHT_THEME: ITheme = {
   foreground: '#1e293b',
   cursor: '#3b5bdb',
   cursorAccent: '#ffffff',
+  selectionBackground: 'rgba(59,91,219,0.20)',
+};
+/* TUI variants sit on the cli-mode ground (near-black / paper white) so the
+   pane blends with the transcript chrome instead of the card UI's ink-950. */
+const TUI_DARK_THEME: ITheme = {
+  background: '#0c0c0c',
+  foreground: '#e8e8e8',
+  cursor: '#7c9cff',
+  cursorAccent: '#0c0c0c',
+  selectionBackground: 'rgba(124,156,255,0.30)',
+};
+const TUI_LIGHT_THEME: ITheme = {
+  background: '#fafafa',
+  foreground: '#181818',
+  cursor: '#3b5bdb',
+  cursorAccent: '#fafafa',
   selectionBackground: 'rgba(59,91,219,0.20)',
 };
 
@@ -41,8 +58,18 @@ export function TerminalPane({ active }: { active: boolean }) {
   const activeId = useStore((s) => s.activeId);
   const sessions = useStore((s) => s.sessions);
   const theme = useStore((s) => s.theme);
+  const viewMode = useStore((s) => s.viewMode);
   const hostRef = useRef<HTMLDivElement>(null);
   const instances = useRef<Map<string, TermInstance>>(new Map());
+
+  const termTheme = () =>
+    viewMode === 'cli'
+      ? theme === 'light'
+        ? TUI_LIGHT_THEME
+        : TUI_DARK_THEME
+      : theme === 'light'
+        ? LIGHT_THEME
+        : DARK_THEME;
 
   const destroyInstance = useCallback((id: string) => {
     const inst = instances.current.get(id);
@@ -79,10 +106,10 @@ export function TerminalPane({ active }: { active: boolean }) {
 
       const term = new Terminal({
         fontSize: 12.5,
-        fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontFamily: viewMode === 'cli' ? TUI_FONT_FAMILY : CHAT_MONO_FAMILY,
         cursorBlink: true,
         scrollback: 5000,
-        theme: theme === 'light' ? LIGHT_THEME : DARK_THEME,
+        theme: termTheme(),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
@@ -144,7 +171,7 @@ export function TerminalPane({ active }: { active: boolean }) {
       instances.current.set(id, inst);
       return inst;
     },
-    [theme],
+    [theme, viewMode],
   );
 
   // Show + create + fit the active session's terminal, but only while this tab
@@ -167,9 +194,18 @@ export function TerminalPane({ active }: { active: boolean }) {
 
   // Live theme switch without dropping any running shell.
   useEffect(() => {
-    const t = theme === 'light' ? LIGHT_THEME : DARK_THEME;
+    const t = termTheme();
     for (const it of instances.current.values()) it.term.options.theme = t;
-  }, [theme]);
+  }, [theme, viewMode]);
+
+  // TUI swaps in Sarasa as the CJK fallback; cell metrics can change, so refit.
+  useEffect(() => {
+    const family = viewMode === 'cli' ? TUI_FONT_FAMILY : CHAT_MONO_FAMILY;
+    for (const it of instances.current.values()) {
+      it.term.options.fontFamily = family;
+      it.resize();
+    }
+  }, [viewMode]);
 
   // Reap terminals whose session was deleted (otherwise they'd leak, unreachable).
   useEffect(() => {

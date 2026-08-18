@@ -56,6 +56,14 @@ const AGENT_CONFIGS: Record<AgentKind, ConfigFileDef[]> = {
   kiro: [
     { id: 'cli', label: 'settings/cli.json', rel: '~/.kiro/settings/cli.json', local: () => path.join(home(), '.kiro', 'settings', 'cli.json') },
   ],
+  grok: [
+    { id: 'config', label: 'config.toml', rel: '~/.grok/config.toml', local: () => path.join(home(), '.grok', 'config.toml') },
+  ],
+  zcode: [
+    // Holds provider credentials + model selection + MCP servers; raw JSON,
+    // preserved as-is on edit (same policy as the other agents' config files).
+    { id: 'config', label: 'config.json', rel: '~/.zcode/cli/config.json', local: () => path.join(home(), '.zcode', 'cli', 'config.json') },
+  ],
 };
 
 /** Resolve an opaque `id` to its fixed def, or throw. This is the confinement check. */

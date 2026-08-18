@@ -10,6 +10,7 @@ import { attachWsServer } from './ws/server.js';
 import { startTelegramBot } from './telegram/index.js';
 import { prefetchSessionList, startSessionListRefresher, stopSessionListRefresher } from './sessions/list.js';
 import { prefetchAgentModels } from './agents/prefetchModels.js';
+import { scheduleZcodeAutoUpdate, stopZcodeAutoUpdate } from './zcode/autoUpdate.js';
 
 function localIPs(): string[] {
   const out: string[] = [];
@@ -71,6 +72,7 @@ function main(): void {
     startSessionListRefresher();
     prefetchAgentModels();
     telegram = startTelegramBot();
+    scheduleZcodeAutoUpdate();
   });
 
   server.on('error', (err) => {
@@ -83,6 +85,7 @@ function main(): void {
   const shutdown = async (signal: string) => {
     log.info(`shutting down (${signal})…`);
     stopSessionListRefresher();
+    stopZcodeAutoUpdate();
     try {
       await telegram?.stop();
     } catch (err) {

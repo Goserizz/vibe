@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { X } from 'lucide-react';
+import { X } from '../lib/icons';
 import { useStore } from '../store/store';
 import { Glass } from './LiquidGlass';
 

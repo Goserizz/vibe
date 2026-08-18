@@ -3,7 +3,8 @@ import { WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { log } from '../log.js';
 import { config } from '../config.js';
-import { tokenMatches } from '../auth.js';
+import { resolveAccountByToken } from '../auth.js';
+import { sessionVisible } from '../sessions/visibility.js';
 import { WsConn, hub } from './hub.js';
 import { vibotHub } from '../vibot/hub.js';
 import { spawnTerminal } from '../terminal/pty.js';
@@ -39,15 +40,24 @@ export function attachWsServer(server: Server): void {
 
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '', 'http://localhost');
-    if (!tokenMatches(url.searchParams.get('token'))) {
+    const account = resolveAccountByToken(url.searchParams.get('token'));
+    if (!account) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
+    // ws's `connection` event is typed (ws, req); carry the resolved account on
+    // the socket instead of threading it through the event emitter.
     if (url.pathname === '/ws') {
-      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        (ws as unknown as WsWithAccount).vibeAccount = account;
+        wss.emit('connection', ws, req);
+      });
     } else if (url.pathname === '/terminal') {
-      termWss.handleUpgrade(req, socket, head, (ws) => termWss.emit('connection', ws, req));
+      termWss.handleUpgrade(req, socket, head, (ws) => {
+        (ws as unknown as WsWithAccount).vibeAccount = account;
+        termWss.emit('connection', ws, req);
+      });
     } else {
       socket.destroy();
     }
@@ -56,7 +66,8 @@ export function attachWsServer(server: Server): void {
   attachTerminalWs(termWss);
 
   wss.on('connection', (ws) => {
-    const conn = new WsConn(ws);
+    const account = (ws as unknown as WsWithAccount).vibeAccount ?? { name: 'admin', isAdmin: true };
+    const conn = new WsConn(ws, account.name);
     hub.addConn(conn);
     vibotHub.addConn(conn);
     conn.send({ t: 'hello', protocolVersion: PROTOCOL_VERSION, serverVersion: config.serverVersion });
@@ -90,25 +101,33 @@ export function attachWsServer(server: Server): void {
           hub.send(conn, msg.sessionId, msg.clientMsgId, msg.text);
           break;
         case 'abort':
-          hub.abort(msg.sessionId);
+          if (!hub.abort(msg.sessionId, conn.account)) {
+            conn.send({ t: 'error', message: 'session not found', sessionId: msg.sessionId });
+          }
           break;
         case 'task_stop':
           hub.stopTask(conn, msg.sessionId, msg.taskId);
           break;
         case 'permission':
-          hub.resolvePermission(msg.sessionId, msg.requestId, msg.decision);
+          if (!hub.resolvePermission(msg.sessionId, msg.requestId, msg.decision, conn.account)) {
+            conn.send({ t: 'error', message: 'session not found', sessionId: msg.sessionId });
+          }
           break;
         case 'vibot_subscribe':
-          vibotHub.subscribe(conn, msg.convId, msg.lastSeq);
+          if (!conn.isAdmin()) conn.send({ t: 'error', message: 'vibot is admin-only' });
+          else vibotHub.subscribe(conn, msg.convId, msg.lastSeq);
           break;
         case 'vibot_unsubscribe':
-          vibotHub.unsubscribe(conn, msg.convId);
+          if (!conn.isAdmin()) conn.send({ t: 'error', message: 'vibot is admin-only' });
+          else vibotHub.unsubscribe(conn, msg.convId);
           break;
         case 'vibot_send':
-          vibotHub.send(conn, msg.convId, msg.clientMsgId, msg.text);
+          if (!conn.isAdmin()) conn.send({ t: 'error', message: 'vibot is admin-only' });
+          else vibotHub.send(conn, msg.convId, msg.clientMsgId, msg.text);
           break;
         case 'vibot_abort':
-          vibotHub.abort(msg.convId);
+          if (!conn.isAdmin()) conn.send({ t: 'error', message: 'vibot is admin-only' });
+          else vibotHub.abort(msg.convId);
           break;
         case 'ping':
           conn.send({ t: 'pong' });
@@ -150,7 +169,14 @@ export function attachWsServer(server: Server): void {
 function attachTerminalWs(wss: WebSocketServer): void {
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url ?? '', 'http://localhost');
-    const loc = hub.locate(url.searchParams.get('sessionId') ?? '');
+    const account = (ws as unknown as WsWithAccount).vibeAccount ?? { name: 'admin', isAdmin: true };
+    const sessionId = url.searchParams.get('sessionId') ?? '';
+    if (!sessionVisible(account.name, sessionId)) {
+      ws.send(JSON.stringify({ t: 'error', message: 'session not found' }));
+      ws.close();
+      return;
+    }
+    const loc = hub.locate(sessionId);
     if (!loc) {
       ws.send(JSON.stringify({ t: 'error', message: 'session not found' }));
       ws.close();
@@ -209,4 +235,9 @@ function attachTerminalWs(wss: WebSocketServer): void {
 
 interface WsWithLiveness {
   isAlive?: boolean;
+}
+
+/** Account resolved at upgrade time, attached to the raw WebSocket. */
+interface WsWithAccount {
+  vibeAccount?: { name: string; isAdmin: boolean };
 }

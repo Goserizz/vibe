@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { X, RotateCcw, Brain } from 'lucide-react';
+import { X, RotateCcw, Brain } from '../../lib/icons';
 import { useVibotStore } from '../../store/vibot';
 
 /** Modal for Vibot's own LLM API config (OpenAI-compatible) + system prompt. */

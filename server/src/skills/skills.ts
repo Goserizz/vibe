@@ -13,7 +13,7 @@ export function validateSkillName(name: string): boolean {
 }
 
 /**
- * Per-agent skill layout. All five agents share the Agent Skills standard
+ * Per-agent skill layout. All six agents share the Agent Skills standard
  * (`<name>/SKILL.md` + YAML frontmatter); they differ only in directory.
  *  - `personalRel` is the remote path (`~` left bare so the remote login shell
  *    expands it; never interpolates user input).
@@ -62,6 +62,18 @@ const AGENT_SKILLS: Record<AgentKind, AgentSkills> = {
   kiro: {
     personalRel: '~/.kiro/skills',
     personalLocal: () => path.join(home(), '.kiro', 'skills'),
+    system: [],
+  },
+  grok: {
+    personalRel: '~/.grok/skills',
+    personalLocal: () => path.join(home(), '.grok', 'skills'),
+    system: [],
+  },
+  zcode: {
+    // ZCode reads user skills from the shared ~/.agents/skills dir (verified
+    // via `zcode skills list`); plugin skills live under its own cache.
+    personalRel: '~/.agents/skills',
+    personalLocal: () => path.join(home(), '.agents', 'skills'),
     system: [],
   },
 };

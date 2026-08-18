@@ -18,6 +18,36 @@
       } catch (e) {
         document.documentElement.className = 'dark';
       }
+      // CLI view is a terminal shell — apply before paint so the TUI ground
+      // (near-black in dark, paper white in light) is painted from the first
+      // frame with no theme flash.
+      try {
+        if (localStorage.getItem('vibe.viewMode') === 'cli') {
+          document.documentElement.classList.add('cli-mode');
+          document.querySelectorAll('link[rel="icon"], link[rel="apple-touch-icon"]').forEach(function (el) { el.remove(); });
+          var icon = document.createElement('link');
+          icon.rel = 'icon';
+          icon.type = 'image/svg+xml';
+          icon.href = '/favicon-cli.svg';
+          document.head.appendChild(icon);
+          var apple = document.createElement('link');
+          apple.rel = 'apple-touch-icon';
+          apple.href = '/favicon-cli.svg';
+          document.head.appendChild(apple);
+          var font = document.createElement('link');
+          font.id = 'tui-fonts';
+          font.rel = 'stylesheet';
+          font.href = '/fonts/sarasa-term-sc-nerd/result.css';
+          document.head.appendChild(font);
+        }
+      } catch (e) {}
+      // High contrast is a root-class variant (pure-white/black hairlines,
+      // boosted faint text) — apply before paint so borders never flash.
+      try {
+        if (localStorage.getItem('vibe.contrast') === 'high') {
+          document.documentElement.classList.add('hc');
+        }
+      } catch (e) {}
       // Apply accent before paint: manual override from localStorage, else OS
       // AccentColor (falls back to CSS tokens when neither is available).
       try {

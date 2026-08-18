@@ -1,9 +1,13 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef } from 'react';
 import { useStore } from '../store/store';
 import { BlockView } from './blocks';
+import { CliBlockView } from './CliBlocks';
+import { cn } from '../lib/format';
 
 export function MessageList({ sessionId, bottomPad }: { sessionId: string; bottomPad?: number }) {
   const blocks = useStore((s) => s.views[sessionId]?.blocks);
+  const viewMode = useStore((s) => s.viewMode);
+  const cli = viewMode === 'cli';
   const containerRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
 
@@ -19,7 +23,7 @@ export function MessageList({ sessionId, bottomPad }: { sessionId: string; botto
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [blocks, bottomPad]);
+  }, [blocks, bottomPad, viewMode]);
 
   // Snap to bottom when switching sessions.
   useEffect(() => {
@@ -35,17 +39,31 @@ export function MessageList({ sessionId, bottomPad }: { sessionId: string; botto
   return (
     <div ref={containerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
       <div
-        className="messages-pad mx-auto flex max-w-3xl flex-col gap-4 px-4 pt-20 md:px-6"
+        className={cn(
+          'messages-pad mx-auto flex flex-col px-4 pt-28 md:px-6 md:pt-20',
+          cli ? 'max-w-4xl gap-2' : 'max-w-3xl gap-4',
+        )}
         // Measured composer-stack height wins over the CSS fallback, so the last
         // message always parks above it — including when the task pane is open.
         style={bottomPad ? { paddingBottom: `${bottomPad + 8}px` } : undefined}
       >
         {blocks.length === 0 ? (
-          <div className="py-20 text-center text-sm text-slate-600">
-            Send a message to start the conversation.
+          <div className={cn('py-20 text-sm text-slate-600', cli ? 'font-mono text-left' : 'text-center')}>
+            {cli ? '// send a message to start the conversation' : 'Send a message to start the conversation.'}
           </div>
         ) : (
-          blocks.map((b) => <BlockView key={b.id} block={b} />)
+          blocks.map((b, i) => (
+            <Fragment key={b.id}>
+              {/* Turn boundary: a hairline between the previous answer and the
+                  user's next question (not before the first message). Drawn
+                  with border utilities so the high-contrast theme picks it
+                  up like every other hairline. */}
+              {b.kind === 'user' && i > 0 && (
+                <div className={cn('border-t', cli ? 'mt-2 border-ink-700' : 'mt-4 border-white/10')} />
+              )}
+              {cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
+            </Fragment>
+          ))
         )}
       </div>
     </div>

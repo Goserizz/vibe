@@ -84,9 +84,6 @@ export function reduceView(view: SessionView, events: { seq: number; ev: LiveEve
       case 'run_state':
         running = ev.running;
         break;
-      case 'token_usage':
-        // usage is tracked on the session meta/store, not as a block
-        break;
       case 'error':
         upsert({ id: `err_${seq}`, kind: 'error', text: ev.text, ts: Date.now() });
         break;

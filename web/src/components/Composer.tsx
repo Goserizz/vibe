@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Paperclip, Square, X, Loader2, FileText, Image as ImageIcon } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowUp, Paperclip, Square, X, Loader2, FileText, Image as ImageIcon } from '../lib/icons';
 import { useStore } from '../store/store';
 import { agentLabel, cn } from '../lib/format';
 import { api, ApiError } from '../lib/api';
@@ -13,6 +13,14 @@ const uid = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.r
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
 function isImage(name: string): boolean {
   return IMAGE_EXTS.has(name.split('.').pop()?.toLowerCase() ?? '');
+}
+
+/** Code point at `index` for reverse-video block caret (CJK is one full cell). */
+function caretUnit(value: string, index: number): { unit: string; empty: boolean } {
+  if (index >= value.length) return { unit: '', empty: true };
+  const cp = value.codePointAt(index)!;
+  if (cp === 10) return { unit: '\n', empty: true };
+  return { unit: value.slice(index, index + (cp > 0xffff ? 2 : 1)), empty: false };
 }
 function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -34,6 +42,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const sendMessage = useStore((s) => s.sendMessage);
   const abort = useStore((s) => s.abort);
   const setToast = useStore((s) => s.setToast);
+  const cli = useStore((s) => s.viewMode) === 'cli';
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -47,8 +56,17 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // that Enter would wrongly send. We record when a composition ended and also
   // ignore Enter for a short window after — that rogue Enter always lands within
   // milliseconds of compositionend, whereas a real send comes much later.
+  const [caret, setCaret] = useState(0);
+  const [promptFocused, setPromptFocused] = useState(false);
   const composingRef = useRef(false);
   const endedAtRef = useRef(0);
+  const mirrorRef = useRef<HTMLDivElement>(null);
+
+  const syncCaret = () => {
+    const el = ref.current;
+    if (!el) return;
+    setCaret(el.selectionStart ?? 0);
+  };
 
   // Auto-grow up to a sensible cap.
   useEffect(() => {
@@ -58,10 +76,30 @@ export function Composer({ sessionId }: { sessionId: string }) {
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
 
-  // Refocus when switching sessions.
+  useLayoutEffect(() => {
+    const ta = ref.current;
+    const mirror = mirrorRef.current;
+    if (!ta || !mirror) return;
+    const sync = () => {
+      mirror.scrollTop = ta.scrollTop;
+      mirror.scrollLeft = ta.scrollLeft;
+    };
+    sync();
+    ta.addEventListener('scroll', sync);
+    return () => ta.removeEventListener('scroll', sync);
+  }, [cli, text, caret, promptFocused]);
+
+  useEffect(() => {
+    if (!cli || !promptFocused) return;
+    const onSel = () => syncCaret();
+    document.addEventListener('selectionchange', onSel);
+    return () => document.removeEventListener('selectionchange', onSel);
+  }, [cli, promptFocused]);
+
+  // Refocus when switching sessions or flipping chat/CLI chrome (the textarea remounts).
   useEffect(() => {
     ref.current?.focus();
-  }, [sessionId]);
+  }, [sessionId, cli]);
 
   // Desktop keeps the keyboard-shortcut hint in the placeholder; mobile is short.
   useEffect(() => {
@@ -135,26 +173,190 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const hasAttachments = attachments.length > 0;
   const busy = uploading;
 
+  const dragHandlers = {
+    onDragOver: (e: React.DragEvent) => {
+      if (Array.from(e.dataTransfer.types).includes('Files') && !uploading) {
+        e.preventDefault();
+        setDragging(true);
+      }
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+      e.preventDefault();
+      setDragging(false);
+      if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
+    },
+  };
+
+  const fileInput = (
+    <input
+      ref={fileInputRef}
+      type="file"
+      multiple
+      className="hidden"
+      onChange={(e) => {
+        if (e.target.files) addFiles(e.target.files);
+        e.target.value = '';
+      }}
+    />
+  );
+
+  const attachmentChips = hasAttachments && (
+    <div className={cn('flex flex-wrap gap-1.5', cli ? 'pb-1.5 pl-6' : 'px-3 pt-2.5')}>
+      {attachments.map((a) => (
+        <div
+          key={a.id}
+          className={cn(
+            'group flex max-w-[220px] items-center gap-1.5 py-1 pl-2 pr-1.5 text-[12px] text-slate-200',
+            cli
+              ? 'border border-white/10 font-mono'
+              : 'rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm',
+          )}
+        >
+          {isImage(a.file.name) ? (
+            <ImageIcon className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+          ) : (
+            <FileText className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+          )}
+          <span className="truncate">{a.file.name}</span>
+          <span className="shrink-0 text-[10px] text-slate-500">{fmtSize(a.file.size)}</span>
+          <button
+            type="button"
+            onClick={() => removeAttachment(a.id)}
+            disabled={uploading}
+            title="Remove"
+            className="shrink-0 rounded p-0.5 text-slate-500 transition hover:bg-ink-700 hover:text-slate-200 disabled:opacity-40"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+
+  const actionButton = running ? (
+    <button
+      onClick={abort}
+      title="Stop current response"
+      aria-label="Stop current response"
+      className={cn(
+        'flex shrink-0 items-center justify-center text-[#fff] transition hover:bg-rose-500',
+        cli ? 'h-8 bg-rose-500/90 px-2 font-mono text-[11px]' : 'h-9 w-9 rounded-xl bg-rose-500/90',
+      )}
+    >
+      {cli ? 'stop' : <Square className="h-4 w-4 fill-current" />}
+    </button>
+  ) : (
+    <button
+      onClick={() => void submit()}
+      disabled={busy || (!text.trim() && !hasAttachments)}
+      title="Send"
+      className={cn(
+        'flex shrink-0 items-center justify-center text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-slate-500',
+        cli ? 'h-8 bg-accent px-2 font-mono text-[11px]' : 'h-9 w-9 rounded-xl bg-accent',
+      )}
+    >
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : cli ? 'send' : <ArrowUp className="h-4 w-4" />}
+    </button>
+  );
+
+  const textarea = (
+    <textarea
+      ref={ref}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        setCaret(e.target.selectionStart ?? e.target.value.length);
+      }}
+      onKeyDown={onKeyDown}
+      onKeyUp={syncCaret}
+      onClick={syncCaret}
+      onSelect={syncCaret}
+      onPaste={onPaste}
+      onFocus={() => {
+        setPromptFocused(true);
+        syncCaret();
+      }}
+      onBlur={() => setPromptFocused(false)}
+      onCompositionStart={() => {
+        composingRef.current = true;
+      }}
+      onCompositionEnd={() => {
+        composingRef.current = false;
+        endedAtRef.current = Date.now();
+      }}
+      rows={1}
+      placeholder={
+        running
+          ? `${agentName} is working…`
+          : activeTaskCount
+            ? `Message ${agentName} — ${activeTaskCount} background task${activeTaskCount === 1 ? '' : 's'} still running`
+            : isDesktop
+              ? cli
+                ? `${agentName} › enter to send`
+                : `Message ${agentName} — Enter to send, Shift+Enter for newline`
+              : `Message ${agentName}`
+      }
+      className={cn(
+        'max-h-[220px] flex-1 resize-none py-1.5 leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none',
+        cli ? 'cli-prompt bg-ink-950 font-mono text-[13.5px]' : 'bg-transparent text-[14.5px]',
+      )}
+    />
+  );
+
+  if (cli) {
+    const { unit: caretCh, empty: caretEmpty } = caretUnit(text, caret);
+    return (
+      <div className="shrink-0 bg-ink-950 px-4 pb-5 pt-2 md:px-6">
+        <div className="mx-auto max-w-4xl">
+          <div {...dragHandlers} className="relative">
+            {dragging && (
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-ink-900/70 font-mono text-[12px] text-accent-soft">
+                drop files to attach
+              </div>
+            )}
+            {fileInput}
+            {attachmentChips}
+            <div className={cn('flex items-end gap-2', dragging && 'ring-1 ring-accent/40')}>
+              <span className="select-none pb-2 font-mono text-[14px] text-accent">❯</span>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={running || uploading}
+                title="Attach files"
+                className="flex h-8 shrink-0 items-center justify-center font-mono text-[12px] text-slate-500 transition hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                +
+              </button>
+              <div className="cli-prompt-wrap min-w-0 flex-1">
+                {textarea}
+                {promptFocused && (
+                  <div ref={mirrorRef} className="cli-prompt-mirror" aria-hidden>
+                    {text.slice(0, caret)}
+                    <span className={cn('cli-cursor--prompt', caretEmpty && 'cli-cursor--prompt-empty')}>
+                      {caretEmpty ? '\u00a0' : caretCh}
+                    </span>
+                    {caretCh === '\n' ? '\n' : ''}
+                    {caretEmpty ? text.slice(caret) : text.slice(caret + caretCh.length)}
+                    {'\n'}
+                  </div>
+                )}
+              </div>
+              {(running || busy || !isDesktop) && actionButton}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="shrink-0 px-4 pb-6 pt-1 md:px-6">
       <div className="mx-auto max-w-3xl">
-        <div
-          onDragOver={(e) => {
-            if (Array.from(e.dataTransfer.types).includes('Files') && !uploading) {
-              e.preventDefault();
-              setDragging(true);
-            }
-          }}
-          onDragLeave={(e) => {
-            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
-          }}
-          onDrop={(e) => {
-            if (!Array.from(e.dataTransfer.types).includes('Files')) return;
-            e.preventDefault();
-            setDragging(false);
-            if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
-          }}
-        >
+        <div {...dragHandlers}>
           <Glass
             className={cn(
               'relative',
@@ -172,46 +374,9 @@ export function Composer({ sessionId }: { sessionId: string }) {
                 Drop files to attach
               </div>
             )}
-
-            {hasAttachments && (
-              <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
-                {attachments.map((a) => (
-                  <div
-                    key={a.id}
-                    className="group flex max-w-[220px] items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 py-1 pl-2 pr-1.5 text-[12px] text-slate-200 backdrop-blur-sm"
-                  >
-                    {isImage(a.file.name) ? (
-                      <ImageIcon className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                    ) : (
-                      <FileText className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                    )}
-                    <span className="truncate">{a.file.name}</span>
-                    <span className="shrink-0 text-[10px] text-slate-500">{fmtSize(a.file.size)}</span>
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(a.id)}
-                      disabled={uploading}
-                      title="Remove"
-                      className="shrink-0 rounded p-0.5 text-slate-500 transition hover:bg-ink-700 hover:text-slate-200 disabled:opacity-40"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
+            {fileInput}
+            {attachmentChips}
             <div className="flex items-end gap-2 px-3 py-2.5">
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files) addFiles(e.target.files);
-                  e.target.value = '';
-                }}
-              />
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
@@ -221,46 +386,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
               >
                 <Paperclip className="h-4 w-4" />
               </button>
-              <textarea
-                ref={ref}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onKeyDown={onKeyDown}
-                onPaste={onPaste}
-                onCompositionStart={() => {
-                  composingRef.current = true;
-                }}
-                onCompositionEnd={() => {
-                  composingRef.current = false;
-                  endedAtRef.current = Date.now();
-                }}
-                rows={1}
-                placeholder={running
-                  ? `${agentName} is working…`
-                  : activeTaskCount
-                    ? `Message ${agentName} — ${activeTaskCount} background task${activeTaskCount === 1 ? '' : 's'} still running`
-                    : isDesktop ? `Message ${agentName} — Enter to send, Shift+Enter for newline` : `Message ${agentName}`}
-                className="max-h-[220px] flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none"
-              />
-              {running ? (
-                <button
-                  onClick={abort}
-                  title="Stop current response"
-                  aria-label="Stop current response"
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-500/90 text-[#fff] transition hover:bg-rose-500"
-                >
-                  <Square className="h-4 w-4 fill-current" />
-                </button>
-              ) : (
-                <button
-                  onClick={() => void submit()}
-                  disabled={busy || (!text.trim() && !hasAttachments)}
-                  title="Send"
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-slate-500"
-                >
-                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                </button>
-              )}
+              {textarea}
+              {actionButton}
             </div>
           </Glass>
         </div>

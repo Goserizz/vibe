@@ -8,7 +8,7 @@
     "dev": "concurrently -k -n server,web -c green,cyan \"npm run dev:server\" \"npm run dev:web\"",
     "dev:server": "tsx watch server/src/index.ts",
     "dev:web": "vite",
-    "build": "vite build",
+    "build": "node scripts/fetch-tui-font.mjs && vite build",
     "start": "cross-env NODE_ENV=production tsx server/src/index.ts",
     "serve": "npm run build && npm run start",
     "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",

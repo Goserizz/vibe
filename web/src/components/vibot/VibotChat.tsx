@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
-import { Brain, Settings, Sparkles } from 'lucide-react';
+import { Brain, Settings, Sparkles } from '../../lib/icons';
 import type { ChatBlock } from '@shared/protocol';
 import { useVibotStore } from '../../store/vibot';
 import { BlockView } from '../blocks';

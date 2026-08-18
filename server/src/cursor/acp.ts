@@ -5,7 +5,6 @@ import { log } from '../log.js';
 import { sshConnectPrefix, loginShellCommand, proxyEnvPrefix, cleanRemoteStderr, streamRemoteCommand } from '../remote/ssh.js';
 import type { PermissionDecision, PermissionMode, PermissionRequest } from '../../../shared/protocol.js';
 import type { RunCallbacks } from '../claude/types.js';
-import { DEFAULT_CONTEXT_WINDOW, type TokenUsage } from '../../../shared/protocol.js';
 import { loadAcpToolArgsIndex, lookupAcpToolArgs } from './acpStore.js';
 
 type JsonRpcId = number | string;
@@ -390,13 +389,12 @@ export class CursorAcpClient {
 
       await this.applySessionConfig();
 
-      const result = await this.request('session/prompt', {
+      await this.request('session/prompt', {
         sessionId: this.sessionId,
         prompt: [{ type: 'text', text: this.opts.prompt }],
       });
 
       this.flushStream();
-      if (result?.usage) this.emitUsage(result.usage);
       return {};
     } catch (err) {
       if (this.aborted) return {};
@@ -636,27 +634,6 @@ export class CursorAcpClient {
       }
       return;
     }
-    if (kind === 'usage_update') {
-      this.emitUsage(update);
-    }
-  }
-
-  private emitUsage(usageLike: any): void {
-    const u = usageLike?.usage ?? usageLike;
-    if (!u || typeof u !== 'object') return;
-    const inputTokens = Number(u.inputTokens ?? u.input_tokens ?? 0) || 0;
-    const outputTokens = Number(u.outputTokens ?? u.output_tokens ?? 0) || 0;
-    const cacheReadTokens = Number(u.cacheReadTokens ?? u.cache_read_input_tokens ?? 0) || 0;
-    const cacheCreationTokens = Number(u.cacheWriteTokens ?? u.cache_creation_input_tokens ?? 0) || 0;
-    const usage: TokenUsage = {
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheCreationTokens,
-      contextUsed: inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens,
-      contextWindow: DEFAULT_CONTEXT_WINDOW,
-    };
-    this.cb.onEvent({ k: 'token_usage', usage });
   }
 
   private async handleRequestPermission(params: any): Promise<unknown> {

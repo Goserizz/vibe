@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Brain, Settings, BookMarked, ArrowLeft, Trash2, Pencil, Check, X, MessageSquareText } from 'lucide-react';
+import { Plus, Brain, Settings, BookMarked, ArrowLeft, Trash2, Pencil, Check, X, MessageSquareText } from '../../lib/icons';
 import type { VibotConvMeta } from '@shared/protocol';
 import { useVibotStore } from '../../store/vibot';
 import { Glass } from '../LiquidGlass';

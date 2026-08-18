@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EditorView, keymap } from '@codemirror/view';
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorState, Compartment, type StateEffect } from '@codemirror/state';
 import { basicSetup } from 'codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { javascript } from '@codemirror/lang-javascript';
@@ -9,7 +9,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
-import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle, Upload, Download, RefreshCw } from 'lucide-react';
+import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle, Upload, Download, RefreshCw } from '../lib/icons';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
 import { cn, basename } from '../lib/format';
@@ -82,6 +82,29 @@ export function FilesPane() {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const prevSession = useRef(activeId);
+  /** Programmatic load/clear must not count as a user edit. */
+  const applyingRef = useRef(false);
+
+  const replaceDoc = (text: string, effects?: StateEffect<unknown>) => {
+    const view = viewRef.current;
+    if (!view) {
+      savedRef.current = text;
+      dirtyRef.current = false;
+      setDirty(false);
+      return;
+    }
+    applyingRef.current = true;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+      ...(effects ? { effects } : {}),
+    });
+    applyingRef.current = false;
+    // Snapshot after CodeMirror normalizes line breaks, so CRLF files
+    // are not immediately considered dirty.
+    savedRef.current = view.state.doc.toString();
+    dirtyRef.current = false;
+    setDirty(false);
+  };
 
   // Resizable split between the directory list (top) and the editor (bottom).
   const rootRef = useRef<HTMLDivElement>(null);
@@ -192,8 +215,11 @@ export function FilesPane() {
   // Follow the active session: reset to its cwd when it changes. Warn if this
   // discards unsaved edits.
   useEffect(() => {
-    if (prevSession.current !== activeId && dirtyRef.current) {
-      setToast('Unsaved changes were discarded');
+    if (prevSession.current !== activeId) {
+      if (dirtyRef.current) setToast('Unsaved changes were discarded');
+      dirtyRef.current = false;
+      setDirty(false);
+      savedRef.current = '';
     }
     prevSession.current = activeId;
     setDir(cwd);
@@ -256,7 +282,8 @@ export function FilesPane() {
             },
           ]),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged) setDirty(view.state.doc.toString() !== savedRef.current);
+            if (!u.docChanged || applyingRef.current) return;
+            setDirty(view.state.doc.toString() !== savedRef.current);
           }),
         ],
       }),
@@ -279,16 +306,15 @@ export function FilesPane() {
   // Load a file's content into the editor when selected changes.
   useEffect(() => {
     const p = selected;
-    const view = viewRef.current;
     if (!p) {
-      view?.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '' } });
+      replaceDoc('');
       return;
     }
     if (isImage(p)) {
       // Images render via <img src=/files/raw>; there's no text content to load.
       setFileName(basename(p));
       setReadError(null);
-      view?.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '' } });
+      replaceDoc('');
       return;
     }
     let cancelled = false;
@@ -298,13 +324,8 @@ export function FilesPane() {
       .readFile({ host: hostArg, path: p })
       .then((content) => {
         if (cancelled || !viewRef.current) return;
-        savedRef.current = content;
-        setDirty(false);
         setFileName(basename(p));
-        viewRef.current.dispatch({
-          changes: { from: 0, to: viewRef.current.state.doc.length, insert: content },
-          effects: langComp.current.reconfigure(languageForPath(p)),
-        });
+        replaceDoc(content, langComp.current.reconfigure(languageForPath(p)));
       })
       .catch((err) => {
         if (!cancelled) setReadError(err instanceof ApiError ? err.message : 'Failed to read file');

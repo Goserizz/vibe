@@ -1,4 +1,4 @@
-import { X, Settings, Volume2, Play, Plug, Bookmark, Palette, Sparkles, FileCog } from 'lucide-react';
+import { X, Settings, Volume2, Play, Plug, Bookmark, Palette, Sparkles, FileCog, SquareTerminal, Contrast } from '../lib/icons';
 import { useStore } from '../store/store';
 import { NOTIFY_SOUNDS, playNotifySound, type NotifySoundId } from '../lib/notifySound';
 import { ACCENT_PRESETS } from '../lib/systemAccent';
@@ -11,8 +11,12 @@ import { AgentConfigRegistry } from './AgentConfigControls';
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const notifySound = useStore((s) => s.notifySound);
   const setNotifySound = useStore((s) => s.setNotifySound);
+  const viewMode = useStore((s) => s.viewMode);
+  const setViewMode = useStore((s) => s.setViewMode);
   const accent = useStore((s) => s.accent);
   const setAccent = useStore((s) => s.setAccent);
+  const contrast = useStore((s) => s.contrast);
+  const setContrast = useStore((s) => s.setContrast);
 
   const select = (id: NotifySoundId) => {
     setNotifySound(id);
@@ -101,6 +105,77 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                       )}
                       style={{ background: p.hex }}
                     />
+                  );
+                })}
+              </div>
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <Contrast className="h-3.5 w-3.5 text-slate-400" />
+                <h3 className="text-xs font-medium text-slate-400">Contrast</h3>
+              </div>
+              <p className="mb-3 text-[12px] leading-relaxed text-slate-600">
+                High contrast replaces the soft glass hairlines with solid edges — pure white in dark
+                mode, pure black in light — and brightens faint text. Works in both Chat and TUI views.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { id: 'normal' as const, label: 'Normal', hint: 'Soft glass edges' },
+                  { id: 'high' as const, label: 'High', hint: 'Solid white/black lines' },
+                ]).map((opt) => {
+                  const active = contrast === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setContrast(opt.id)}
+                      aria-pressed={active}
+                      className={cn(
+                        'min-w-[7.5rem] rounded-lg border px-3 py-2 text-left transition',
+                        active
+                          ? 'border-accent/50 bg-accent/15 text-accent-soft'
+                          : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
+                      )}
+                    >
+                      <span className="block text-[13px] font-medium">{opt.label}</span>
+                      <span className="block text-[11px] text-slate-500">{opt.hint}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <SquareTerminal className="h-3.5 w-3.5 text-slate-400" />
+                <h3 className="text-xs font-medium text-slate-400">Conversation view</h3>
+              </div>
+              <p className="mb-3 text-[12px] leading-relaxed text-slate-600">
+                Chat is the default card UI. TUI is a terminal-style shell: JetBrains Mono with
+                Sarasa Term SC Nerd for Chinese, a dark ground, and a CLI transcript.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { id: 'chat' as const, label: 'Chat', hint: 'Cards and markdown' },
+                  { id: 'cli' as const, label: 'TUI', hint: 'Terminal interface' },
+                ]).map((opt) => {
+                  const active = viewMode === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setViewMode(opt.id)}
+                      className={cn(
+                        'min-w-[7.5rem] rounded-lg border px-3 py-2 text-left transition',
+                        active
+                          ? 'border-accent/50 bg-accent/15 text-accent-soft'
+                          : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
+                      )}
+                    >
+                      <span className="block text-[13px] font-medium">{opt.label}</span>
+                      <span className="block text-[11px] text-slate-500">{opt.hint}</span>
+                    </button>
                   );
                 })}
               </div>
@@ -198,7 +273,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 <h3 className="text-xs font-medium text-slate-400">Skills</h3>
               </div>
               <p className="mb-3 text-[12px] leading-relaxed text-slate-600">
-                Author personal skills or browse installed ones for Claude, Cursor, Codex, Kimi, and Kiro (all use the same{' '}
+                Author personal skills or browse installed ones for Claude, Cursor, Codex, Kimi, Kiro, Grok, and ZCode (all use the same{' '}
                 <span className="font-mono">SKILL.md</span> standard). Pick an agent + host; system/plugin skills are read-only.
                 Skills compiled into an agent binary aren&apos;t on disk and can&apos;t be listed.
               </p>

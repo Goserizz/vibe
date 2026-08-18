@@ -4,13 +4,11 @@ import { config } from '../config.js';
 import { log } from '../log.js';
 import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, shQuote, sshConnectPrefix } from '../remote/ssh.js';
 import {
-  DEFAULT_CONTEXT_WINDOW,
   type EffortLevel,
   type McpServerDef,
   type PermissionDecision,
   type PermissionMode,
   type PermissionRequest,
-  type TokenUsage,
 } from '../../../shared/protocol.js';
 import type { RunCallbacks } from '../claude/types.js';
 import { toAcpMcpServers } from '../mcp/apply.js';
@@ -208,12 +206,11 @@ export class KiroAcpClient {
       this.cb.onClaudeSessionId(this.sessionId);
       await this.applySessionConfig();
 
-      const result = await this.request('session/prompt', {
+      await this.request('session/prompt', {
         sessionId: this.sessionId,
         prompt: [{ type: 'text', text: this.opts.prompt }],
       });
       this.flushStream();
-      if (result?.usage) this.emitUsage(result.usage);
       return {};
     } catch (error) {
       if (this.aborted) return {};
@@ -390,7 +387,6 @@ export class KiroAcpClient {
       }
       return;
     }
-    if (kind === 'usage_update') this.emitUsage(update);
   }
 
   private async handleRequestPermission(params: any): Promise<unknown> {
@@ -447,19 +443,6 @@ export class KiroAcpClient {
     if (!this.stream) return;
     this.cb.onEvent({ k: 'block_end', id: this.stream.id, text: this.stream.text });
     this.stream = null;
-  }
-
-  private emitUsage(value: any): void {
-    const usageLike = value?.usage ?? value;
-    if (!usageLike || typeof usageLike !== 'object') return;
-    const inputTokens = Number(usageLike.inputTokens ?? usageLike.input_tokens ?? 0) || 0;
-    const outputTokens = Number(usageLike.outputTokens ?? usageLike.output_tokens ?? 0) || 0;
-    const cacheReadTokens = Number(usageLike.cacheReadTokens ?? usageLike.cache_read_input_tokens ?? 0) || 0;
-    const cacheCreationTokens = Number(usageLike.cacheWriteTokens ?? usageLike.cache_creation_input_tokens ?? 0) || 0;
-    const contextUsed = Number(usageLike.used) || inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
-    const contextWindow = Number(usageLike.size) || DEFAULT_CONTEXT_WINDOW;
-    const usage: TokenUsage = { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, contextUsed, contextWindow };
-    this.cb.onEvent({ k: 'token_usage', usage });
   }
 
   private request(method: string, params: unknown): Promise<any> {

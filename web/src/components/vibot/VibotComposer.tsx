@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Square } from 'lucide-react';
+import { ArrowUp, Square } from '../../lib/icons';
 import { useVibotStore } from '../../store/vibot';
 import { cn } from '../../lib/format';
 import { Glass } from '../LiquidGlass';

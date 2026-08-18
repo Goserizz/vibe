@@ -15,7 +15,7 @@ import {
   Plug,
   ChevronDown,
   ChevronRight,
-} from 'lucide-react';
+} from '../lib/icons';
 import type { AgentKind, AgentLatestVersions, HostStatus, RemoteHost } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
@@ -28,9 +28,11 @@ const AGENT_LABELS: Record<AgentKind, string> = {
   codex: 'Codex',
   kimi: 'Kimi',
   kiro: 'Kiro',
+  grok: 'Grok',
+  zcode: 'ZCode',
 };
 
-const AGENT_ORDER: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro'];
+const AGENT_ORDER: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
 
 /** Seed per-agent proxy local-state from a host's stored overrides (trimmed). */
 function agentProxyState(m?: Partial<Record<AgentKind, string>>): Record<AgentKind, string> {
@@ -54,6 +56,7 @@ function normalizeProxyMap(byAgent: Record<AgentKind, string>): Partial<Record<A
 export function HostsDialog({ onClose }: { onClose: () => void }) {
   const hosts = useStore((s) => s.hosts);
   const localName = useStore((s) => s.localName);
+  const isAdmin = useStore((s) => s.isAdmin);
   const addHost = useStore((s) => s.addHost);
   const updateHost = useStore((s) => s.updateHost);
   const removeHost = useStore((s) => s.removeHost);
@@ -84,10 +87,10 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
   };
 
   useEffect(() => {
-    void check(localName);
+    if (isAdmin) void check(localName);
     hosts.forEach((h) => void check(h.name));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hosts.length, localName]);
+  }, [hosts.length, localName, isAdmin]);
 
   useEffect(() => {
     void api
@@ -161,7 +164,7 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
         /* keep cached latest */
       }
 
-      const names = [localName, ...hosts.map((h) => h.name)];
+      const names = [...(isAdmin ? [localName] : []), ...hosts.map((h) => h.name)];
       const checks = await Promise.all(names.map((n) => check(n)));
       const jobs: { host: string; agent: AgentKind }[] = [];
       checks.forEach((st, i) => {
@@ -226,26 +229,39 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
 
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
             <p className="text-xs leading-relaxed text-slate-500">
-              This machine (<span className="text-slate-300">{localName}</span>) is always listed first. Add remote machines
-              over SSH (an <code className="text-slate-400">~/.ssh/config</code> alias or{' '}
-              <code className="text-slate-400">user@host</code>). Key-based auth / ssh-agent is required. Set a{' '}
-              <span className="text-slate-400">proxy</span> per host, and override it per agent (Claude / Cursor / Codex /
-              Kimi) so each routes its API traffic independently. Check and update agent versions below.
+              {isAdmin ? (
+                <>
+                  This machine (<span className="text-slate-300">{localName}</span>) is always listed first. Add remote
+                  machines over SSH (an <code className="text-slate-400">~/.ssh/config</code> alias or{' '}
+                  <code className="text-slate-400">user@host</code>). Key-based auth / ssh-agent is required. Set a{' '}
+                  <span className="text-slate-400">proxy</span> per host, and override it per agent (Claude / Cursor /
+                  Codex / Kimi) so each routes its API traffic independently. Check and update agent versions below.
+                </>
+              ) : (
+                <>
+                  Add the remote machines you manage over SSH (an <code className="text-slate-400">~/.ssh/config</code>{' '}
+                  alias or <code className="text-slate-400">user@host</code>). Key-based auth / ssh-agent is required.
+                  Set a <span className="text-slate-400">proxy</span> per host, and override it per agent so each routes
+                  its API traffic independently. Check and update agent versions below.
+                </>
+              )}
             </p>
 
             <div className="space-y-1.5">
-              <HostRow
-                host={{ name: localName, ssh: 'local' }}
-                local
-                status={status[localName]}
-                latest={latest}
-                updating={updating[localName]}
-                disabled={busy}
-                expanded={expandedHost === localName}
-                onToggleExpand={() => toggleHost(localName)}
-                onCheck={() => void check(localName)}
-                onUpdateAgent={(agent) => void updateAgent(localName, agent)}
-              />
+              {isAdmin && (
+                <HostRow
+                  host={{ name: localName, ssh: 'local' }}
+                  local
+                  status={status[localName]}
+                  latest={latest}
+                  updating={updating[localName]}
+                  disabled={busy}
+                  expanded={expandedHost === localName}
+                  onToggleExpand={() => toggleHost(localName)}
+                  onCheck={() => void check(localName)}
+                  onUpdateAgent={(agent) => void updateAgent(localName, agent)}
+                />
+              )}
               {hosts.map((h) => (
                 <HostRow
                   key={h.name}
@@ -577,6 +593,8 @@ function StatusDot({ status }: { status?: HostStatus | 'checking' }) {
     status.agents?.codex.installed ||
     status.agents?.kimi.installed ||
     status.agents?.kiro.installed ||
+    status.agents?.grok.installed ||
+    status.agents?.zcode.installed ||
     status.claude;
   if (anyAgent) return <Check className="h-4 w-4 shrink-0 text-emerald-400" />;
   return <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />;

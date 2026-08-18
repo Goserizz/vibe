@@ -32,13 +32,29 @@ import {
   readKiroNativeTranscript,
   readKiroTranscript,
 } from '../kiro/transcript.js';
+import { startGrokRun } from '../grok/runner.js';
+import { resolveGrokSessionSync } from '../grok/discovery.js';
+import {
+  appendGrokBlocks,
+  readGrokNativeTranscript,
+  readGrokTranscript,
+} from '../grok/transcript.js';
+import { startZcodeRun } from '../zcode/runner.js';
+import { invalidateZcodeSessionsCache, resolveZcodeSessionSync } from '../zcode/discovery.js';
+import {
+  appendZcodeBlocks,
+  readZcodeNativeTranscript,
+  readZcodeTranscript,
+} from '../zcode/transcript.js';
 import { readTranscriptBlocks } from '../sessions/transcript.js';
 import { resolveClaudeSessionSync } from '../sessions/discovery.js';
+import { sessionVisible, metaVisible } from '../sessions/visibility.js';
 import { readRemoteAgentTranscript, readRemoteTranscript } from '../remote/discovery.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { mcpRegistry } from '../mcp/registry.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
+import { ADMIN_ACCOUNT } from '../../../shared/protocol.js';
 import type {
   AgentKind,
   AssistantBlock,
@@ -95,11 +111,19 @@ function isActiveBackgroundTask(task: BackgroundTask): boolean {
 
 /**
  * A live-event subscriber. Web clients use {@link WsConn}; in-process consumers
- * (e.g. the Telegram bot) use {@link CallbackConn}.
+ * (e.g. the Telegram bot) use {@link CallbackConn}. Each connection carries the
+ * account whose token authenticated it — broadcasts and subscription checks
+ * filter by it.
  */
 export abstract class Conn {
   readonly id = crypto.randomUUID();
   readonly subscriptions = new Set<string>();
+
+  constructor(readonly account: string = ADMIN_ACCOUNT) {}
+
+  isAdmin(): boolean {
+    return this.account === ADMIN_ACCOUNT;
+  }
 
   abstract send(msg: ServerEvent): void;
 
@@ -110,8 +134,8 @@ export abstract class Conn {
 }
 
 export class WsConn extends Conn {
-  constructor(readonly ws: WebSocket) {
-    super();
+  constructor(readonly ws: WebSocket, account: string) {
+    super(account);
   }
 
   send(msg: ServerEvent): void {
@@ -124,10 +148,11 @@ export class WsConn extends Conn {
   }
 }
 
-/** In-process subscriber — used by the Telegram bot (and any future adapters). */
+/** In-process subscriber — used by the Telegram bot (admin context) and any
+ *  future adapters. */
 export class CallbackConn extends Conn {
-  constructor(private readonly onMsg: (msg: ServerEvent) => void) {
-    super();
+  constructor(private readonly onMsg: (msg: ServerEvent) => void, account: string = ADMIN_ACCOUNT) {
+    super(account);
   }
 
   send(msg: ServerEvent): void {
@@ -193,7 +218,7 @@ class SessionRuntime {
     this.sshTarget = init.sshTarget;
     this.proxy = init.proxy;
     // Headless CLI agents self-persist through the shared LiveEvent→blocks accumulator.
-    if (this.agent === 'cursor' || this.agent === 'codex' || this.agent === 'kimi' || this.agent === 'kiro') {
+    if (this.agent === 'cursor' || this.agent === 'codex' || this.agent === 'kimi' || this.agent === 'kiro' || this.agent === 'grok' || this.agent === 'zcode') {
       this.transcript = new CursorTranscriptBuilder();
     }
     // Preserve the existing history before a native Kimi/Kiro session is adopted:
@@ -203,6 +228,17 @@ class SessionRuntime {
     }
     if (this.agent === 'kiro' && init.claudeSessionId && readKiroTranscript(this.sessionId).length === 0) {
       appendKiroBlocks(this.sessionId, readKiroNativeTranscript(init.claudeSessionId));
+    }
+    if (this.agent === 'grok' && init.claudeSessionId && readGrokTranscript(this.sessionId).length === 0) {
+      appendGrokBlocks(this.sessionId, readGrokNativeTranscript(init.claudeSessionId));
+    }
+    // ZCode history lives in its SQLite store and is only reachable by spawning
+    // an app-server — seed asynchronously, snapshots race ahead with [] and the
+    // first subscribe after adoption picks the transcript up.
+    if (this.agent === 'zcode' && init.claudeSessionId && readZcodeTranscript(this.sessionId).length === 0) {
+      void readZcodeNativeTranscript(init.claudeSessionId).then((blocks) => {
+        if (blocks.length) appendZcodeBlocks(this.sessionId, blocks);
+      });
     }
   }
 
@@ -401,7 +437,20 @@ class SessionRuntime {
     const cb = {
       onEvent: (ev: LiveEvent) => this.emit(ev),
       onClaudeSessionId: (id: string) => {
-        if (id && id !== this.claudeSessionId) this.claudeSessionId = id;
+        if (!id || id === this.claudeSessionId) return;
+        this.claudeSessionId = id;
+        // Link the underlying CLI session id to this Vibe session the moment the
+        // SDK reports it — not only at turn-end. Background disk discovery
+        // (loadAllSessions) dedups transcripts by claudeSessionId against the
+        // store; if the link is missing for the whole turn, the in-progress
+        // transcript gets listed as a separate "interrupted" session showing the
+        // first-message title and the raw model id (e.g. glm-5.2 instead of the
+        // opus alias). Long turns (opus) easily span the 60s discovery tick, so
+        // this window was hit regularly.
+        const stored = sessionStore.get(this.sessionId);
+        if (stored && stored.claudeSessionId !== id) {
+          sessionStore.update(this.sessionId, { claudeSessionId: id });
+        }
       },
       requestPermission: (request: PermissionRequest) => this.requestPermission(request),
       onTask: (task: BackgroundTask) => this.upsertTask(task),
@@ -462,6 +511,33 @@ class SessionRuntime {
         },
         cb,
       );
+    } else if (this.agent === 'grok') {
+      this.run = startGrokRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          effort,
+          resume: this.claudeSessionId,
+          mcpServers,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
+        },
+        cb,
+      );
+    } else if (this.agent === 'zcode') {
+      this.run = startZcodeRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          resume: this.claudeSessionId,
+          // ZCode consumes MCP from ~/.zcode/cli/config.json, not per-session.
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
+        },
+        cb,
+      );
     } else {
       this.run = this.sshTarget
         ? startRun({ ...runOpts, mcpServers, remote: { sshTarget: this.sshTarget, cwd, proxy: this.proxy } }, cb)
@@ -499,8 +575,11 @@ class SessionRuntime {
       if (this.agent === 'codex') appendCodexBlocks(this.sessionId, blocks);
       else if (this.agent === 'kimi') appendKimiBlocks(this.sessionId, blocks);
       else if (this.agent === 'kiro') appendKiroBlocks(this.sessionId, blocks);
+      else if (this.agent === 'grok') appendGrokBlocks(this.sessionId, blocks);
+      else if (this.agent === 'zcode') appendZcodeBlocks(this.sessionId, blocks);
       else appendCursorBlocks(this.sessionId, blocks);
     }
+    if (this.agent === 'zcode') invalidateZcodeSessionsCache();
 
     const userTurns = Math.max(1, this.runUserTurns);
     this.runUserTurns = 0;
@@ -672,6 +751,16 @@ export class Hub {
     if (kiroInfo) {
       return { cwd: kiroInfo.cwd, model: kiroInfo.model, permissionMode: 'default', effort: defaultEffort, title: kiroInfo.title, claudeSessionId: sessionId, agent: 'kiro' };
     }
+    // …or from ~/.grok/sessions (Grok Build).
+    const grokInfo = resolveGrokSessionSync(sessionId);
+    if (grokInfo) {
+      return { cwd: grokInfo.cwd, model: grokInfo.model, permissionMode: 'default', effort: defaultEffort, title: grokInfo.title, claudeSessionId: sessionId, agent: 'grok' };
+    }
+    // …or from the ZCode session index (sidecar of the async discovery pass).
+    const zcodeInfo = resolveZcodeSessionSync(sessionId);
+    if (zcodeInfo) {
+      return { cwd: zcodeInfo.cwd, model: zcodeInfo.model, permissionMode: 'default', effort: defaultEffort, title: zcodeInfo.title, claudeSessionId: sessionId, agent: 'zcode' };
+    }
     return undefined;
   }
 
@@ -696,6 +785,10 @@ export class Hub {
   }
 
   subscribe(conn: Conn, sessionId: string, lastSeq: number): void {
+    if (!sessionVisible(conn.account, sessionId)) {
+      conn.send({ t: 'error', message: 'session not found', sessionId });
+      return;
+    }
     const rt = this.runtimeFor(sessionId);
     if (!rt) {
       conn.send({ t: 'error', message: 'session not found', sessionId });
@@ -721,6 +814,10 @@ export class Hub {
   }
 
   send(conn: Conn, sessionId: string, clientMsgId: string, text: string): void {
+    if (!sessionVisible(conn.account, sessionId)) {
+      conn.send({ t: 'error', message: 'session not found', sessionId });
+      return;
+    }
     const rt = this.runtimeFor(sessionId);
     if (!rt) {
       conn.send({ t: 'error', message: 'session not found', sessionId });
@@ -748,14 +845,25 @@ export class Hub {
       conn.send({ t: 'error', message: 'a turn is already running', sessionId });
       return;
     }
+    // Sending a message counts as activity — refresh updatedAt now so the
+    // sidebar reorders immediately instead of waiting for turn end.
+    sessionStore.update(sessionId, {});
     this.broadcastMeta(sessionId);
   }
 
-  abort(sessionId: string): void {
+  /** Abort a running turn. Returns false when the account can't see the
+   *  session (or there is nothing to abort). */
+  abort(sessionId: string, account: string = ADMIN_ACCOUNT): boolean {
+    if (!sessionVisible(account, sessionId)) return false;
     this.runtimes.get(sessionId)?.abort();
+    return true;
   }
 
   stopTask(conn: Conn, sessionId: string, taskId: string): void {
+    if (!sessionVisible(conn.account, sessionId)) {
+      conn.send({ t: 'error', message: 'session not found', sessionId });
+      return;
+    }
     void this.stopTaskForSession(sessionId, taskId).then((stopped) => {
       if (!stopped) conn.send({ t: 'error', message: 'this task cannot be stopped individually', sessionId });
     });
@@ -769,8 +877,10 @@ export class Hub {
     return this.runtimes.get(sessionId)?.taskList() ?? [];
   }
 
-  resolvePermission(sessionId: string, requestId: string, decision: PermissionDecision): void {
+  resolvePermission(sessionId: string, requestId: string, decision: PermissionDecision, account: string = ADMIN_ACCOUNT): boolean {
+    if (!sessionVisible(account, sessionId)) return false;
     this.runtimes.get(sessionId)?.resolvePermission(requestId, decision);
+    return true;
   }
 
   /** Conversation history + the seq to subscribe from. Reads the transcript
@@ -795,10 +905,10 @@ export class Hub {
     /** Native (non-Vibe) history for a session created directly on a CLI. While
      *  a turn is running we rely on the live stream instead, so in-flight blocks
      *  aren't duplicated. */
-    const native = async (readLocal: () => ChatBlock[]): Promise<ChatBlock[]> => {
+    const native = async (readLocal: () => ChatBlock[] | Promise<ChatBlock[]>): Promise<ChatBlock[]> => {
       if (rt?.hasLiveRun() || !sid) return [];
       if (host) return remoteHost ? readRemoteAgentTranscript(remoteHost, agent, sid, cwd) : [];
-      return readLocal();
+      return await readLocal();
     };
 
     if (agent === 'cursor') {
@@ -828,6 +938,18 @@ export class Hub {
       return { blocks: await native(() => readKiroNativeTranscript(sid)), seq: plan.seq };
     }
 
+    if (agent === 'grok') {
+      const own = readGrokTranscript(sessionId);
+      if (own.length) return { blocks: own, seq: plan.seq };
+      return { blocks: await native(() => readGrokNativeTranscript(sid)), seq: plan.seq };
+    }
+
+    if (agent === 'zcode') {
+      const own = readZcodeTranscript(sessionId);
+      if (own.length) return { blocks: own, seq: plan.seq };
+      return { blocks: await native(() => readZcodeNativeTranscript(sid)), seq: plan.seq };
+    }
+
     if (host) {
       const blocks = remoteHost && sid ? await readRemoteTranscript(remoteHost, sid) : [];
       return { blocks, seq: plan.seq };
@@ -843,11 +965,14 @@ export class Hub {
     return this.runtimes.get(sessionId)?.hasActiveBackgroundTasks() ?? false;
   }
 
-  /** Broadcast updated session metadata to every connected client. */
+  /** Broadcast updated session metadata — only to connections whose account
+   *  can see the session. */
   broadcastMeta(sessionId: string): void {
     const stored = sessionStore.get(sessionId);
     if (!stored) {
-      for (const conn of this.conns) conn.send({ t: 'session_removed', sessionId });
+      for (const conn of this.conns) {
+        if (sessionVisible(conn.account, sessionId)) conn.send({ t: 'session_removed', sessionId });
+      }
       return;
     }
     const meta = toMeta(
@@ -856,25 +981,31 @@ export class Hub {
       'vibe',
       this.hasActiveBackgroundTasks(sessionId),
     );
-    for (const conn of this.conns) conn.send({ t: 'session_meta', session: meta });
+    this.broadcastMetaObject(meta);
   }
 
-  /** Broadcast an already-built meta to every client. Used for changes that
-   *  affect discovered (non-stored) sessions — e.g. a pin toggle — where
-   *  broadcastMeta(id) can't build the meta from the store. */
+  /** Broadcast an already-built meta. Used for changes that affect discovered
+   *  (non-stored) sessions — e.g. a pin toggle — where broadcastMeta(id) can't
+   *  build the meta from the store. */
   broadcastMetaObject(session: SessionMeta): void {
-    for (const conn of this.conns) conn.send({ t: 'session_meta', session });
+    for (const conn of this.conns) {
+      if (metaVisible(conn.account, session)) conn.send({ t: 'session_meta', session });
+    }
   }
 
   broadcastRemoved(sessionId: string): void {
     this.runtimes.delete(sessionId);
-    for (const conn of this.conns) conn.send({ t: 'session_removed', sessionId });
+    for (const conn of this.conns) {
+      if (sessionVisible(conn.account, sessionId)) conn.send({ t: 'session_removed', sessionId });
+    }
   }
 
   /** Tell clients a row left the sidebar list (e.g. discovery refresh). Unlike
    *  broadcastRemoved, this does not tear down an active runtime. */
   broadcastSessionGone(sessionId: string): void {
-    for (const conn of this.conns) conn.send({ t: 'session_removed', sessionId });
+    for (const conn of this.conns) {
+      if (sessionVisible(conn.account, sessionId)) conn.send({ t: 'session_removed', sessionId });
+    }
   }
 
   /** Drop idle runtimes that nobody is watching to bound memory. */

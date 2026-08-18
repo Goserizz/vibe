@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { NormalizerCallbacks } from '../claude/normalize.js';
+import { type NormalizerCallbacks, usageContextTokens } from '../claude/normalize.js';
 
 function displayText(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -35,6 +35,8 @@ export class KimiStreamNormalizer {
   private readonly prefix = crypto.randomUUID();
   private counter = 0;
   private finished = false;
+  /** Latest usage snapshot seen on any record, reported at turn end. */
+  private contextUsed?: number;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -44,6 +46,9 @@ export class KimiStreamNormalizer {
 
   push(message: any): void {
     if (!message || typeof message !== 'object') return;
+
+    const used = usageContextTokens(message.usage);
+    if (used) this.contextUsed = used;
 
     if (message.role === 'meta' && message.type === 'session.resume_hint') {
       const sessionId = typeof message.session_id === 'string' ? message.session_id : '';
@@ -99,6 +104,7 @@ export class KimiStreamNormalizer {
         durationMs,
         isError,
         subtype: isError ? 'error' : 'success',
+        contextUsed: this.contextUsed,
         ts: Date.now(),
       },
     });

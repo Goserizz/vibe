@@ -1,4 +1,5 @@
 import type {
+  AccountInfo,
   AgentKind,
   AgentLatestVersions,
   AgentUpdateResult,
@@ -6,6 +7,8 @@ import type {
   EffortLevel,
   FileEntry,
   HostStatus,
+  LoginRequest,
+  LoginResponse,
   McpConfigSnapshot,
   McpServerDef,
   PermissionMode,
@@ -58,8 +61,40 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface MeInfo {
+  ok: boolean;
+  serverVersion: string;
+  defaultModel: string;
+  account: string;
+  isAdmin: boolean;
+}
+
 export const api = {
-  me: () => request<{ ok: boolean; serverVersion: string; defaultModel: string }>('/me'),
+  me: () => request<MeInfo>('/me'),
+
+  /** Password login — sent without a token (the caller has none yet). */
+  login: (body: LoginRequest) =>
+    request<LoginResponse>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
+
+  listAccounts: () => request<{ accounts: AccountInfo[] }>('/accounts').then((r) => r.accounts),
+
+  createAccount: (name: string, password: string) =>
+    request<{ name: string; token: string }>('/accounts', {
+      method: 'POST',
+      body: JSON.stringify({ name, password }),
+    }),
+
+  deleteAccount: (name: string) =>
+    request<{ ok: boolean; hostsRemoved: number }>(`/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  resetAccountToken: (name: string) =>
+    request<{ name: string; token: string }>(`/accounts/${encodeURIComponent(name)}/token`, { method: 'POST' }),
+
+  setAccountPassword: (name: string, password: string) =>
+    request<{ ok: boolean }>(`/accounts/${encodeURIComponent(name)}/password`, {
+      method: 'PUT',
+      body: JSON.stringify({ password }),
+    }),
 
   listProjects: () => request<{ projects: ProjectDir[] }>('/projects').then((r) => r.projects),
 
@@ -81,6 +116,16 @@ export const api = {
   listKiroModels: (host?: string) => {
     const q = host ? `?host=${encodeURIComponent(host)}` : '';
     return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/kiro/models${q}`);
+  },
+
+  listGrokModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/grok/models${q}`);
+  },
+
+  listZcodeModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/zcode/models${q}`);
   },
 
   validateDir: (path: string) =>

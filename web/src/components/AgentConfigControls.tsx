@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Loader2, X, Save, FileCog, TriangleAlert, FilePen } from 'lucide-react';
+import { Loader2, X, Save, FileCog, TriangleAlert, FilePen } from '../lib/icons';
 import type { AgentKind, ConfigFileDetail, ConfigFileEntry } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { AGENTS } from '../lib/format';

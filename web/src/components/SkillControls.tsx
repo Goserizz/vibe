@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Loader2, Pencil, Check, X, Sparkles, Package, Eye } from 'lucide-react';
+import { Plus, Trash2, Loader2, Pencil, Check, X, Sparkles, Package, Eye } from '../lib/icons';
 import type { AgentKind, SkillDetail, SkillEntry, SkillScope } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { Markdown } from './Markdown';
@@ -20,6 +20,9 @@ const SKILL_DIR: Record<AgentKind, string> = {
   codex: '~/.codex/skills',
   kimi: '~/.kimi-code/skills',
   kiro: '~/.kiro/skills',
+  grok: '~/.grok/skills',
+  // ZCode reads user skills from the shared agents dir (`zcode skills list`).
+  zcode: '~/.agents/skills',
 };
 
 /** Add/edit form for a personal skill. `def` undefined = create.

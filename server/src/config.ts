@@ -7,6 +7,8 @@ import { resolveCursorExecutable } from './cursor/resolve.js';
 import { resolveCodexExecutable } from './codex/resolve.js';
 import { resolveKimiExecutable } from './kimi/resolve.js';
 import { resolveKiroExecutable } from './kiro/resolve.js';
+import { resolveGrokExecutable } from './grok/resolve.js';
+import { resolveZcodeExecutable } from './zcode/resolve.js';
 
 function resolveHome(): string {
   const custom = process.env.VIBE_HOME;
@@ -19,6 +21,12 @@ fs.mkdirSync(VIBE_HOME, { recursive: true });
 const KIMI_HOME = process.env.KIMI_CODE_HOME
   ? path.resolve(process.env.KIMI_CODE_HOME)
   : path.join(os.homedir(), '.kimi-code');
+const GROK_HOME = process.env.GROK_HOME
+  ? path.resolve(process.env.GROK_HOME)
+  : path.join(os.homedir(), '.grok');
+const ZCODE_HOME = process.env.ZCODE_HOME
+  ? path.resolve(process.env.ZCODE_HOME)
+  : path.join(os.homedir(), '.zcode');
 
 /**
  * Single-user access token. Reuses an existing token if present, otherwise
@@ -91,6 +99,10 @@ export const config = {
   mcpOauthFile: path.join(VIBE_HOME, 'mcp-oauth.json'),
   /** Saved New-session engine presets (agent + model + permission + effort). */
   presetsFile: path.join(VIBE_HOME, 'presets.json'),
+  /** User accounts for multi-account login (name + scrypt password hash +
+   *  per-account token). Secrets — 0600. The admin account is virtual: its
+   *  token is always `config.token`. */
+  accountsFile: path.join(VIBE_HOME, 'accounts.json'),
   /** Vibot's own LLM API config (baseUrl + apiKey + model + systemPrompt). 0600. */
   vibotConfigFile: path.join(VIBE_HOME, 'vibot.json'),
   /** Vibot's durable memories. */
@@ -135,6 +147,22 @@ export const config = {
   kiroSessionsDir: path.join(os.homedir(), '.kiro', 'sessions', 'cli'),
   /** Where Vibe persists normalized transcripts for Kiro sessions it drives. */
   kiroTranscriptsDir: path.join(VIBE_HOME, 'kiro-transcripts'),
+  /** Grok Build data root (override with GROK_HOME; default ~/.grok). */
+  grokHome: GROK_HOME,
+  /** Where the Grok CLI stores sessions (~/.grok/sessions/<encoded-cwd>/<id>). */
+  grokSessionsDir: path.join(GROK_HOME, 'sessions'),
+  /** Where Vibe persists normalized transcripts for Grok sessions it drives. */
+  grokTranscriptsDir: path.join(VIBE_HOME, 'grok-transcripts'),
+  /** ZCode data root (override with ZCODE_HOME; default ~/.zcode). */
+  zcodeHome: ZCODE_HOME,
+  /** ZCode CLI config (~/.zcode/cli/config.json) — providers, models, MCP servers. */
+  zcodeConfigFile: path.join(ZCODE_HOME, 'cli', 'config.json'),
+  /** Where Vibe persists normalized transcripts for ZCode sessions it drives. */
+  zcodeTranscriptsDir: path.join(VIBE_HOME, 'zcode-transcripts'),
+  /** Sidecar index for sync session adoption (ZCode keeps sessions in SQLite,
+   *  which Vibe's Node 20 runtime cannot read — the async discovery pass rewrites
+   *  this so the synchronous hub resolve path has something to peek). */
+  zcodeIndexFile: path.join(VIBE_HOME, 'zcode-index.json'),
   /** Base dir for auto-created (ephemeral) session working directories. A fresh
    *  subfolder is made under here when a New session skips picking a cwd. */
   workdirsBase: path.join(VIBE_HOME, 'workdirs'),
@@ -152,6 +180,11 @@ export const config = {
   defaultKimiModel: process.env.VIBE_DEFAULT_KIMI_MODEL || 'auto',
   /** Default model for new Kiro sessions (`auto` lets Kiro pick). */
   defaultKiroModel: process.env.VIBE_DEFAULT_KIRO_MODEL || 'auto',
+  /** Default model for new Grok sessions (`auto` lets Grok pick). */
+  defaultGrokModel: process.env.VIBE_DEFAULT_GROK_MODEL || 'auto',
+  /** Default model for new ZCode sessions (`auto` lets ZCode pick; otherwise
+   *  `providerID/modelID` as written in ~/.zcode/cli/config.json). */
+  defaultZcodeModel: process.env.VIBE_DEFAULT_ZCODE_MODEL || 'auto',
   /** Which engine new sessions use by default. */
   defaultAgent:
     process.env.VIBE_DEFAULT_AGENT === 'cursor'
@@ -162,7 +195,11 @@ export const config = {
           ? 'kimi'
           : process.env.VIBE_DEFAULT_AGENT === 'kiro'
             ? 'kiro'
-            : 'claude',
+            : process.env.VIBE_DEFAULT_AGENT === 'grok'
+            ? 'grok'
+            : process.env.VIBE_DEFAULT_AGENT === 'zcode'
+              ? 'zcode'
+              : 'claude',
   /** Path to the user's real claude binary (preferred over the SDK's bundled one). */
   claudeExecutable: resolveClaudeExecutable(),
   /** Path to the user's cursor-agent binary (the Cursor CLI). */
@@ -173,5 +210,9 @@ export const config = {
   kimiExecutable: resolveKimiExecutable(),
   /** Path to the user's Kiro CLI binary (`kiro-cli`). */
   kiroExecutable: resolveKiroExecutable(),
+  /** Path to the user's Grok Build binary (`grok`). */
+  grokExecutable: resolveGrokExecutable(),
+  /** Path to the user's ZCode CLI binary (`zcode`). */
+  zcodeExecutable: resolveZcodeExecutable(),
   serverVersion: '0.1.0',
 } as const;

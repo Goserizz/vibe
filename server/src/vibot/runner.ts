@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { log } from '../log.js';
-import { DEFAULT_CONTEXT_WINDOW, type ChatBlock, type LiveEvent, type TokenUsage } from '../../../shared/protocol.js';
+import { type ChatBlock, type LiveEvent } from '../../../shared/protocol.js';
 import { convStore } from './conversations.js';
 import { streamChat, LlmError, type LlmMessage, type LlmToolCall } from './llm.js';
 import { VIBOT_TOOLS, dispatchTool } from './tools.js';
@@ -41,20 +41,6 @@ function parseArgs(raw: string): Record<string, any> {
   }
 }
 
-function toUsage(u?: { inputTokens?: number; outputTokens?: number }): TokenUsage | undefined {
-  if (!u) return undefined;
-  const inputTokens = u.inputTokens ?? 0;
-  const outputTokens = u.outputTokens ?? 0;
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    contextUsed: inputTokens + outputTokens,
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-  };
-}
-
 /**
  * Drive one Vibot turn: stream the model, emit LiveEvents for the rendered
  * transcript, execute any tool calls, and loop until the model stops calling
@@ -76,7 +62,9 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
     // The live messages array sent to the API each round.
     const live = (): LlmMessage[] => [system, ...seed, ...turn];
 
-    let lastUsage: { inputTokens?: number; outputTokens?: number } | undefined;
+    // Usage of the last completed round — its prompt already contains the full
+    // history, so prompt + completion is the context the next round starts from.
+    let contextUsed: number | undefined;
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const assistantId = `va_${crypto.randomUUID()}`;
@@ -105,8 +93,10 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
             }
           } else if (ev.type === 'tool_calls') {
             toolCalls = ev.calls;
-          } else if (ev.type === 'done') {
-            lastUsage = ev.usage;
+          } else if (ev.type === 'done' && ev.usage) {
+            const u = ev.usage;
+            const total = (u.inputTokens ?? 0) + (u.outputTokens ?? 0);
+            if (total > 0) contextUsed = total;
           }
         }
       } catch (err) {
@@ -141,8 +131,8 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
           block: {
             id: `vr_${crypto.randomUUID()}`,
             kind: 'result',
-            usage: toUsage(lastUsage),
             durationMs: Date.now() - startedAt,
+            contextUsed,
             ts: Date.now(),
           },
         });
@@ -178,7 +168,7 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
     }
 
     // Hit the round cap — record a gentle stop.
-    cb.onEvent({ k: 'block', block: { id: `vr_${crypto.randomUUID()}`, kind: 'result', durationMs: Date.now() - startedAt, ts: Date.now() } });
+    cb.onEvent({ k: 'block', block: { id: `vr_${crypto.randomUUID()}`, kind: 'result', durationMs: Date.now() - startedAt, contextUsed, ts: Date.now() } });
     return { newMessages: turn };
   })();
 

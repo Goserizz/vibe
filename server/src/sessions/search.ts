@@ -8,7 +8,8 @@ import { searchRemoteHost, type RemoteSearchHit } from '../remote/search.js';
 import { candidateFiles, parseSessionMeta, type DiscoveredSession, type FileRef } from './discovery.js';
 import { parseTranscriptBlocks } from './transcript.js';
 import { sessionStore, type StoredSession } from './store.js';
-import type { ChatBlock, RemoteHost, SearchHit, SearchResult } from '../../../shared/protocol.js';
+import { sessionVisible } from './visibility.js';
+import { ADMIN_ACCOUNT, type ChatBlock, type RemoteHost, type SearchHit, type SearchResult } from '../../../shared/protocol.js';
 
 const SNIPPET_PAD = 60;
 const MAX_HITS_PER_SESSION = 3;
@@ -152,39 +153,46 @@ function resolveRemote(host: RemoteHost, rh: RemoteSearchHit, meta: DiscoveredSe
 
 // -- orchestration ------------------------------------------------------------
 
-/** Full-text search across local + remote conversations (messages only). */
-export async function searchConversations(query: string, limit = 50): Promise<SearchResult[]> {
+/** Full-text search across local + remote conversations (messages only).
+ *  Remote hosts are limited to the ones `account` owns; the local scan is
+ *  admin-only (the local machine is admin-only). */
+export async function searchConversations(query: string, limit = 50, account: string = ADMIN_ACCOUNT): Promise<SearchResult[]> {
   const q = sanitize(query);
   if (!q) return [];
 
   // Index stored sessions by their Claude id for local identity resolution.
   const byClaude = new Map<string, StoredSession>();
-  for (const s of sessionStore.list()) if (s.claudeSessionId) byClaude.set(s.claudeSessionId, s);
+  if (account === ADMIN_ACCOUNT) {
+    for (const s of sessionStore.list()) if (s.claudeSessionId) byClaude.set(s.claudeSessionId, s);
+  }
 
   const results: SearchResult[] = [];
 
   // Local: scan every transcript file (most-recent first), bounded.
-  try {
-    const all = candidateFiles();
-    if (all.length > LOCAL_SCAN_CAP) log.debug(`search capped to ${LOCAL_SCAN_CAP} of ${all.length} local sessions`);
-    const refs = all.sort((a, b) => b.mtime - a.mtime).slice(0, LOCAL_SCAN_CAP);
-    for (const ref of refs) {
-      const doc = getLocalDoc(ref);
-      if (!doc) continue;
-      const hits = findHits(doc.blocks, q);
-      if (hits.length === 0) continue;
-      const resolved = resolveLocal(ref.id, doc, byClaude);
-      if (!resolved) continue;
-      results.push({ ...resolved, hits });
+  if (account === ADMIN_ACCOUNT) {
+    try {
+      const all = candidateFiles();
+      if (all.length > LOCAL_SCAN_CAP) log.debug(`search capped to ${LOCAL_SCAN_CAP} of ${all.length} local sessions`);
+      const refs = all.sort((a, b) => b.mtime - a.mtime).slice(0, LOCAL_SCAN_CAP);
+      for (const ref of refs) {
+        const doc = getLocalDoc(ref);
+        if (!doc) continue;
+        const hits = findHits(doc.blocks, q);
+        if (hits.length === 0) continue;
+        const resolved = resolveLocal(ref.id, doc, byClaude);
+        if (!resolved) continue;
+        if (!sessionVisible(account, resolved.sessionId)) continue;
+        results.push({ ...resolved, hits });
+      }
+    } catch (err) {
+      log.warn('local search failed', err);
     }
-  } catch (err) {
-    log.warn('local search failed', err);
   }
 
-  // Remote: one grep-filtered SSH round-trip per host (in parallel; a down
-  // host contributes nothing).
+  // Remote: one grep-filtered SSH round-trip per host the account owns (in
+  // parallel; a down host contributes nothing).
   await Promise.all(
-    hostRegistry.list().map(async (host) => {
+    hostRegistry.listFor(account).map(async (host) => {
       try {
         for (const rh of await searchRemoteHost(host, q)) {
           const hits = findHits(parseTranscriptBlocks(rh.matches).blocks, q);

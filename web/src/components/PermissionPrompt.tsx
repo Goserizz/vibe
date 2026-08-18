@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ShieldQuestion, Check, CheckCheck, Ban, HelpCircle, Circle, CheckCircle2, Square, CheckSquare, ClipboardList } from 'lucide-react';
+import { ShieldQuestion, Check, CheckCheck, Ban, HelpCircle, Circle, CheckCircle2, Square, CheckSquare, ClipboardList } from '../lib/icons';
 import type { PermissionDecision, PermissionRequest } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { toolMeta } from './blocks';
@@ -10,6 +10,7 @@ import { Glass } from './LiquidGlass';
 export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   const pending = useStore((s) => s.pending[sessionId]);
   const respond = useStore((s) => s.respondPermission);
+  const cli = useStore((s) => s.viewMode) === 'cli';
   if (!pending || pending.length === 0) return null;
 
   // One at a time keeps the surface calm; the rest queue behind it.
@@ -26,6 +27,47 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   const meta = toolMeta(req.toolName, req.input);
   const Icon = meta.icon;
 
+  if (cli) {
+    return (
+      <div className="shrink-0 px-4 pb-2 md:px-6">
+        <div className="mx-auto max-w-4xl font-mono text-[13px] leading-relaxed">
+          <div className="flex items-start gap-2 text-amber-300">
+            <span className="cli-gutter select-none">?</span>
+            <span>
+              Permission required — {meta.label}
+              {pending.length > 1 ? `  (+${pending.length - 1} more)` : ''}
+            </span>
+          </div>
+          {meta.detail && (
+            <pre className="mt-1 whitespace-pre-wrap break-words pl-[1.75rem] text-[12.5px] text-slate-400">
+              {meta.detail}
+            </pre>
+          )}
+          <div className="mt-2 flex flex-wrap gap-2 pl-[1.75rem]">
+            <button
+              onClick={() => respond(req.requestId, { allow: true })}
+              className="bg-accent px-2.5 py-1 text-[12px] font-medium text-accent-fg transition hover:bg-accent-soft"
+            >
+              1. Yes
+            </button>
+            <button
+              onClick={() => respond(req.requestId, { allow: true, remember: true })}
+              className="border border-ink-600 px-2.5 py-1 text-[12px] text-slate-300 transition hover:border-accent/40 hover:text-accent-soft"
+            >
+              2. Yes, and don&apos;t ask again for {req.toolName}
+            </button>
+            <button
+              onClick={() => respond(req.requestId, { allow: false })}
+              className="px-2.5 py-1 text-[12px] text-slate-500 transition hover:text-rose-400"
+            >
+              3. No
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="shrink-0 px-4 pb-2 md:px-6">
       <div className="mx-auto max-w-3xl">
@@ -33,7 +75,9 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
           <div className="grid max-h-[min(70dvh,calc(100dvh-11rem))] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
           <div className="flex items-center gap-2.5 border-b border-white/5 bg-amber-400/5 px-4 py-2.5">
             <ShieldQuestion className="h-4 w-4 text-amber-400" />
-            <span className="text-[13px] font-medium text-slate-200">Permission required</span>
+            <span className="text-[13px] font-medium text-slate-200">
+              Permission required
+            </span>
             {pending.length > 1 && (
               <span className="ml-auto text-[11px] text-slate-500">+{pending.length - 1} more</span>
             )}
@@ -125,7 +169,7 @@ function PlanPrompt({ req, respond }: { req: PermissionRequest; respond: (id: st
               </div>
             ) : (
               <p className="text-[13px] text-slate-400">
-                Claude is ready to exit plan mode and start implementing.
+                The agent is ready to exit plan mode and start implementing.
               </p>
             )}
             {prompts.length > 0 && (
@@ -182,7 +226,9 @@ function QuestionPrompt({ req, respond }: { req: PermissionRequest; respond: (id
     ? 'Kimi has a question'
     : input.source === 'cursor'
       ? 'Cursor has a question'
-      : 'Claude has a question';
+      : input.source === 'zcode'
+        ? 'ZCode has a question'
+        : 'Claude has a question';
 
   const [selected, setSelected] = useState<Record<number, Set<string>>>({});
   const [otherActive, setOtherActive] = useState<Record<number, boolean>>({});

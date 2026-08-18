@@ -6,11 +6,14 @@ import { listCursorSessions } from '../cursor/discovery.js';
 import { listCodexSessions } from '../codex/discovery.js';
 import { listKimiSessions } from '../kimi/discovery.js';
 import { listKiroSessions } from '../kiro/discovery.js';
+import { listGrokSessions } from '../grok/discovery.js';
+import { listZcodeSessions } from '../zcode/discovery.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { listRemoteAgentSessions, clearRemoteDiscoveryCache } from '../remote/discovery.js';
 import { encodeRemoteId } from '../remote/sessionId.js';
 import { hub } from '../ws/hub.js';
-import { compareSessions, type AgentKind, type EffortLevel, type SessionMeta } from '../../../shared/protocol.js';
+import { ADMIN_ACCOUNT, compareSessions, type AgentKind, type EffortLevel, type SessionMeta } from '../../../shared/protocol.js';
+import { filterVisibleSessions } from './visibility.js';
 import {
   getSessionListInflight,
   peekSessionListCache,
@@ -54,7 +57,11 @@ export function discoveredToMeta(
             ? 'kimi'
             : agent === 'kiro'
               ? 'kiro'
-              : 'claude',
+              : agent === 'grok'
+                ? 'grok'
+                : agent === 'zcode'
+                  ? 'zcode'
+                  : 'claude',
     host,
   };
 }
@@ -146,6 +153,28 @@ async function loadAllSessions(): Promise<SessionMeta[]> {
     }
   } catch (err) {
     log.warn('kiro session discovery failed', err);
+  }
+
+  try {
+    for (const d of listGrokSessions()) {
+      if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
+        discovered.push(discoveredToMeta(d, config.localName, false, 'grok'));
+      }
+    }
+  } catch (err) {
+    log.warn('grok session discovery failed', err);
+  }
+
+  try {
+    // ZCode discovery spawns a short-lived app-server; the SWR cache keeps
+    // this from spawning more than once per TTL window.
+    for (const d of await listZcodeSessions()) {
+      if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
+        discovered.push(discoveredToMeta(d, config.localName, false, 'zcode'));
+      }
+    }
+  } catch (err) {
+    log.warn('zcode session discovery failed', err);
   }
 
   await Promise.all(
@@ -243,21 +272,23 @@ async function loadSessionListAwait(): Promise<SessionMeta[]> {
  * Unified session list for the web UI. Never waits on SSH: serves the warm
  * cache (or a sync store seed) and lets the background refresher fill remotes.
  * Connected clients learn about newly discovered rows via session_meta WS events.
+ * The cache is global; rows are filtered down to what `account` may see (admin
+ * sees everything — also the default for in-process consumers like Telegram).
  */
-export async function listAllSessions(): Promise<SessionMeta[]> {
+export async function listAllSessions(account: string = ADMIN_ACCOUNT): Promise<SessionMeta[]> {
   ensureSeeded();
   // Only kick a load if we've never completed one and nothing is in flight.
   // Periodic refresh / host invalidate go through refreshSessionList instead.
   if (!fullDiscoveryDone && !getSessionListInflight()) {
     void loadSessionListAwait().catch((err) => log.debug('session list background load failed', err));
   }
-  return withLiveState(peekSessionListCache() ?? seedFromStore());
+  return filterVisibleSessions(account, withLiveState(peekSessionListCache() ?? seedFromStore()));
 }
 
 /** Wait for a full discovery pass (Telegram /sessions, etc.). */
-export async function awaitFullSessionList(): Promise<SessionMeta[]> {
+export async function awaitFullSessionList(account: string = ADMIN_ACCOUNT): Promise<SessionMeta[]> {
   ensureSeeded();
-  return withLiveState(await loadSessionListAwait());
+  return filterVisibleSessions(account, withLiveState(await loadSessionListAwait()));
 }
 
 /** Seed a warm cache immediately, then kick off full discovery in the background. */

@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import fs from 'node:fs';
 import type {
   AgentInstallInfo,
   AgentKind,
@@ -6,10 +7,12 @@ import type {
   AgentUpdateResult,
   HostAgentsStatus,
 } from '../../../shared/protocol.js';
+import { config } from '../config.js';
 import { log } from '../log.js';
+import { buildZcodeBundle, localZcodeVersion } from '../zcode/bundle.js';
 import { cleanRemoteStderr, loginShellCommand, sshExec, type SshResult } from './ssh.js';
 
-const AGENTS: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro'];
+const AGENTS: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
 
 const emptyAgents = (): HostAgentsStatus => ({
   claude: { installed: false },
@@ -17,6 +20,8 @@ const emptyAgents = (): HostAgentsStatus => ({
   codex: { installed: false },
   kimi: { installed: false },
   kiro: { installed: false },
+  grok: { installed: false },
+  zcode: { installed: false },
 });
 
 /** Probe script shared by local + remote (login-shell PATH for nvm/fnm/…). */
@@ -35,6 +40,14 @@ const PROBE_SCRIPT = [
     + 'if command -v kiro-cli >/dev/null 2>&1; then echo "KIRO_VER:$(kiro-cli --version 2>/dev/null | head -1)"; '
     + 'elif [ -x "$kiro_fallback" ]; then echo "KIRO_VER:$("$kiro_fallback" --version 2>/dev/null | head -1)"; '
     + 'else echo KIRO_MISS; fi',
+  'grok_fallback="$HOME/.local/bin/grok"; '
+    + 'if command -v grok >/dev/null 2>&1; then echo "GROK_VER:$(grok --version 2>/dev/null | head -1)"; '
+    + 'elif [ -x "$grok_fallback" ]; then echo "GROK_VER:$("$grok_fallback" --version 2>/dev/null | head -1)"; '
+    + 'else echo GROK_MISS; fi',
+  'zcode_fallback="/usr/local/bin/zcode"; '
+    + 'if command -v zcode >/dev/null 2>&1; then echo "ZCODE_VER:$(zcode --version 2>/dev/null | head -1)"; '
+    + 'elif [ -x "$zcode_fallback" ]; then echo "ZCODE_VER:$("$zcode_fallback" --version 2>/dev/null | head -1)"; '
+    + 'else echo ZCODE_MISS; fi',
 ].join('; ');
 
 /** Pull a semver-ish or Cursor-style version token out of CLI `--version` output. */
@@ -69,6 +82,8 @@ function parseProbeStdout(stdout: string): HostAgentsStatus {
   parseLine('CODEX', 'codex');
   parseLine('KIMI', 'kimi');
   parseLine('KIRO', 'kiro');
+  parseLine('GROK', 'grok');
+  parseLine('ZCODE', 'zcode');
   return agents;
 }
 
@@ -120,7 +135,7 @@ function probeFromResult(res: SshResult): {
 
 /**
  * One-shot remote probe: reachability + install/version for claude, cursor-agent
- * (or `agent`), codex, kimi, and kiro-cli. Runs inside a login shell so nvm/fnm PATH works.
+ * (or `agent`), codex, kimi, kiro-cli, and grok. Runs inside a login shell so nvm/fnm PATH works.
  */
 export async function sshProbeAgents(
   target: string,
@@ -210,17 +225,41 @@ async function fetchKiroLatest(): Promise<string | undefined> {
   }
 }
 
+/** Grok Build publishes the current installer script with an embedded version. */
+async function fetchGrokLatest(): Promise<string | undefined> {
+  try {
+    const npm = await npmViewVersion('@xai-official/grok');
+    if (npm) return npm;
+  } catch {
+    /* fall through to the install script */
+  }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    const res = await fetch('https://x.ai/cli/install.sh', { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) return undefined;
+    const text = await res.text();
+    const m = text.match(/\b(?:VERSION|version)=['"]?v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)/);
+    return m?.[1];
+  } catch (err) {
+    log.debug('grok latest version fetch failed', err);
+    return undefined;
+  }
+}
+
 /** Fetch (and cache ~15 min) the latest published version for each agent CLI. */
 export async function getLatestAgentVersions(force = false): Promise<AgentLatestVersions> {
   if (!force && latestCache && Date.now() - latestCache.at < LATEST_TTL_MS) {
     return latestCache.versions;
   }
-  const [claude, cursor, codex, kimi, kiro] = await Promise.all([
+  const [claude, cursor, codex, kimi, kiro, grok] = await Promise.all([
     npmViewVersion('@anthropic-ai/claude-code'),
     fetchCursorLatest(),
     npmViewVersion('@openai/codex'),
     fetchKimiLatest(),
     fetchKiroLatest(),
+    fetchGrokLatest(),
   ]);
   const versions: AgentLatestVersions = {};
   if (claude) versions.claude = claude;
@@ -228,6 +267,11 @@ export async function getLatestAgentVersions(force = false): Promise<AgentLatest
   if (codex) versions.codex = codex;
   if (kimi) versions.kimi = kimi;
   if (kiro) versions.kiro = kiro;
+  if (grok) versions.grok = grok;
+  // ZCode publishes no registry — the local CLI the push installer ships IS
+  // the latest, so hosts lagging it show an Update button.
+  const zcode = localZcodeVersion();
+  if (zcode) versions.zcode = zcode;
   latestCache = { at: Date.now(), versions };
   return versions;
 }
@@ -290,6 +334,73 @@ function updateCommand(agent: AgentKind): string {
         'if command -v kiro-cli >/dev/null 2>&1; then echo "KIRO_VER:$(kiro-cli --version 2>/dev/null | head -1)"; '
           + 'elif [ -x "$kiro_fallback" ]; then echo "KIRO_VER:$("$kiro_fallback" --version 2>/dev/null | head -1)"; fi',
       ].join('\n');
+    case 'grok':
+      return [
+        'if command -v grok >/dev/null 2>&1; then',
+        '  grok update',
+        'else',
+        '  curl -fsSL https://x.ai/cli/install.sh | bash',
+        'fi',
+        'echo VIBE_UPDATE_DONE',
+        'grok_fallback="$HOME/.local/bin/grok"',
+        'if command -v grok >/dev/null 2>&1; then echo "GROK_VER:$(grok --version 2>/dev/null | head -1)"; '
+          + 'elif [ -x "$grok_fallback" ]; then echo "GROK_VER:$("$grok_fallback" --version 2>/dev/null | head -1)"; fi',
+      ].join('\n');
+    case 'zcode':
+      // ZCode ships no CLI installer — the CLI is the zcode.cjs bundled in the
+      // desktop AppImage (linux-x64 only; it needs node >= 22.5 for node:sqlite,
+      // so a private Node 24 lands under /opt when the host node is older).
+      // Follows the documented extraction procedure; re-running is a no-op.
+      return [
+        'ZCODE_RELEASE=3.7.7',
+        'case "$(uname -s):$(uname -m)" in',
+        '  Linux:x86_64) ;;',
+        '  *) echo "ZCode install supports linux-x64 only (this host: $(uname -s) $(uname -m))" >&2; exit 1 ;;',
+        'esac',
+        // Non-root SSH logins work when passwordless sudo is available.
+        'SUDO=""',
+        'if [ "$(id -u)" != "0" ]; then',
+        '  if sudo -n true 2>/dev/null; then SUDO="sudo"',
+        '  else echo "ZCode install needs root or passwordless sudo on the target host (writes /opt and /usr/local/bin)" >&2; exit 1; fi',
+        'fi',
+        'if command -v zcode >/dev/null 2>&1; then',
+        '  echo "zcode already installed: $(zcode --version 2>/dev/null | head -1)"',
+        '  echo VIBE_UPDATE_DONE',
+        '  echo "ZCODE_VER:$(zcode --version 2>/dev/null | head -1)"',
+        '  exit 0',
+        'fi',
+        'node_bin=""',
+        'for cand in "$(command -v node 2>/dev/null)" /opt/node/bin/node; do',
+        '  [ -x "$cand" ] || continue',
+        '  v="$("$cand" --version 2>/dev/null | tr -d v)"',
+        '  maj="${v%%.*}"',
+        '  min="$(echo "$v" | cut -d. -f2)"',
+        '  if [ "${maj:-0}" -gt 22 ] || { [ "${maj:-0}" -eq 22 ] && [ "${min:-0}" -ge 5 ]; }; then node_bin="$cand"; break; fi',
+        'done',
+        'if [ -z "$node_bin" ]; then',
+        '  echo "Installing Node 24 under /opt (zcode needs node >= 22.5 for node:sqlite)..."',
+        '  node_file="$(curl -fsSL https://nodejs.org/dist/latest-v24.x/ | grep -oE \'node-v24\\.[0-9]+\\.[0-9]+-linux-x64\\.tar\\.xz\' | head -1)"',
+        '  if [ -z "$node_file" ]; then echo "could not resolve the latest Node 24 tarball" >&2; exit 1; fi',
+        '  curl -fsSL -o /tmp/zcode-node24.tar.xz "https://nodejs.org/dist/latest-v24.x/$node_file" || { echo "Node 24 download failed" >&2; exit 1; }',
+        '  $SUDO rm -rf "/opt/${node_file%.tar.xz}"',
+        '  $SUDO tar -xJf /tmp/zcode-node24.tar.xz -C /opt/ || { echo "Node 24 tar extraction failed" >&2; exit 1; }',
+        '  $SUDO ln -sfn "/opt/${node_file%.tar.xz}" /opt/node',
+        '  rm -f /tmp/zcode-node24.tar.xz',
+        '  node_bin=/opt/node/bin/node',
+        'fi',
+        'echo "Downloading ZCode $ZCODE_RELEASE (linux-x64 AppImage, ~200MB)..."',
+        'cd /tmp || exit 1',
+        'curl -fsSL -o ZCode.AppImage "https://cdn-zcode.z.ai/zcode/electron/releases/$ZCODE_RELEASE/linux-x64/ZCode-$ZCODE_RELEASE-linux-x64.AppImage" || { echo "ZCode AppImage download failed" >&2; exit 1; }',
+        'chmod +x ZCode.AppImage',
+        './ZCode.AppImage --appimage-extract >/dev/null 2>&1 || { echo "ZCode AppImage extraction failed" >&2; rm -f ZCode.AppImage; exit 1; }',
+        'rm -f ZCode.AppImage',
+        '$SUDO rm -rf /opt/zcode-app',
+        '$SUDO mv squashfs-root /opt/zcode-app',
+        'printf \'#!/bin/sh\\nexec %s /opt/zcode-app/resources/glm/zcode.cjs "$@"\\n\' "$node_bin" | $SUDO tee /usr/local/bin/zcode >/dev/null',
+        '$SUDO chmod +x /usr/local/bin/zcode',
+        'echo VIBE_UPDATE_DONE',
+        'echo "ZCODE_VER:$(/usr/local/bin/zcode --version 2>/dev/null | head -1)"',
+      ].join('\n');
   }
 }
 
@@ -298,7 +409,9 @@ function versionPrefix(agent: AgentKind): string {
   if (agent === 'cursor') return 'CURSOR_VER:';
   if (agent === 'codex') return 'CODEX_VER:';
   if (agent === 'kimi') return 'KIMI_VER:';
-  return 'KIRO_VER:';
+  if (agent === 'kiro') return 'KIRO_VER:';
+  if (agent === 'zcode') return 'ZCODE_VER:';
+  return 'GROK_VER:';
 }
 
 function updateResultFromExec(agent: AgentKind, res: SshResult): AgentUpdateResult {
@@ -323,8 +436,213 @@ export async function sshUpdateAgent(target: string, agent: AgentKind): Promise<
   if (!AGENTS.includes(agent)) {
     return { ok: false, agent, error: 'unknown agent' };
   }
+  // ZCode: prefer pushing the local CLI bundle over SSH (~9MB tar.gz) instead
+  // of downloading the ~200MB AppImage on the remote host.
+  if (agent === 'zcode') return zcodePushInstall(target);
   const res = await sshExec(target, loginShellCommand(updateCommand(agent)), { timeoutMs: 180_000 });
   return updateResultFromExec(agent, res);
+}
+
+// ---------------------------------------------------------------------------
+// ZCode push install: upload the local CLI bundle, extract it remotely.
+// ---------------------------------------------------------------------------
+
+/** Machine-readable preflight (runs read-only on the target). */
+const ZCODE_PREFLIGHT = [
+  'echo "ARCH:$(uname -s)-$(uname -m)"',
+  'if command -v zcode >/dev/null 2>&1; then echo "ZCODE:$(zcode --version 2>/dev/null | head -1)"; else echo ZCODE:missing; fi',
+  'if [ "$(id -u)" = "0" ]; then echo SUDO:root',
+  'elif sudo -n true 2>/dev/null; then echo SUDO:sudo',
+  'else echo SUDO:none; fi',
+  'node_bin=""',
+  'for cand in "$(command -v node 2>/dev/null)" /opt/node/bin/node; do',
+  '  [ -x "$cand" ] || continue',
+  '  v="$("$cand" --version 2>/dev/null | tr -d v)"',
+  '  maj="${v%%.*}"',
+  '  min="$(echo "$v" | cut -d. -f2)"',
+  '  if [ "${maj:-0}" -gt 22 ] || { [ "${maj:-0}" -eq 22 ] && [ "${min:-0}" -ge 5 ]; }; then node_bin="$cand"; break; fi',
+  'done',
+  'if [ -n "$node_bin" ]; then echo "NODE:$node_bin"; else echo NODE:missing; fi',
+  'if [ -f "$HOME/.zcode/cli/config.json" ]; then echo CONFIG:present; else echo CONFIG:missing; fi',
+].join('\n');
+
+interface ZcodePreflight {
+  arch: string;
+  zcodeVersion?: string;
+  sudo: 'root' | 'sudo' | 'none';
+  nodeBin?: string;
+  configPresent: boolean;
+}
+
+function parseZcodePreflight(stdout: string): ZcodePreflight {
+  const pick = (key: string): string =>
+    stdout.split('\n').find((l) => l.startsWith(`${key}:`))?.slice(key.length + 1).trim() ?? '';
+  const sudo = pick('SUDO');
+  return {
+    arch: pick('ARCH'),
+    zcodeVersion: pick('ZCODE') === 'missing' || !pick('ZCODE') ? undefined : pick('ZCODE'),
+    sudo: sudo === 'root' || sudo === 'sudo' ? sudo : 'none',
+    nodeBin: pick('NODE') === 'missing' || !pick('NODE') ? undefined : pick('NODE'),
+    configPresent: pick('CONFIG') === 'present',
+  };
+}
+
+/** Remote install/update steps once the bundle tarball sits at /tmp/vibe-zcode-bundle.tar.gz. */
+export function zcodeExtractCommand(sudo: 'root' | 'sudo'): string {
+  const s = sudo === 'sudo' ? 'sudo ' : '';
+  return [
+    // A pre-existing /opt/zcode-app may hold a full desktop install — its
+    // resources stay valid, so only the CLI resource dirs are swapped.
+    `${s}mkdir -p /opt/zcode-app/resources/.vibe-incoming`,
+    `${s}rm -rf /opt/zcode-app/resources/.vibe-incoming/*`,
+    `${s}tar -xzf /tmp/vibe-zcode-bundle.tar.gz -C /opt/zcode-app/resources/.vibe-incoming || { echo "bundle extraction failed" >&2; exit 1; }`,
+    // Swap each bundled dir in place — stale files from an older version never
+    // linger (a plain overlay extract would keep them).
+    'for d in /opt/zcode-app/resources/.vibe-incoming/*; do',
+    '  [ -e "$d" ] || continue',
+    '  n="/opt/zcode-app/resources/$(basename "$d")"',
+    `  ${s}rm -rf "$n"`,
+    `  ${s}mv "$d" "$n" || { echo "swap failed for $n" >&2; exit 1; }`,
+    'done',
+    `${s}rm -rf /opt/zcode-app/resources/.vibe-incoming`,
+    // The archive preserves the source's root-only dir modes (700); non-root
+    // users on the remote host must be able to read/traverse the CLI.
+    `${s}chmod -R a+rX /opt/zcode-app/resources/glm /opt/zcode-app/resources/tools /opt/zcode-app/resources/model-providers /opt/zcode-app/resources/config 2>/dev/null || true`,
+    'node_bin=""',
+    'for cand in "$(command -v node 2>/dev/null)" /opt/node/bin/node; do',
+    '  [ -x "$cand" ] || continue',
+    '  v="$("$cand" --version 2>/dev/null | tr -d v)"',
+    '  maj="${v%%.*}"',
+    '  min="$(echo "$v" | cut -d. -f2)"',
+    '  if [ "${maj:-0}" -gt 22 ] || { [ "${maj:-0}" -eq 22 ] && [ "${min:-0}" -ge 5 ]; }; then node_bin="$cand"; break; fi',
+    'done',
+    'if [ -z "$node_bin" ]; then',
+    '  echo "Installing Node 24 under /opt (zcode needs node >= 22.5 for node:sqlite)..."',
+    '  node_file="$(curl -fsSL https://nodejs.org/dist/latest-v24.x/ | grep -oE \'node-v24\\.[0-9]+\\.[0-9]+-linux-x64\\.tar\\.xz\' | head -1)"',
+    '  if [ -z "$node_file" ]; then echo "no node >= 22.5 on the host and could not resolve a Node 24 tarball" >&2; exit 1; fi',
+    '  curl -fsSL -o /tmp/zcode-node24.tar.xz "https://nodejs.org/dist/latest-v24.x/$node_file" || { echo "Node 24 download failed" >&2; exit 1; }',
+    `  ${s}rm -rf "/opt/\${node_file%.tar.xz}"`,
+    `  ${s}tar -xJf /tmp/zcode-node24.tar.xz -C /opt/ || { echo "Node 24 tar extraction failed" >&2; exit 1; }`,
+    `  ${s}ln -sfn "/opt/\${node_file%.tar.xz}" /opt/node`,
+    '  rm -f /tmp/zcode-node24.tar.xz',
+    '  node_bin=/opt/node/bin/node',
+    'fi',
+    `printf '#!/bin/sh\\nexec %s /opt/zcode-app/resources/glm/zcode.cjs "$@"\\n' "$node_bin" | ${s}tee /usr/local/bin/zcode >/dev/null`,
+    `${s}chmod +x /usr/local/bin/zcode`,
+    'rm -f /tmp/vibe-zcode-bundle.tar.gz',
+    zcodeConfigFinalize(),
+    'echo VIBE_UPDATE_DONE',
+    'echo "ZCODE_VER:$(/usr/local/bin/zcode --version 2>/dev/null | head -1)"',
+  ].join('\n');
+}
+
+/** Move a staged ~/.zcode/cli/.vibe-config.json into place — only when the
+ *  remote has no config of its own (never clobber a host-specific one). */
+function zcodeConfigFinalize(): string {
+  return [
+    'if [ -f "$HOME/.zcode/cli/.vibe-config.json" ] && [ ! -f "$HOME/.zcode/cli/config.json" ]; then',
+    '  mv "$HOME/.zcode/cli/.vibe-config.json" "$HOME/.zcode/cli/config.json"',
+    '  chmod 600 "$HOME/.zcode/cli/config.json"',
+    'fi',
+    'rm -f "$HOME/.zcode/cli/.vibe-config.json"',
+  ].join('\n');
+}
+
+/**
+ * Install ZCode on a remote host by streaming the local CLI bundle over the
+ * existing SSH channel. Falls back to the CDN AppImage script when no local
+ * installation exists to push.
+ */
+async function zcodePushInstall(target: string): Promise<AgentUpdateResult> {
+  const fail = (error: string, logTail = ''): AgentUpdateResult => ({ ok: false, agent: 'zcode', error, log: logTail });
+
+  const bundle = buildZcodeBundle();
+  if (!bundle) {
+    // Nothing local to push — remote downloads the AppImage itself.
+    const res = await sshExec(target, loginShellCommand(updateCommand('zcode')), { timeoutMs: 480_000 });
+    return updateResultFromExec('zcode', res);
+  }
+
+  const pre = await sshExec(target, loginShellCommand(ZCODE_PREFLIGHT), { timeoutMs: 25_000 });
+  if (pre.code !== 0) return fail(cleanRemoteStderr(pre.stderr).split('\n').pop() || 'preflight failed', pre.stdout);
+  const info = parseZcodePreflight(pre.stdout);
+  const localVersion = parseVersionOutput(bundle.version ?? '') ?? bundle.version;
+
+  // Deploy the local model config when the remote has none ("Model config is
+  // missing"). Never overwrites — a host-specific config always wins.
+  let configDeployed = false;
+  const needConfig = !info.configPresent;
+  if (needConfig) {
+    let localConfig = '';
+    try {
+      localConfig = fs.readFileSync(config.zcodeConfigFile, 'utf8');
+    } catch {
+      localConfig = '';
+    }
+    if (localConfig.trim()) {
+      const staged = await sshExec(
+        target,
+        'mkdir -p ~/.zcode/cli && chmod 700 ~/.zcode/cli && cat > ~/.zcode/cli/.vibe-config.json && echo CONFIG_OK',
+        { input: localConfig, timeoutMs: 30_000 },
+      );
+      if (staged.code === 0 && staged.stdout.includes('CONFIG_OK')) {
+        const finalized = await sshExec(target, loginShellCommand(zcodeConfigFinalize()), { timeoutMs: 30_000 });
+        configDeployed = finalized.code === 0;
+        if (!configDeployed) {
+          return fail(cleanRemoteStderr(finalized.stderr).split('\n').pop() || 'model config deployment failed', pre.stdout);
+        }
+      }
+    }
+  }
+
+  if (info.zcodeVersion && localVersion) {
+    // The local CLI is the source of truth: same version → nothing to do,
+    // different → this click is an update push.
+    const remoteVersion = parseVersionOutput(info.zcodeVersion) ?? info.zcodeVersion;
+    if (remoteVersion === localVersion) {
+      if (configDeployed) {
+        return {
+          ok: true,
+          agent: 'zcode',
+          version: remoteVersion,
+          log: `zcode ${remoteVersion} already installed (matches local ${localVersion}); deployed local model config to ~/.zcode/cli/config.json`,
+        };
+      }
+      if (needConfig) {
+        return fail('remote has no ~/.zcode/cli/config.json and the local one is unavailable — create it (or log in with `zcode login`) on the host', pre.stdout);
+      }
+      return {
+        ok: true,
+        agent: 'zcode',
+        version: remoteVersion,
+        log: `zcode ${remoteVersion} already installed (matches local ${localVersion})`,
+      };
+    }
+    log.info(`zcode update push: ${target} ${remoteVersion} -> ${localVersion}`);
+  }
+  if (!/^Linux-x86_64$/.test(info.arch)) {
+    return fail(`ZCode install supports linux-x64 only (this host: ${info.arch})`, pre.stdout);
+  }
+  if (info.sudo === 'none') {
+    return fail('ZCode install needs root or passwordless sudo on the target host (writes /opt and /usr/local/bin)', pre.stdout);
+  }
+
+  const payload = fs.readFileSync(bundle.file);
+  const uploaded = await sshExec(target, 'cat > /tmp/vibe-zcode-bundle.tar.gz && echo UPLOAD_OK', {
+    input: payload,
+    timeoutMs: 480_000,
+  });
+  if (uploaded.code !== 0 || !uploaded.stdout.includes('UPLOAD_OK')) {
+    return fail(cleanRemoteStderr(uploaded.stderr).split('\n').pop() || `bundle upload failed (${payload.length} bytes)`, uploaded.stdout);
+  }
+
+  const install = await sshExec(target, loginShellCommand(zcodeExtractCommand(info.sudo)), { timeoutMs: 300_000 });
+  const result = updateResultFromExec('zcode', install);
+  if (result.ok) {
+    const action = info.zcodeVersion ? 'updated to' : 'installed';
+    result.log = `${action} local zcode ${localVersion ?? ''} (${payload.length} bytes)\n${result.log ?? ''}`.trim();
+  }
+  return result;
 }
 
 /** Install or upgrade an agent CLI on the machine running Vibe. */
@@ -332,7 +650,7 @@ export async function localUpdateAgent(agent: AgentKind): Promise<AgentUpdateRes
   if (!AGENTS.includes(agent)) {
     return { ok: false, agent, error: 'unknown agent' };
   }
-  const res = await localExec(updateCommand(agent), { timeoutMs: 180_000 });
+  const res = await localExec(updateCommand(agent), { timeoutMs: agent === 'zcode' ? 480_000 : 180_000 });
   return updateResultFromExec(agent, res);
 }
 

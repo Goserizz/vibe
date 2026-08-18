@@ -1,26 +1,5 @@
 import crypto from 'node:crypto';
-import { DEFAULT_CONTEXT_WINDOW, type TokenUsage } from '../../../shared/protocol.js';
-import type { NormalizerCallbacks } from '../claude/normalize.js';
-
-function num(v: unknown): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-/** Codex reports usage under `info.total_token_usage` (snake_case, with cached +
- *  reasoning fields). Works for both the live `token_count` event and the rollout
- *  `event_msg` payload (which nest it under `info`). */
-export function extractCodexUsage(info: Record<string, any> | undefined): TokenUsage | null {
-  if (!info) return null;
-  const u = info.total_token_usage ?? info.last_token_usage ?? info;
-  const inputTokens = num(u.input_tokens);
-  const outputTokens = num(u.output_tokens ?? u.reasoning_output_tokens);
-  const cacheReadTokens = num(u.cached_input_tokens);
-  const cacheCreationTokens = 0;
-  const contextUsed = num(u.total_tokens) || inputTokens + cacheReadTokens + outputTokens;
-  const contextWindow = num(info.model_context_window) || DEFAULT_CONTEXT_WINDOW;
-  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, contextUsed, contextWindow };
-}
+import { type NormalizerCallbacks, usageContextTokens } from '../claude/normalize.js';
 
 /** Parse a `function_call` arguments string (JSON) into an object, falling back to
  *  the raw string so the tool block always shows something useful. */
@@ -220,6 +199,9 @@ export class CodexStreamNormalizer {
   /** True once a turn end (completed/failed/aborted) was seen — lets the runner
    *  treat a non-zero exit as already-handled rather than a transport error. */
   sawTurnEnd = false;
+  /** Latest `token_count` snapshot, reported on the result block at turn end. */
+  private lastContextUsed?: number;
+  private lastContextWindow?: number;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -233,6 +215,16 @@ export class CodexStreamNormalizer {
       this.cb.onEvent({ k: 'block_end', id: this.stream.id, text: this.stream.text });
       this.stream = null;
     }
+  }
+
+  /** Turn-end context fields: the `token_count` snapshot (last_token_usage is
+   *  the current context watermark) wins over a turn event's own usage, which
+   *  sums the turn's requests and overcounts long agentic turns. */
+  private contextFields(usage: any): { contextUsed?: number; contextWindow?: number } {
+    return {
+      contextUsed: this.lastContextUsed ?? usageContextTokens(usage),
+      contextWindow: this.lastContextWindow,
+    };
   }
 
   private segment(kind: 'assistant' | 'thinking', text: string, partial: boolean): void {
@@ -315,30 +307,34 @@ export class CodexStreamNormalizer {
     }
 
     if (type === 'token_count') {
-      const usage = extractCodexUsage(message.info ?? message.payload?.info);
-      if (usage) this.cb.onEvent({ k: 'token_usage', usage });
+      // app-server shape: info.last_token_usage is the current context,
+      // info.total_token_usage the billing total (grows monotonically — not a
+      // context watermark). Older flat events carry usage fields directly.
+      const info = message.info ?? {};
+      this.lastContextUsed = usageContextTokens(info.last_token_usage ?? message.usage ?? undefined) ?? this.lastContextUsed;
+      const window = info.model_context_window ?? message.model_context_window;
+      if (typeof window === 'number' && Number.isFinite(window)) this.lastContextWindow = window;
       return;
     }
 
     if (type === 'turn.completed' || type === 'turn_complete' || type === 'task_complete') {
       this.sawTurnEnd = true;
       this.flushStream();
-      const usage = extractCodexUsage(message.usage ?? message.info);
-      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', usage: usage ?? undefined, isError: false, ts: Date.now() } });
+      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: false, ...this.contextFields(message.usage), ts: Date.now() } });
       return;
     }
     if (type === 'turn.failed' || type === 'turn_failed') {
       this.sawTurnEnd = true;
       this.flushStream();
       const text = pickError(message);
-      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'error', ts: Date.now() } });
+      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'error', ...this.contextFields(message.usage), ts: Date.now() } });
       if (text) this.cb.onEvent({ k: 'error', text });
       return;
     }
     if (type === 'turn.aborted' || type === 'turn_aborted') {
       this.sawTurnEnd = true;
       this.flushStream();
-      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'aborted', ts: Date.now() } });
+      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'aborted', ...this.contextFields(message.usage), ts: Date.now() } });
       return;
     }
 

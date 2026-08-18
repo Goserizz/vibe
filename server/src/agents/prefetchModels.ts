@@ -4,6 +4,8 @@ import { prefetchCodexModels } from '../codex/models.js';
 import { prefetchCursorModels } from '../cursor/models.js';
 import { prefetchKimiCapabilities } from '../kimi/capabilities.js';
 import { prefetchKiroModels } from '../kiro/models.js';
+import { prefetchGrokModels } from '../grok/models.js';
+import { prefetchZcodeModels } from '../zcode/models.js';
 
 /** Warm every agent model/capabilities cache in the background so HTTP handlers
  *  never wait on CLI spawns or SSH. Safe to call repeatedly (SWR dedupes). */
@@ -14,6 +16,8 @@ export function prefetchAgentModels(hostNames?: string[]): void {
     prefetchCodexModels(hosts);
     prefetchKimiCapabilities(hosts);
     prefetchKiroModels(hosts);
+    prefetchGrokModels(hosts);
+    prefetchZcodeModels(hosts);
   } catch (err) {
     log.debug('agent model prefetch failed', err);
   }

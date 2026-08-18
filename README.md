@@ -4,7 +4,7 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-**An elegant, low‑latency web UI for driving Claude Code, Codex, Cursor, Kimi, and Kiro agents on any machine.**
+**An elegant, low‑latency web UI for driving Claude Code, Codex, Cursor, Kimi, Kiro, Grok, and ZCode agents on any machine.**
 
 Run it on the machine where your code lives, open the printed link from any browser
 (laptop, phone, tablet), and vibe‑code remotely with smooth streaming and a clean interface.
@@ -41,10 +41,10 @@ Run it on the machine where your code lives, open the printed link from any brow
 ## Why Vibe
 
 Vibe runs a small server on your machine that talks to Claude Code, Codex, Cursor,
-Kimi Code, or Kiro, normalizes each agent's stream into the same structured conversation
+Kimi Code, Kiro, Grok, or ZCode, normalizes each agent's stream into the same structured conversation
 model, and sends it to a React web client over a single WebSocket. Claude sessions
 use the official [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk);
-Codex runs through its long-lived App Server, while Cursor, Kimi, and Kiro use
+Codex runs through its long-lived App Server, Cursor, Kimi, Kiro, and Grok use their structured CLI / ACP channels, and ZCode runs through its ZCode Protocol app-server,
 their structured CLI/ACP transports.
 
 It was built to fix two things that make other remote coding-agent UIs feel clunky:
@@ -55,7 +55,7 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   only best‑effort delta frames (never structural ones) when a client falls behind.
 - **An interface that feels good.** A calm dark or light theme, real‑time
   token/thinking/tool streaming, thoughts that expand while the agent thinks and collapse when
-  done, tool cards with live status, inline permission prompts, a context‑usage meter, and
+  done, tool cards with live status, inline permission prompts, and
   an integrated terminal.
 
 ## Features
@@ -67,23 +67,29 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   output, and per-task stop where the engine exposes it; task completion automatically wakes
   the agent for a follow-up reply, while the composer remains available between foreground turns;
   stopping the current reply leaves background tasks and their completion notifications running
-- 🤖 **Multiple agents** — choose Claude, Codex, Cursor, Kimi, or Kiro per session, with agent-specific
+- 🤖 **Multiple agents** — choose Claude, Codex, Cursor, Kimi, Kiro, Grok, or ZCode per session, with agent-specific
   model, reasoning, and permission controls
 - 🔐 **Permission controls** — Claude supports inline Allow / Always allow / Deny prompts;
   Codex and Cursor use coarse modes; Kimi discovers Default / Plan / Auto / YOLO from its
-  installed CLI and drives approvals over ACP
+  installed CLI and drives approvals over ACP; Grok uses Ask / Plan / Auto / Always-approve over ACP;
+  ZCode uses Ask / Plan / Edit / Yolo (models come from `~/.zcode/cli/config.json`)
 - 🗂 **Sessions** — create in any directory, resume, rename, delete; history loaded from
   agent transcript stores and Vibe-managed transcripts where available
 - 🖥️ **Picks up your CLI sessions** — conversations you started in the terminal with
-  `claude`, `codex`, `cursor-agent`, `kimi`, or `kiro-cli` appear automatically when their local history is readable;
+  `claude`, `codex`, `cursor-agent`, `kimi`, `kiro-cli`, `grok`, or `zcode` appear automatically when their local history is readable;
   open them to read the full history and keep chatting
 - 🌐 **Remote hosts over SSH** — add machines you reach via SSH and run the selected agent
   on that machine; sessions you started on that host's own CLIs (Claude, Codex, Cursor, Kimi,
-  Kiro) are discovered automatically, and Vibe-created remote sessions can use any of them
+  Kiro, Grok) are discovered automatically (ZCode locally), and Vibe-created remote sessions can use any of them
   when the CLI is installed on the host
 - 💻 **Integrated terminal** — one click opens a real interactive shell on the session's host
   (a local login shell, or `ssh` into the remote), in the session's directory, in a resizable
   side panel
+- ⌨️ **CLI / TUI view** — in Settings, switch the conversation to a terminal transcript
+  that matches coding-agent CLIs: `❯` prompts, `⏺` assistant/tool lines, `⎿` results.
+  TUI keeps JetBrains Mono for English and uses
+  [Sarasa Term SC Nerd](https://github.com/laishulu/Sarasa-Term-SC-Nerd) for Chinese.
+  Preference is remembered.
 - 🎛 **Per‑session controls** — choose the agent when creating a session, then switch
   model, reasoning effort, and permission mode from the header
 - 📎 **File attachments** — attach, drag‑drop, or paste images into the composer; files
@@ -98,7 +104,7 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   session *or* any background one), and sessions with a finished‑but‑unseen reply get an
   unread marker in the sidebar; turns you abort yourself stay silent
 - 🌗 **Dark & light themes** with a one‑click toggle (remembers your choice)
-- 📈 **Context meter** and per‑turn cost/duration
+- 📈 **Per‑turn cost/duration**
 - 🔁 **Robust reconnection** with seq‑based replay (no lost or duplicated messages)
 - 📱 **Responsive** — works on desktop and mobile browsers
 - 🤖 **Telegram bot** — create/switch sessions, stream chat, and answer permissions from Telegram
@@ -112,6 +118,9 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   - Cursor CLI / agent (`cursor-agent`)
   - [Kimi Code CLI](https://moonshotai.github.io/kimi-code/) (`kimi`)
   - [Kiro CLI](https://kiro.dev/cli/) (`kiro-cli`)
+  - [Grok Build](https://x.ai/cli) (`grok`)
+  - ZCode (`zcode`) — the CLI extracted from the Z.ai desktop release; needs Node ≥ 22.5 and
+    `~/.zcode/cli/config.json` with a provider + model configured
 
 Vibe auto-detects these binaries on `PATH` and common install locations. It uses each
 CLI's existing authentication and config; for Claude that includes MCP servers,
@@ -132,6 +141,26 @@ The server prints ready‑to‑open links with an access token:
 ```
 
 Open one of them and start a session.
+
+## Multi-account (per-account hosts)
+
+Vibe supports multiple accounts, each managing its own SSH hosts:
+
+- **admin** is the built-in account — its token is the server token printed above. It
+  manages accounts via the sidebar menu → **Accounts** (create with name + password,
+  reset token, set password, delete; deleting an account also deletes its hosts), uses
+  the local machine, and maintains the shared MCP registry + Vibot/Telegram.
+- Other accounts sign in on the login page with **name + password** (or their own access
+  token). Accounts are peers: each one — admin included — only sees and manages the
+  hosts it added itself (hosts from before the multi-account upgrade default to admin),
+  plus the sessions on those hosts. Host names are unique across accounts.
+- The local machine (where Vibe runs) is **admin-only**: other accounts cannot start
+  sessions there, browse its files, or see its locally discovered CLI sessions.
+- MCP server definitions, presets, and skills stay shared (admin maintains the MCP
+  registry); each account toggles per-host MCP enablement for its own hosts. Vibot is
+  admin-only.
+
+Account data (scrypt password hashes + per-account tokens) is stored at `~/.vibe/accounts.json` (0600).
 
 ### Development
 
@@ -164,12 +193,16 @@ All optional, via environment variables:
 | `VIBE_DEFAULT_CODEX_MODEL` | `auto` | Default Codex model for new sessions |
 | `VIBE_DEFAULT_KIMI_MODEL` | `auto` | Default Kimi model alias; `auto` preserves Kimi's own config |
 | `VIBE_DEFAULT_KIRO_MODEL` | `auto` | Default Kiro model; `auto` lets Kiro pick |
-| `VIBE_DEFAULT_AGENT` | `claude` | Default agent (`claude`/`cursor`/`codex`/`kimi`/`kiro`) |
+| `VIBE_DEFAULT_GROK_MODEL` | `auto` | Default Grok model; `auto` lets Grok pick |
+| `VIBE_DEFAULT_ZCODE_MODEL` | `auto` | Default ZCode model (`providerID/modelID`); `auto` lets ZCode pick |
+| `VIBE_DEFAULT_AGENT` | `claude` | Default agent (`claude`/`cursor`/`codex`/`kimi`/`kiro`/`grok`/`zcode`) |
 | `CLAUDE_CLI_PATH` | auto‑detected | Explicit path to the `claude` binary |
 | `CURSOR_CLI_PATH` | auto‑detected | Explicit path to the `cursor-agent` binary |
 | `CODEX_CLI_PATH` | auto‑detected | Explicit path to the `codex` binary |
 | `KIMI_CLI_PATH` | auto‑detected | Explicit path to the `kimi` binary (native installs under `~/.kimi-code/bin/kimi` are detected) |
 | `KIRO_CLI_PATH` | auto‑detected | Explicit path to the `kiro-cli` binary (installs under `~/.local/bin/kiro-cli` are detected) |
+| `GROK_CLI_PATH` | auto‑detected | Explicit path to the `grok` binary (installs under `~/.local/bin/grok` are detected) |
+| `ZCODE_CLI_PATH` | auto‑detected | Explicit path to the `zcode` binary (`/usr/local/bin/zcode` is detected) |
 | `VIBE_LOCAL_NAME` | machine hostname | Label shown for this (local) machine |
 | `VIBE_SSH_HOSTS` | – | Seed remote hosts, e.g. `prod=user@1.2.3.4,gpu=mygpu-alias` |
 | `VIBE_SSH` | `ssh` | SSH command to use (override for custom options) |
@@ -215,14 +248,14 @@ Active session per chat is remembered in `~/.vibe/telegram.json`.
 ## Remote hosts (SSH)
 
 Open **Hosts** in the sidebar to add a machine by an `~/.ssh/config` alias or `user@host`.
-Vibe can run Claude, Codex, Cursor, Kimi, or Kiro turns on that machine over SSH. Sessions that
+Vibe can run Claude, Codex, Cursor, Kimi, Kiro, Grok, or ZCode turns on that machine over SSH. Sessions that
 already exist on the host's own CLIs are discovered in the sidebar (tagged with the host name and
 the owning agent), and Vibe-created remote sessions continue with whichever agent you selected
 for that session.
 
 Remote discovery reads each agent's native store over SSH: `~/.claude/projects` (Claude),
 `~/.codex/sessions` (Codex), `$KIMI_CODE_HOME`'s session index (Kimi), `~/.kiro/sessions/cli`
-(Kiro) and `~/.cursor/chats` (Cursor). Two caveats mirror the local behavior: a Cursor chat is
+(Kiro), `~/.grok/sessions` (Grok) and `~/.cursor/chats` (Cursor). Two caveats mirror the local behavior: a Cursor chat is
 only recoverable when Vibe can name its working directory (Cursor records only a hash of it), and
 rendering a remote Cursor chat's own history needs `sqlite3` on that host.
 
@@ -231,9 +264,9 @@ Requirements:
 - **Key-based auth / ssh-agent** — Vibe connects non-interactively (`BatchMode`), so the host
   must authenticate without a password prompt.
 - The selected agent CLI installed and authenticated on the remote (`claude`, `codex`,
-  `cursor-agent`, `kimi`, or `kiro-cli`). The Hosts dialog probes each agent’s install + version and can update them.
+  `cursor-agent`, `kimi`, `kiro-cli`, or `grok`). The Hosts dialog probes each agent’s install + version and can update them.
 - Remote turns honor the session's supported **permission mode**. Interactive per-tool
-  Claude approval prompts are a local-only feature; Codex, Cursor, Kimi, and Kiro use headless/ACP modes.
+  Claude approval prompts are a local-only feature; Codex, Cursor, Kimi, Kiro, and Grok use headless/ACP modes.
 
 ## Terminal
 
@@ -273,17 +306,17 @@ Browser (React + Vite)
    │  WebSocket  /ws  (seq‑tagged events, rAF‑coalesced)  +  /terminal  (PTY stream)
    ▼
 Vibe server (Node + Express + ws)
-   │  local: Claude SDK → `claude`; Codex / Cursor / Kimi / Kiro structured CLI output
+   │  local: Claude SDK → `claude`; Codex / Cursor / Kimi / Kiro / Grok structured CLI output
    │  remote: ssh → selected agent CLI on the host        terminal: node-pty (local shell / ssh -tt)
    ▼
 Agent CLI  (runs in your chosen directory; history is read from native stores or Vibe transcripts)
 ```
 
 - **`shared/protocol.ts`** — the single source of truth for the wire protocol.
-- **`server/`** — token auth, agent runners (Claude SDK plus Codex/Cursor/Kimi/Kiro CLI runners,
+- **`server/`** — token auth, agent runners (Claude SDK plus Codex/Cursor/Kimi/Kiro/Grok CLI runners,
   local or remote over `ssh`, all normalized into the same block stream), a per‑session
   event hub (seq log, replay, backpressure), a session metadata store, transcript readers
-  for history, discovery of existing Claude/Codex/Cursor/Kimi/Kiro sessions where available, the
+  for history, discovery of existing Claude/Codex/Cursor/Kimi/Kiro/Grok sessions where available, the
   MCP server registry (per‑scope enable lists + OAuth token management), saved session presets,
   chat‑attachment upload, an optional Telegram bot, and the terminal PTY channel. Deleting a
   discovered session only dismisses it from Vibe — the underlying agent transcript is never touched.

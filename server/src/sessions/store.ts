@@ -23,6 +23,10 @@ export interface StoredSession {
   archived?: boolean;
   /** Remote host name (from the host registry); undefined = local machine. */
   host?: string;
+  /** Account that created/adopted this session. Local sessions are private to
+   *  their owner; remote sessions follow the host's owner. Missing on legacy
+   *  data ⇒ 'admin'. */
+  owner?: string;
   /** True when cwd is an auto-created throwaway folder (kept out of "common dirs"). */
   ephemeral?: boolean;
 }
@@ -56,8 +60,7 @@ class SessionStore {
       for (const s of sessions) this.sessions.set(s.id, s);
       for (const h of hidden) this.hiddenIds.add(h);
       for (const p of pinned) this.pinnedIds.add(p);
-      log.debug(`loaded ${this.sessions.size} sessions, ${this.hiddenIds.size} hidden, ${this.pinnedIds.size} pinned`);
-    } catch {
+      log.debug(`loaded ${this.sessions.size} sessions, ${this.hiddenIds.size} hidden, ${this.pinnedIds.size} pinned`);    } catch {
       // first run — nothing persisted yet
     }
   }
@@ -92,7 +95,7 @@ class SessionStore {
     return this.sessions.get(id);
   }
 
-  create(input: { cwd: string; model: string; permissionMode: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string; ephemeral?: boolean }): StoredSession {
+  create(input: { cwd: string; model: string; permissionMode: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string; ephemeral?: boolean; owner?: string }): StoredSession {
     const now = Date.now();
     const uuid = crypto.randomUUID();
     const session: StoredSession = {
@@ -108,6 +111,7 @@ class SessionStore {
       updatedAt: now,
       messageCount: 0,
       host: input.host,
+      owner: input.owner,
       ephemeral: input.ephemeral,
     };
     this.sessions.set(session.id, session);
@@ -130,6 +134,7 @@ class SessionStore {
     createdAt?: number;
     messageCount?: number;
     host?: string;
+    owner?: string;
   }): StoredSession {
     const existing = this.sessions.get(input.id);
     if (existing) return existing;
@@ -147,6 +152,7 @@ class SessionStore {
       updatedAt: now,
       messageCount: input.messageCount ?? 0,
       host: input.host,
+      owner: input.owner,
     };
     this.sessions.set(session.id, session);
     this.scheduleWrite();
@@ -221,7 +227,7 @@ class SessionStore {
 export function toMeta(
   s: StoredSession,
   running: boolean,
-  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' = 'vibe',
+  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode' = 'vibe',
   backgroundTasksRunning = false,
 ): SessionMeta {
   return {
@@ -240,6 +246,7 @@ export function toMeta(
     running,
     source,
     host: s.host ?? config.localName,
+    owner: s.owner,
     ephemeral: s.ephemeral,
     pinned: sessionStore.isPinned(s.id),
   };

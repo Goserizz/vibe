@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Search } from 'lucide-react';
+import { Check, Search } from '../lib/icons';
 import { cn } from '../lib/format';
 import { Glass } from './LiquidGlass';
 

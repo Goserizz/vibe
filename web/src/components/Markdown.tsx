@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy } from '../lib/icons';
 import 'katex/dist/katex.min.css';
 import { useStore } from '../store/store';
 import { looksLikeFilePath } from '../lib/paths';

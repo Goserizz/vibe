@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { X, FolderGit2, Folder, Loader2, Check, AlertCircle, ChevronDown, BookmarkPlus } from 'lucide-react';
+import { X, FolderGit2, Folder, Loader2, Check, AlertCircle, ChevronDown, BookmarkPlus } from '../lib/icons';
 import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
-import { basename, cn, AGENTS, agentLabel, effortLabel, effortLevelsForAgent, modelLabel, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
+import { basename, cn, AGENTS, agentLabel, defaultEffortForAgent, effortLabel, effortLevelsForAgent, modelLabel, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
 import { loadNewSessionPrefs, saveNewSessionPrefs } from '../lib/newSessionPrefs';
 
 export function NewSessionDialog({ onClose }: { onClose: () => void }) {
@@ -11,6 +11,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const sessions = useStore((s) => s.sessions);
   const hosts = useStore((s) => s.hosts);
   const localName = useStore((s) => s.localName);
+  const isAdmin = useStore((s) => s.isAdmin);
   const defaultModel = useStore((s) => s.defaultModel);
   const cursorModels = useStore((s) => s.cursorModels);
   const codexModels = useStore((s) => s.codexModels);
@@ -18,10 +19,14 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const kimiPermissionModes = useStore((s) => s.kimiPermissionModes);
   const kiroModels = useStore((s) => s.kiroModels);
   const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
+  const grokModels = useStore((s) => s.grokModels);
+  const zcodeModels = useStore((s) => s.zcodeModels);
   const loadCursorModels = useStore((s) => s.loadCursorModels);
   const loadCodexModels = useStore((s) => s.loadCodexModels);
   const loadKimiCapabilities = useStore((s) => s.loadKimiCapabilities);
   const loadKiroModels = useStore((s) => s.loadKiroModels);
+  const loadGrokModels = useStore((s) => s.loadGrokModels);
+  const loadZcodeModels = useStore((s) => s.loadZcodeModels);
   const createSession = useStore((s) => s.createSession);
   const presets = useStore((s) => s.presets);
   const upsertPreset = useStore((s) => s.upsertPreset);
@@ -59,16 +64,17 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const isRemote = host !== '';
   const codexModelOpt = useMemo(() => codexModels.find((m) => m.value === model) ?? null, [codexModels, model]);
   const effortLevels = useMemo(() => effortLevelsForAgent(agent, codexModelOpt), [agent, codexModelOpt]);
+  // The local machine is admin-only; other accounts pick among their own hosts.
   const machineOptions = useMemo(
     () => [
-      { value: '', label: localName, hint: 'Local machine' },
+      ...(isAdmin ? [{ value: '', label: localName, hint: 'Local machine' }] : []),
       ...hosts.map((h) => ({ value: h.name, label: h.name, hint: h.ssh })),
     ],
-    [hosts, localName],
+    [hosts, localName, isAdmin],
   );
   const modelOptions = useMemo(
-    () => modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels),
-    [agent, cursorModels, codexModels, kimiModels, kiroModels],
+    () => modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels),
+    [agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels],
   );
   const permissionOptions = useMemo(
     () => permissionModesForAgent(agent, kimiPermissionModes, kiroPermissionModes),
@@ -76,10 +82,15 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   );
 
   // Drop a remembered remote host if it no longer exists in the hosts list.
+  // Non-admin accounts have no local option — default to their first host.
   useEffect(() => {
-    if (!host) return;
-    if (!hosts.some((h) => h.name === host)) setHost('');
-  }, [host, hosts]);
+    if (isAdmin) {
+      if (host && !hosts.some((h) => h.name === host)) setHost('');
+      return;
+    }
+    if (host && hosts.some((h) => h.name === host)) return;
+    setHost(hosts[0]?.name ?? '');
+  }, [host, hosts, isAdmin]);
 
   // Switching engine resets model + permission to that engine's sensible defaults.
   const onAgent = (a: AgentKind) => {
@@ -87,8 +98,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     const custom = a !== 'claude';
     setModel(custom ? 'auto' : defaultModel);
     setPermissionMode(custom ? 'default' : 'bypassPermissions');
-    // Codex's model_reasoning_effort tops out at xhigh (its max); claude defaults to max.
-    setEffort(a === 'codex' ? 'xhigh' : 'max');
+    setEffort(defaultEffortForAgent(a));
   };
 
   const onHost = (next: string) => {
@@ -144,12 +154,17 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const activeHostRef = useRef(activeHost);
   activeHostRef.current = activeHost;
   useEffect(() => {
+    // Non-admin accounts with no host yet: nothing to probe (local is
+    // admin-only); their per-host lists load once a machine is picked.
+    if (!isAdmin && !host) return;
     const h = host || undefined;
     void loadCursorModels(h);
     void loadCodexModels(h);
     void loadKimiCapabilities(h);
     void loadKiroModels(h);
-  }, [host, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels]);
+    void loadGrokModels(h);
+    void loadZcodeModels(h);
+  }, [host, isAdmin, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels]);
   useEffect(() => {
     return () => {
       const h = activeHostRef.current || undefined;
@@ -157,8 +172,10 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
       void loadCodexModels(h);
       void loadKimiCapabilities(h);
       void loadKiroModels(h);
+      void loadGrokModels(h);
+      void loadZcodeModels(h);
     };
-  }, [loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels]);
+  }, [loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels]);
 
   // If the current model disappeared after a host switch (or a remembered
   // model is no longer valid), fall back to a safe default.
@@ -174,13 +191,16 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     setPermissionMode(permissionOptions[0]?.value ?? 'default');
   }, [permissionMode, permissionOptions]);
 
-  // Codex reasoning levels are per-model. If the selected model doesn't support
-  // the current effort, fall back to the model's advertised default.
+  // Drop an effort the current agent/model does not advertise (Codex is
+  // per-model; Grok has no max/ultra).
   useEffect(() => {
-    if (agent !== 'codex' || !effortLevels.length) return;
-    if (!effortLevels.some((e) => e.value === effort)) {
+    if (!effortLevels.length) return;
+    if (effortLevels.some((e) => e.value === effort)) return;
+    if (agent === 'codex') {
       setEffort((codexModelOpt?.defaultEffort as EffortLevel) || 'medium');
+      return;
     }
+    setEffort(defaultEffortForAgent(agent));
   }, [agent, effort, effortLevels, codexModelOpt]);
 
   // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
@@ -375,7 +395,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                       <option value="">Custom</option>
                       {presets.map((p) => (
                         <option key={p.name} value={p.name}>
-                          {`${p.name} — ${agentLabel(p.agent)} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels)} · ${effortLabel(p.effort)}`}
+                          {`${p.name} — ${agentLabel(p.agent)} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels)} · ${effortLabel(p.effort, p.agent)}`}
                         </option>
                       ))}
                     </select>
@@ -558,7 +578,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           </button>
           <button
             onClick={() => void submit()}
-            disabled={creating || (!autoCwd && !cwd.trim() && !query.trim())}
+            disabled={creating || (!isAdmin && !host) || (!autoCwd && !cwd.trim() && !query.trim())}
             className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
           >
             {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Folder className="h-4 w-4" />}

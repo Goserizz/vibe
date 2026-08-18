@@ -80,7 +80,7 @@ export interface SshResult {
 export function sshExec(
   target: string,
   remoteCmd: string,
-  opts: { timeoutMs?: number; input?: string } = {},
+  opts: { timeoutMs?: number; input?: string | Buffer } = {},
 ): Promise<SshResult> {
   const { bin, args } = sshArgv(target, remoteCmd);
   return new Promise((resolve) => {
@@ -118,7 +118,7 @@ export function shQuote(s: string): string {
 }
 
 /** Shell prefix that exports `proxy` as HTTP(S)_PROXY in both cases, so a remote
- *  agent (claude / cursor-agent / codex / kimi / kiro-cli — Node, Rust, …) routes its API traffic
+ *  agent (claude / cursor-agent / codex / kimi / kiro-cli / grok — Node, Rust, …) routes its API traffic
  *  through it regardless of which variable the library reads. Meant to prepend
  *  to a remote command string (it ends in a trailing space). '' when no proxy.
  *
@@ -132,9 +132,10 @@ export function proxyEnvPrefix(proxy?: string): string {
 }
 
 /** Lines a remote login+interactive shell emits over a non-pty SSH session —
- *  pure noise that would bury the real error (e.g. "Cannot use this model"). */
+ *  pure noise that would bury the real error (e.g. "Cannot use this model").
+ *  `logout` is bash's interactive login-shell farewell on exit. */
 export const REMOTE_STDERR_NOISE =
-  /cannot set terminal process group|no job control in this shell|Pseudo-terminal|tcgetattr|bind: |Permanently added|Warning: Permanently|Connection to .* closed/i;
+  /cannot set terminal process group|no job control in this shell|Pseudo-terminal|tcgetattr|bind: |Permanently added|Warning: Permanently|Connection to .* closed|^logout$|^exit$/i;
 
 /** Drop ssh/login-shell noise from remote stderr so the real error survives. */
 export function cleanRemoteStderr(s: string, maxLen = 1000): string {

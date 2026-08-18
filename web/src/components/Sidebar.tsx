@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
-import { Plus, MessageSquareText, Terminal, Trash2, Check, X, Pencil, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain } from 'lucide-react';
+import { Plus, MessageSquareText, Terminal, Trash2, Check, X, Pencil, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users } from '../lib/icons';
 import type { SearchResult, SessionMeta } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { Logo } from './Logo';
 import { ConnectionBadge } from './ConnectionBadge';
 import { HostsDialog } from './HostsDialog';
+import { AccountsDialog } from './AccountsDialog';
 import { SettingsDialog } from './SettingsDialog';
 import { Menu } from './Menu';
 import { agentLabel, basename, cn, modelLabel, relativeTime } from '../lib/format';
@@ -27,7 +28,11 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
   const setSearchQuery = useStore((s) => s.setSearchQuery);
   const [hostsOpen, setHostsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [accountsOpen, setAccountsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const account = useStore((s) => s.account);
+  const isAdmin = useStore((s) => s.isAdmin);
+  const cli = useStore((s) => s.viewMode) === 'cli';
   const searchRef = useRef<HTMLDivElement>(null);
   const searchToggleRef = useRef<HTMLButtonElement>(null);
 
@@ -44,6 +49,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
   // Servers / Settings / Sign out — everything that outgrew the top bar.
   const handleMenuSelect = (value: string) => {
     if (value === 'servers') setHostsOpen(true);
+    else if (value === 'accounts') setAccountsOpen(true);
     else if (value === 'settings') setSettingsOpen(true);
     else if (value === 'signout') signOut();
   };
@@ -92,10 +98,8 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
                 onClose={onClose}
               />
             ) : sessions.length === 0 ? (
-              <div className="px-3 py-10 text-center text-xs text-slate-600">
-                No sessions yet.
-                <br />
-                Start one to begin coding.
+              <div className={cn('px-3 py-10 text-xs text-slate-600', cli ? 'font-mono text-left' : 'text-center')}>
+                {cli ? '// no sessions yet' : <>No sessions yet.<br />Start one to begin coding.</>}
               </div>
             ) : (
               <ul className="space-y-0.5">
@@ -116,7 +120,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
               height, so the logo (top) gets the most blur, fading down toward
               the search box. A separate ink-900 background-image tint on top
               darkens it (and masks the accent-colored app background). */}
-          {Array.from({ length: 10 }, (_, i) => (
+          {!cli && Array.from({ length: 10 }, (_, i) => (
             <div
               key={i}
               aria-hidden
@@ -124,11 +128,19 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
               style={{ height: `${((i + 1) / 10) * headerH}px` }}
             />
           ))}
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 z-[1]"
-            style={{ height: headerH, backgroundImage: 'linear-gradient(to bottom, rgb(var(--ink-900) / 0.6), rgb(var(--ink-900) / 0.28))' }}
-          />
+          {!cli && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 top-0 z-[1]"
+              style={{ height: headerH, backgroundImage: 'linear-gradient(to bottom, rgb(var(--ink-900) / 0.6), rgb(var(--ink-900) / 0.28))' }}
+            />
+          )}
+          {cli && (
+            <div
+              className="pointer-events-none absolute inset-x-0 top-0 z-[1] border-b border-ink-700 bg-ink-950"
+              style={{ height: headerH }}
+            />
+          )}
 
           {/* Search — pinned just under the top bar; out of the scroll
               container so it does not rubber-band. No backdrop of its own:
@@ -145,7 +157,12 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
                     if (e.key === 'Escape') closeSearch();
                   }}
                   placeholder="Search conversations"
-                  className="w-full rounded-lg border border-white/10 bg-white/5 py-1.5 pl-8 pr-7 text-[13px] text-slate-200 placeholder:text-slate-600 outline-none backdrop-blur-[2px] transition focus:border-accent/40 focus:bg-white/10"
+                  className={cn(
+                    'w-full rounded-lg border py-1.5 pl-8 pr-7 text-[13px] text-slate-200 placeholder:text-slate-600 outline-none transition focus:border-accent/40',
+                    cli
+                      ? 'border-ink-600 bg-ink-950'
+                      : 'border-white/10 bg-white/5 backdrop-blur-[2px] focus:bg-white/10',
+                  )}
                 />
                 {searchQuery && (
                   <button
@@ -162,7 +179,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
           {/* Top bar (logo + actions) — pinned at the very top; the session
               list scrolls behind it. Does not bounce. Frost comes from the
               gradient layer behind. */}
-          <div className="absolute inset-x-0 top-0 z-20 flex items-center justify-between px-3 pb-2.5 pt-3.5">
+          <div className={cn('absolute inset-x-0 top-0 z-20 flex items-center justify-between px-3 pb-2.5 pt-3.5', cli && 'bg-ink-950')}>
             <div className="flex items-center gap-2.5">
               <Logo className="h-6 w-6 text-accent" />
               <span className="text-[15px] font-semibold tracking-tight text-slate-100">Vibe</span>
@@ -172,7 +189,12 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
               <button
                 onClick={onNewSession}
                 title="New session"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-accent/30 bg-accent/10 text-accent-soft backdrop-blur-[2px] transition hover:border-accent/50 hover:bg-accent/20"
+                className={cn(
+                  'flex h-8 w-8 items-center justify-center rounded-lg border transition',
+                  cli
+                    ? 'border-accent/50 bg-ink-800 text-accent-soft hover:bg-ink-700'
+                    : 'border-accent/30 bg-accent/10 text-accent-soft backdrop-blur-[2px] hover:border-accent/50 hover:bg-accent/20',
+                )}
               >
                 <Plus className="h-4 w-4" />
               </button>
@@ -182,32 +204,53 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
                 title="Search"
                 aria-pressed={searchOpen}
                 className={cn(
-                  'flex h-8 w-8 items-center justify-center rounded-lg border backdrop-blur-[2px] transition',
+                  'flex h-8 w-8 items-center justify-center rounded-lg border transition',
                   searchOpen
-                    ? 'border-accent/50 bg-accent/20 text-accent-soft'
-                    : 'border-ink-700 text-slate-400 hover:border-ink-600 hover:text-slate-200',
+                    ? cli
+                      ? 'border-accent/50 bg-ink-800 text-accent-soft'
+                      : 'border-accent/50 bg-accent/20 text-accent-soft backdrop-blur-[2px]'
+                    : cli
+                      ? 'border-ink-600 bg-ink-800 text-slate-400 hover:text-slate-200'
+                      : 'border-ink-700 text-slate-400 backdrop-blur-[2px] hover:border-ink-600 hover:text-slate-200',
                 )}
               >
                 <Search className="h-4 w-4" />
               </button>
-              <button
-                onClick={onOpenVibot}
-                title="Open Vibot — your Vibe assistant"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-400 backdrop-blur-[2px] transition hover:border-accent/50 hover:bg-accent/10 hover:text-accent-soft"
-              >
-                <Brain className="h-4 w-4" />
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={onOpenVibot}
+                  title="Open Vibot — your Vibe assistant"
+                  className={cn(
+                    'flex h-8 w-8 items-center justify-center rounded-lg border transition',
+                    cli
+                      ? 'border-ink-600 bg-ink-800 text-slate-400 hover:text-accent-soft'
+                      : 'border-ink-700 text-slate-400 backdrop-blur-[2px] hover:border-accent/50 hover:bg-accent/10 hover:text-accent-soft',
+                  )}
+                >
+                  <Brain className="h-4 w-4" />
+                </button>
+              )}
               <Menu
                 align="right"
                 triggerLabel="Menu"
                 items={[
                   { value: 'servers', label: 'Servers', icon: <Server className="h-4 w-4" /> },
+                  ...(isAdmin
+                    ? [{ value: 'accounts', label: 'Accounts', icon: <Users className="h-4 w-4" /> }]
+                    : []),
                   { value: 'settings', label: 'Settings', icon: <Settings className="h-4 w-4" /> },
-                  { value: 'signout', label: 'Sign out', icon: <LogOut className="h-4 w-4" /> },
+                  { value: 'signout', label: `Sign out${account ? ` — ${account}` : ''}`, icon: <LogOut className="h-4 w-4" /> },
                 ]}
                 onSelect={handleMenuSelect}
                 trigger={
-                  <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-ink-700 text-slate-400 backdrop-blur-[2px] transition hover:border-ink-600 hover:text-slate-200">
+                  <span
+                    className={cn(
+                      'flex h-8 w-8 items-center justify-center rounded-lg border transition',
+                      cli
+                        ? 'border-ink-600 bg-ink-800 text-slate-400 hover:text-slate-200'
+                        : 'border-ink-700 text-slate-400 backdrop-blur-[2px] hover:border-ink-600 hover:text-slate-200',
+                    )}
+                  >
                     <MenuIcon className="h-4 w-4" />
                   </span>
                 }
@@ -218,6 +261,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
         </Glass>
       </aside>
       {hostsOpen && <HostsDialog onClose={() => setHostsOpen(false)} />}
+      {accountsOpen && <AccountsDialog onClose={() => setAccountsOpen(false)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
     </>
   );
@@ -226,7 +270,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
 /** Small host label so every session shows which machine it lives on. */
 function HostChip({ host }: { host: string }) {
   return (
-    <span className="flex shrink-0 items-center gap-1 text-slate-500">
+    <span className="flex shrink-0 items-center gap-1 text-[11px] text-slate-500">
       <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
       <span className="max-w-[96px] truncate">{host}</span>
     </span>
@@ -339,11 +383,14 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
   const codexModels = useStore((s) => s.codexModels);
   const kimiModels = useStore((s) => s.kimiModels);
   const kiroModels = useStore((s) => s.kiroModels);
+  const grokModels = useStore((s) => s.grokModels);
+  const zcodeModels = useStore((s) => s.zcodeModels);
+  const cli = useStore((s) => s.viewMode) === 'cli';
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [title, setTitle] = useState(session.title);
   const agent = session.agent ?? 'claude';
-  const model = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels);
+  const model = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels);
   const tagText = `${agentLabel(agent)} · ${model}`;
 
   const commitRename = () => {
@@ -366,8 +413,29 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
           onClose();
         }}
       >
-        <div className="mt-0.5 shrink-0">
-          {session.running ? (
+        <div className="mt-0.5 flex w-4 shrink-0 flex-col items-center gap-1">
+          {cli ? (
+            <span
+              className={cn(
+                'select-none text-[14px] leading-none',
+                session.running && 'animate-pulse-dot text-accent',
+                !session.running && unread && 'text-accent',
+                !session.running && !unread && session.backgroundTasksRunning && 'text-amber-400',
+                !session.running && !unread && !session.backgroundTasksRunning && (active ? 'text-accent-soft' : 'text-slate-600'),
+              )}
+              title={
+                session.running
+                  ? undefined
+                  : unread
+                    ? 'New reply — click to view'
+                    : session.backgroundTasksRunning
+                      ? 'Reply viewed; background tasks still running'
+                      : undefined
+              }
+            >
+              ■
+            </span>
+          ) : session.running ? (
             <span className="block h-4 w-4">
               <span className="block h-2 w-2 translate-x-1 translate-y-1 animate-pulse-dot rounded-full bg-accent" />
             </span>
@@ -387,9 +455,26 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
           ) : (
             <MessageSquareText className={cn('h-4 w-4', active ? 'text-accent-soft' : 'text-slate-600')} />
           )}
+          {!editing && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                void togglePin(session.id);
+              }}
+              title={session.pinned ? 'Remove favorite' : 'Favorite'}
+              className={cn(
+                'rounded p-0 hover:bg-ink-700',
+                session.pinned
+                  ? 'text-accent'
+                  : 'text-slate-400 opacity-0 group-hover:opacity-100 hover:text-slate-200',
+              )}
+            >
+              <Star className="h-3.5 w-3.5" fill={session.pinned ? 'currentColor' : 'none'} />
+            </button>
+          )}
         </div>
 
-        <div className="min-w-0 flex-1 pr-6">
+        <div className="min-w-0 flex-1">
           {editing ? (
             <input
               autoFocus
@@ -407,27 +492,28 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
               className="w-full rounded border border-accent/40 bg-ink-900 px-1.5 py-0.5 text-[13px] text-slate-100 outline-none"
             />
           ) : (
-            <div className="flex items-center gap-1.5">
+            <div className="flex min-w-0 items-center gap-1.5">
               <span
                 className={cn(
-                  'truncate text-[13px]',
+                  'min-w-0 flex-1 truncate text-[13px]',
                   active ? 'text-slate-100' : unread ? 'font-medium text-slate-100' : 'text-slate-300',
                 )}
+                title={session.title}
               >
                 {session.title}
               </span>
-              <span
-                title={tagText}
-                className="max-w-[10.5rem] shrink-0 truncate rounded-md bg-ink-750 px-1.5 py-px text-[9px] font-medium tracking-wide text-slate-400 ring-1 ring-inset ring-accent/30"
-              >
-                {tagText}
-              </span>
+              <HostChip host={session.host} />
             </div>
           )}
-          <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-600">
-            <HostChip host={session.host} />
-            <span className="truncate">{basename(session.cwd)}</span>
-            <span>·</span>
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-slate-600">
+            <span
+              title={tagText}
+              className="min-w-0 max-w-[40%] shrink truncate rounded-md bg-ink-750 px-1.5 py-px text-[9px] font-medium tracking-wide text-slate-400 ring-1 ring-inset ring-accent/30"
+            >
+              {tagText}
+            </span>
+            <span className="min-w-0 truncate">{basename(session.cwd)}</span>
+            <span className="shrink-0">·</span>
             <span className="shrink-0">{relativeTime(session.updatedAt)}</span>
           </div>
         </div>
@@ -435,13 +521,11 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
         {!editing && (
           <div
             className={cn(
-              'absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md px-0.5 group-hover:bg-ink-750/90',
-              confirming && 'bg-ink-750/90',
+              'absolute right-1.5 top-1.5 items-center gap-0.5 rounded-md px-0.5 group-hover:bg-ink-750/90',
+              confirming ? 'flex bg-ink-750/90' : 'hidden group-hover:flex',
             )}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Rename / delete — collapsed (display:none) at rest so the pill
-                shrinks to just the star; revealed on hover or while confirming. */}
             <div className={cn('items-center gap-0.5', confirming ? 'flex' : 'hidden group-hover:flex')}>
               {confirming ? (
                 <>
@@ -463,20 +547,6 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
                 </>
               )}
             </div>
-            {/* Favorite — rightmost, so it docks to the far-right edge. Filled
-                accent + always visible when pinned; outline + hover-only otherwise. */}
-            <button
-              onClick={() => void togglePin(session.id)}
-              title={session.pinned ? 'Remove favorite' : 'Favorite'}
-              className={cn(
-                'rounded p-1 hover:bg-ink-700',
-                session.pinned
-                  ? 'pointer-events-auto text-accent opacity-100'
-                  : 'pointer-events-none text-slate-400 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 hover:text-slate-200',
-              )}
-            >
-              <Star className="h-3.5 w-3.5" fill={session.pinned ? 'currentColor' : 'none'} />
-            </button>
           </div>
         )}
       </div>
