@@ -206,7 +206,10 @@ class SessionRuntime {
   private wakeNoticePending = false;
   /** Headless CLI sessions persist normalized transcripts; this accumulates the turn. */
   private transcript?: CursorTranscriptBuilder;
-  private turnStartBlocks = 0;
+  /** Blocks already appended to the Vibe JSONL — appends are id-once, matching
+   *  the readers (no dedup) so a block is never written twice. */
+  private persistedBlockIds = new Set<string>();
+  private lastIncrementalPersist = 0;
 
   constructor(
     readonly sessionId: string,
@@ -266,6 +269,9 @@ class SessionRuntime {
       this.streamKinds.set(ev.block.id, ev.block.kind);
     }
     this.foldFinalized(ev);
+    // Crash window: keep the persisted transcript within a few seconds of the
+    // live stream while a turn runs.
+    this.persistTranscript();
     if (this.logBuf.length > LOG_CAP) this.logBuf.splice(0, this.logBuf.length - LOG_CAP);
     const frame: ServerEvent = { t: 'event', sessionId: this.sessionId, seq: this.seq, ev };
     const skippable = ev.k === 'delta';
@@ -379,6 +385,37 @@ class SessionRuntime {
     if (wasRunning !== this.hasActiveBackgroundTasks()) this.onMeta();
   }
 
+  /** A block is safe to append once nothing will mutate it again: streaming
+   *  text must have finished, tools must have reached a terminal status. */
+  private static blockIsPersistable(b: ChatBlock): boolean {
+    if (b.kind === 'assistant' || b.kind === 'thinking') return !b.streaming;
+    if (b.kind === 'tool') return b.status === 'done' || b.status === 'error';
+    return true;
+  }
+
+  /** Append not-yet-persisted blocks to the Vibe JSONL. Throttled to ~3s while
+   *  a run is live so a service restart mid-turn loses at most a few seconds of
+   *  streaming instead of the whole turn; finishTurn force-flushes the rest. */
+  private persistTranscript(force = false): void {
+    if (!this.transcript) return;
+    if (!force) {
+      if (!this.run) return;
+      if (Date.now() - this.lastIncrementalPersist < 3_000) return;
+    }
+    this.lastIncrementalPersist = Date.now();
+    const pending = this.transcript.blocks.filter(
+      (b) => !this.persistedBlockIds.has(b.id) && (force || SessionRuntime.blockIsPersistable(b)),
+    );
+    if (!pending.length) return;
+    for (const b of pending) this.persistedBlockIds.add(b.id);
+    if (this.agent === 'codex') appendCodexBlocks(this.sessionId, pending);
+    else if (this.agent === 'kimi') appendKimiBlocks(this.sessionId, pending);
+    else if (this.agent === 'kiro') appendKiroBlocks(this.sessionId, pending);
+    else if (this.agent === 'grok') appendGrokBlocks(this.sessionId, pending);
+    else if (this.agent === 'zcode') appendZcodeBlocks(this.sessionId, pending);
+    else appendCursorBlocks(this.sessionId, pending);
+  }
+
   /** `running` means a foreground model turn is producing a reply. The agent
    *  transport can remain alive with this false while background tasks run. */
   private setForegroundRunning(running: boolean): void {
@@ -438,7 +475,6 @@ class SessionRuntime {
 
     this.runBaseSeq = this.seq;
     this.baselineClaudeSessionId = this.claudeSessionId;
-    this.turnStartBlocks = this.transcript?.blocks.length ?? 0;
     this.runUserTurns = 1;
     this.lastActivity = Date.now();
 
@@ -595,16 +631,10 @@ class SessionRuntime {
     // Cancel any still-pending permission prompts.
     for (const [, p] of this.pending) p.resolve({ allow: false });
     this.pending.clear();
-    // Headless CLI sessions self-persist: append this turn's blocks to Vibe JSONL.
-    if (this.transcript) {
-      const blocks = this.transcript.blocks.slice(this.turnStartBlocks);
-      if (this.agent === 'codex') appendCodexBlocks(this.sessionId, blocks);
-      else if (this.agent === 'kimi') appendKimiBlocks(this.sessionId, blocks);
-      else if (this.agent === 'kiro') appendKiroBlocks(this.sessionId, blocks);
-      else if (this.agent === 'grok') appendGrokBlocks(this.sessionId, blocks);
-      else if (this.agent === 'zcode') appendZcodeBlocks(this.sessionId, blocks);
-      else appendCursorBlocks(this.sessionId, blocks);
-    }
+    // Headless CLI sessions self-persist: force-flush anything the throttled
+    // incremental persistence hasn't written yet (including blocks that never
+    // reached a "final" state, e.g. text still streaming when the run ended).
+    this.persistTranscript(true);
     if (this.agent === 'zcode') invalidateZcodeSessionsCache();
 
     const userTurns = Math.max(1, this.runUserTurns);
