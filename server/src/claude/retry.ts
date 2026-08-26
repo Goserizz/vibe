@@ -21,9 +21,11 @@ export function isTransientError(err: unknown): boolean {
  *  The remote CLI can emit the 529 text on stdout (a stream-json error result)
  *  with an empty stderr, so we must scan the stream itself, not just the exit.
  *  "Internal error" is Cursor's generic JSON-RPC 500 — observed in bursts that
- *  clear on manual resend, always before any content streamed. */
+ *  clear on manual resend, always before any content streamed. "app-server
+ *  closed" and SSH "kex_exchange_identification" resets are transport blips
+ *  (SSH MaxStartups throttling, network drops) that a backoff retry clears. */
 export function mentionsTransient(text: string): boolean {
-  return /529|overloaded|internal error|访问量过大|过载/i.test(text);
+  return /529|overloaded|internal error|app-server closed|kex_exchange_identification|访问量过大|过载/i.test(text);
 }
 
 /** Backoff (ms) for attempt N (0-based): base * 2^N + small jitter. */
