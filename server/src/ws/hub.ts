@@ -69,6 +69,7 @@ import type {
   PermissionRequest,
   ServerEvent,
   SessionMeta,
+  ToolBlock,
   ThinkingBlock,
 } from '../../../shared/protocol.js';
 
@@ -258,6 +259,7 @@ class SessionRuntime {
     if (ev.k === 'block' && ev.block.kind === 'result') this.wakeNoticePending = true;
     else if (ev.k === 'error') this.wakeNoticePending = true;
     else if (this.wakeNoticePending && this.run && isContentEvent(ev)) this.emitWakeNotice();
+    else if (ev.k === 'block' && ev.block.kind === 'tool') this.maybeSurfaceAskUserQuestion(ev.block);
     this.seq += 1;
     const entry: LoggedEvent = { seq: this.seq, ev };
     this.logBuf.push(entry);
@@ -436,6 +438,69 @@ class SessionRuntime {
     const desc = recent?.description?.trim();
     const text = desc ? `后台任务「${desc}」完成，唤醒 agent 继续` : '后台任务完成，唤醒 agent 继续';
     this.emit({ k: 'block', block: { id: `sys_${crypto.randomUUID()}`, kind: 'system', text, ts: Date.now() } });
+  }
+
+  /** AskUserQuestion tool calls already surfaced (bypass mode dedup). */
+  private askedToolIds = new Set<string>();
+
+  /** In bypassPermissions the zcode runtime skips its interaction layer, so an
+   *  AskUserQuestion call fails with "requires user answers" and the user sees
+   *  nothing. The tool block still streams to us with its questions — surface
+   *  the picker ourselves and inject the answer as a user message. */
+  private maybeSurfaceAskUserQuestion(block: ToolBlock): void {
+    if (
+      this.agent !== 'zcode' ||
+      this.permissionMode !== 'bypassPermissions' ||
+      block.name !== 'AskUserQuestion' ||
+      this.askedToolIds.has(block.toolUseId)
+    ) {
+      return;
+    }
+    const raw = (block.input as { questions?: unknown } | null)?.questions;
+    const questions = Array.isArray(raw) ? raw : [];
+    if (!questions.length) return;
+    this.askedToolIds.add(block.toolUseId);
+    const mapped = questions.map((q) => {
+      const item = (q ?? {}) as Record<string, unknown>;
+      const options = (Array.isArray(item.options) ? item.options : []).map((o) => {
+        const opt = (o ?? {}) as Record<string, unknown>;
+        const label = String(opt.label ?? opt.value ?? '');
+        return typeof opt.description === 'string' ? { label, description: opt.description } : { label };
+      });
+      return {
+        question: String(item.question ?? 'Question'),
+        options,
+        multiSelect: item.multiSelect === true,
+      };
+    });
+    const request: PermissionRequest = {
+      requestId: crypto.randomUUID(),
+      toolName: 'AskUserQuestion',
+      input: { questions: mapped, source: 'zcode' },
+      ts: Date.now(),
+    };
+    void this.requestPermission(request).then((decision) => {
+      const answers =
+        ((decision.updatedInput as { answers?: Record<string, string | string[]> } | undefined)?.answers) ?? {};
+      const lines = Object.entries(answers).map(
+        ([q, a]) => `- ${q} → ${Array.isArray(a) ? a.join('、') : a}`,
+      );
+      // No answers (declined, dismissed, or cancelled at turn end): the model
+      // has already fallen back to asking in plain text — stay quiet.
+      if (!lines.length) return;
+      const text = `[AskUserQuestion] 用户在弹窗中回答了你的提问：\n${lines.join('\n')}`;
+      const msgId = `ask_${block.toolUseId}`;
+      if (this.running) {
+        // The model is still mid-turn (it will have fallen back to asking in
+        // plain text); steer the answer through the live transport.
+        if (this.run?.sendMessage?.(text)) {
+          this.runUserTurns += 1;
+          this.emit({ k: 'block', block: { id: msgId, kind: 'user', text, ts: Date.now() } });
+        }
+      } else {
+        this.startTurn(text, msgId);
+      }
+    });
   }
 
   /**
