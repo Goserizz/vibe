@@ -63,6 +63,14 @@ function sshArgv(target: string, remoteCmd: string): { bin: string; args: string
   return { bin, args: [...base, ...COMMON_OPTS, ...muxOpts(target), target, remoteCmd] };
 }
 
+/** Argv for a long-running remote command whose output is streamed and read
+ *  incrementally by the caller (it spawns the process itself and watches
+ *  stdout/stderr as data arrives). Same options as sshExec, just not wrapped
+ *  in a collect-and-resolve promise. */
+export function sshStreamArgv(target: string, remoteCmd: string): { bin: string; args: string[] } {
+  return sshArgv(target, remoteCmd);
+}
+
 /** Argv for an interactive terminal: force a remote PTY (`-tt`). */
 export function sshTerminalArgv(target: string, remoteCmd: string): { bin: string; args: string[] } {
   const { bin, base } = sshBin();

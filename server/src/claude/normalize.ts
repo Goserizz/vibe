@@ -19,8 +19,10 @@ function num(v: unknown): number {
 
 /** Context tokens for a turn from API-reported usage, so the number matches
  *  what the model actually saw (local tokenizers only approximate it). Handles
- *  Anthropic-style input/cache/output splits, Codex's cached_input_tokens, and
- *  OpenAI-style prompt/completion pairs. Returns undefined when no usage. */
+ *  Anthropic-style input/cache/output splits (snake_case, and Cursor's
+ *  camelCase variant where inputTokens EXCLUDES cache reads), Codex's
+ *  cached_input_tokens, and OpenAI-style prompt/completion pairs. Returns
+ *  undefined when no usage. */
 export function usageContextTokens(usage: any): number | undefined {
   if (!usage || typeof usage !== 'object') return undefined;
   const split =
@@ -28,10 +30,14 @@ export function usageContextTokens(usage: any): number | undefined {
     + num(usage.cache_creation_input_tokens)
     + num(usage.cache_read_input_tokens)
     + num(usage.cached_input_tokens)
-    + num(usage.output_tokens);
+    + num(usage.output_tokens)
+    + num(usage.cacheReadTokens)
+    + num(usage.cacheWriteTokens)
+    + num(usage.outputTokens)
+    + num(usage.inputTokens);
   if (split > 0) return split;
   // OpenAI-compatible: prompt_tokens already includes cached tokens.
-  const flat = num(usage.prompt_tokens ?? usage.inputTokens) + num(usage.completion_tokens ?? usage.outputTokens);
+  const flat = num(usage.prompt_tokens) + num(usage.completion_tokens);
   return flat > 0 ? flat : undefined;
 }
 
@@ -91,6 +97,9 @@ export class StreamNormalizer {
    *  The result event's usage sums every request in the turn, which overcounts
    *  the context on multi-round agentic turns. */
   private lastRequestTokens?: number;
+  /** Model responses this turn — one full `assistant` message each (partials
+   *  arrive as stream_event). Gates the cumulative result.usage fallback. */
+  private assistantResponses = 0;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -231,6 +240,7 @@ export class StreamNormalizer {
     const ts = Date.now();
     const used = usageContextTokens(message.message?.usage);
     if (used) this.lastRequestTokens = used;
+    this.assistantResponses++;
     if (Array.isArray(content)) {
       const base = this.assistantOffset.get(msgId) ?? 0;
       content.forEach((part: any, i: number) => {
@@ -269,7 +279,11 @@ export class StreamNormalizer {
         durationMs: typeof message.duration_ms === 'number' ? message.duration_ms : undefined,
         isError: Boolean(message.is_error),
         subtype: typeof message.subtype === 'string' ? message.subtype : undefined,
-        contextUsed: this.lastRequestTokens ?? usageContextTokens(message.usage),
+        // Multi-request turns with no per-request usage (e.g. proxy backends
+        //  that zero assistant usage) have only the cumulative result.usage —
+        //  not a watermark — so omit rather than show an inflated number.
+        contextUsed: this.lastRequestTokens
+          ?? (this.assistantResponses > 1 ? undefined : usageContextTokens(message.usage)),
         contextWindow: modelContextWindow(message),
         ts: Date.now(),
       },

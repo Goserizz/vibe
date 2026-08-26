@@ -19,8 +19,19 @@ export type Role = 'user' | 'assistant';
 export type PermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 
 /** Reasoning/thinking effort applied to a turn. Claude tops out at `max`; Codex's
- *  newer models (gpt-5.6-*) also accept `ultra` (per their cached levels). */
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+ *  newer models (gpt-5.6-*) also accept `ultra` (per their cached levels). The
+ *  last three are ZCode thought levels — ladders are per-model (GLM-5.2 offers
+ *  `nothink`; GLM-5-Turbo is an on/off `enabled`/`disabled` switch). */
+export type EffortLevel =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra'
+  | 'nothink'
+  | 'enabled'
+  | 'disabled';
 
 /** Which CLI engine drives a session. */
 export type AgentKind = 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode';
@@ -29,7 +40,7 @@ export type AgentKind = 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok'
 // Normalized conversation blocks (what the client renders)
 // ---------------------------------------------------------------------------
 
-export type BlockKind = 'user' | 'assistant' | 'thinking' | 'tool' | 'result' | 'error';
+export type BlockKind = 'user' | 'assistant' | 'thinking' | 'tool' | 'result' | 'error' | 'system';
 export type ToolStatus = 'running' | 'done' | 'error';
 
 interface BaseBlock {
@@ -84,13 +95,21 @@ export interface ErrorBlock extends BaseBlock {
   text: string;
 }
 
+/** Engine-side notice, not model output — e.g. a background task completing
+ *  woke the agent and it continues without a user message. */
+export interface SystemBlock extends BaseBlock {
+  kind: 'system';
+  text: string;
+}
+
 export type ChatBlock =
   | UserBlock
   | AssistantBlock
   | ThinkingBlock
   | ToolBlock
   | ResultBlock
-  | ErrorBlock;
+  | ErrorBlock
+  | SystemBlock;
 
 /** Status of a single task in an agent's todo list. */
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -352,6 +371,43 @@ export interface AgentUpdateResult {
   error?: string;
   /** Truncated command output for debugging. */
   log?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Agent CLI sign-in (Cursor / Codex link-based login)
+// ---------------------------------------------------------------------------
+
+/** Agents whose CLIs support a link-based login Vibe can drive. */
+export type LoginAgent = 'cursor' | 'codex';
+
+export type AgentLoginPhase =
+  | 'starting' /** CLI spawned, waiting for it to print the link */
+  | 'link' /** link ready — waiting for the user to authorize in their browser */
+  | 'success'
+  | 'error'
+  | 'cancelled';
+
+/** Live state of one agent-CLI login flow. The user opens `url` in their own
+ *  browser (any device); `code` is the one-time code some flows (Codex device
+ *  auth) ask them to enter there. The CLI process stays alive until the flow
+ *  completes, so phase transitions come from its output and exit code. */
+export interface AgentLoginStatus {
+  agent: LoginAgent;
+  /** Remote host name, or '' for the machine Vibe runs on. */
+  host: string;
+  phase: AgentLoginPhase;
+  url?: string;
+  code?: string;
+  /** Tail of the CLI output — context for debugging a failure. */
+  output?: string;
+  error?: string;
+}
+
+/** Whether an agent CLI on a host is signed into an account. */
+export interface AgentLoginAccount {
+  loggedIn: boolean;
+  /** Account label when signed in (usually an email). */
+  account?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -62,8 +62,12 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const listRef = useRef<HTMLDivElement>(null);
 
   const isRemote = host !== '';
-  const codexModelOpt = useMemo(() => codexModels.find((m) => m.value === model) ?? null, [codexModels, model]);
-  const effortLevels = useMemo(() => effortLevelsForAgent(agent, codexModelOpt), [agent, codexModelOpt]);
+  const modelOptions = useMemo(
+    () => modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels),
+    [agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels],
+  );
+  const modelOpt = useMemo(() => modelOptions.find((m) => m.value === model) ?? null, [modelOptions, model]);
+  const effortLevels = useMemo(() => effortLevelsForAgent(agent, modelOpt), [agent, modelOpt]);
   // The local machine is admin-only; other accounts pick among their own hosts.
   const machineOptions = useMemo(
     () => [
@@ -71,10 +75,6 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
       ...hosts.map((h) => ({ value: h.name, label: h.name, hint: h.ssh })),
     ],
     [hosts, localName, isAdmin],
-  );
-  const modelOptions = useMemo(
-    () => modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels),
-    [agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels],
   );
   const permissionOptions = useMemo(
     () => permissionModesForAgent(agent, kimiPermissionModes, kiroPermissionModes),
@@ -191,17 +191,17 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     setPermissionMode(permissionOptions[0]?.value ?? 'default');
   }, [permissionMode, permissionOptions]);
 
-  // Drop an effort the current agent/model does not advertise (Codex is
-  // per-model; Grok has no max/ultra).
+  // Drop an effort the current agent/model does not advertise (Codex and ZCode
+  // are per-model; Grok has no max/ultra).
   useEffect(() => {
     if (!effortLevels.length) return;
     if (effortLevels.some((e) => e.value === effort)) return;
-    if (agent === 'codex') {
-      setEffort((codexModelOpt?.defaultEffort as EffortLevel) || 'medium');
+    if (agent === 'codex' || agent === 'zcode') {
+      setEffort((modelOpt?.defaultEffort as EffortLevel) || (agent === 'codex' ? 'medium' : defaultEffortForAgent(agent)));
       return;
     }
     setEffort(defaultEffortForAgent(agent));
-  }, [agent, effort, effortLevels, codexModelOpt]);
+  }, [agent, effort, effortLevels, modelOpt]);
 
   // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
   const suggestions = useMemo(() => {
@@ -315,6 +315,9 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   }, [activeIdx, open]);
 
   const submit = async () => {
+    // Guards mirror the Create button's disabled condition so Enter-driven
+    // form submission can't bypass them or double-fire while awaiting.
+    if (creating || (!isAdmin && !host)) return;
     const dir = cwd.trim() || query.trim();
     if (!autoCwd && !dir) return;
     setCreating(true);
@@ -336,11 +339,17 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
       style={{ background: 'transparent', backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
       onClick={onClose}
     >
-      <div className="new-session-panel w-full max-w-lg rounded-2xl">
+      <form
+        className="new-session-panel w-full max-w-lg rounded-2xl"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
         <div className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
         <div className="dialog-titlebar flex shrink-0 items-center justify-between border-b border-white/5 px-5 py-3.5">
           <h2 className="text-sm font-semibold text-slate-100">New session</h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
+          <button type="button" onClick={onClose} className="text-slate-500 hover:text-slate-300">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -520,6 +529,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
               {filtered.map((p) => (
                 <button
                   key={p.path}
+                  type="button"
                   onClick={() => pickProject(p.path)}
                   className={cn(
                     'flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-ink-800/45',
@@ -573,11 +583,11 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex shrink-0 justify-end gap-2 border-t border-white/5 px-5 py-3.5">
-          <button onClick={onClose} className="rounded-lg px-3.5 py-2 text-sm text-slate-400 transition hover:text-slate-200">
+          <button type="button" onClick={onClose} className="rounded-lg px-3.5 py-2 text-sm text-slate-400 transition hover:text-slate-200">
             Cancel
           </button>
           <button
-            onClick={() => void submit()}
+            type="submit"
             disabled={creating || (!isAdmin && !host) || (!autoCwd && !cwd.trim() && !query.trim())}
             className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -586,7 +596,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
-      </div>
+      </form>
     </div>
   );
 }

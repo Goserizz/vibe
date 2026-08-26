@@ -4,6 +4,7 @@ import type {
   ChatBlock,
   ErrorBlock,
   ResultBlock,
+  SystemBlock,
   ThinkingBlock,
   ToolBlock,
   UserBlock,
@@ -35,6 +36,8 @@ export const CliBlockView = memo(function CliBlockView({ block }: { block: ChatB
       return <CliResultView block={block} />;
     case 'error':
       return <CliErrorView block={block} />;
+    case 'system':
+      return <CliSystemView block={block} />;
     default:
       return null;
   }
@@ -348,6 +351,19 @@ function CliErrorView({ block }: { block: ErrorBlock }) {
     <div className="flex items-start gap-2 font-mono text-[13px] leading-relaxed text-rose-300">
       <span className="cli-gutter select-none">✘</span>
       <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">{block.text}</div>
+    </div>
+  );
+}
+
+/** Muted engine notice as a dashed divider — e.g. a background task woke the agent. */
+function CliSystemView({ block }: { block: SystemBlock }) {
+  return (
+    <div className="flex items-center gap-2.5 py-1">
+      <span className="min-w-6 flex-1 border-t border-dashed border-white/10" />
+      <span className="shrink-0 font-mono text-[11.5px] text-slate-500">
+        ↻ {block.text} · {beijingClock(block.ts)}
+      </span>
+      <span className="min-w-6 flex-1 border-t border-dashed border-white/10" />
     </div>
   );
 }

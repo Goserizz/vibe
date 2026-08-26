@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { CursorStreamNormalizer } from './normalize.js';
+import { CursorAcpClient } from './acp.js';
 import { sshConnectPrefix, shQuote, loginShellCommand, proxyEnvPrefix, cleanRemoteStderr, streamRemoteCommand } from '../remote/ssh.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
 import { applyCursorMcp } from '../mcp/apply.js';
@@ -22,7 +23,7 @@ export interface CursorRunOptions {
   remote?: { sshTarget: string; cwd: string; proxy?: string };
 }
 
-/** Build the cursor-agent invocation (shared by local spawn and remote ssh). */
+/** Build the legacy headless invocation (shared by local spawn and remote ssh). */
 function buildSpawn(opts: CursorRunOptions): { bin?: string; args: string[]; remote: boolean } {
   const cwd = opts.remote ? opts.remote.cwd : opts.cwd;
   // `--trust` is required in headless/print mode or the agent blocks on a
@@ -52,7 +53,8 @@ interface Outcome {
   error?: string;
 }
 
-/** Run one cursor-agent invocation, streaming its stdout JSONL into the normalizer. */
+/** Legacy fallback for cursor-agent builds that predate the `acp` subcommand:
+ *  one headless invocation, streaming its stdout JSONL into the normalizer. */
 function runOnce(opts: CursorRunOptions, normalizer: CursorStreamNormalizer, setChild: (c: ChildProcess) => void): Promise<Outcome> {
   return new Promise<Outcome>((resolve) => {
     const { bin, args, remote } = buildSpawn(opts);
@@ -106,21 +108,34 @@ function runOnce(opts: CursorRunOptions, normalizer: CursorStreamNormalizer, set
   });
 }
 
+function acpUnavailable(error: string): boolean {
+  return /(?:unknown|unrecognized|invalid)\s+(?:command|subcommand).*\bacp\b|unknown command ['"]?acp/i.test(error);
+}
+
 /**
- * Drive one Cursor CLI turn (local spawn or remote over SSH), normalizing its
- * stream-json into `LiveEvent`s. Cursor headless mode has no interactive
- * per-tool permission prompts, so `requestPermission` is never invoked.
+ * Drive one Cursor turn through ACP (`cursor-agent acp`) so interactive
+ * approvals are real — plan review (cursor/create_plan → ExitPlanMode) and
+ * ask-question surface in the Web/Telegram UI, and permissionMode `plan`
+ * can actually gate tools. Old CLIs without the `acp` subcommand fall back
+ * to headless print mode (no interactive prompts there).
  */
 export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHandle {
   const abortController = new AbortController();
   let child: ChildProcess | undefined;
+  let acpClient: CursorAcpClient | undefined;
   let aborted = false;
+  let usingFallback = false;
 
   // Only retry before any content streams — retrying mid-stream would duplicate
   // text already rendered.
   let producedAny = false;
+  let resume = opts.resume;
   const wrappedCb: RunCallbacks = {
     ...cb,
+    onClaudeSessionId: (id) => {
+      resume = id;
+      cb.onClaudeSessionId(id);
+    },
     onEvent: (ev) => {
       if (isContentEvent(ev)) producedAny = true;
       cb.onEvent(ev);
@@ -129,14 +144,29 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
 
   const done = (async () => {
     // Reconcile Vibe's MCP servers into ~/.cursor/mcp.json (local or remote)
-    // before the first attempt. Best-effort: a failure logs and continues so the
-    // turn still runs without those servers.
+    // before the first attempt. Both ACP and headless modes read that file.
+    // Best-effort: a failure logs and continues so the turn still runs without
+    // those servers.
     await applyCursorMcp(opts.mcpServers ?? [], opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined);
 
     for (let attempt = 0; ; attempt++) {
       // Fresh normalizer per attempt so state from a failed run can't leak in.
       const normalizer = new CursorStreamNormalizer(wrappedCb);
-      const outcome = await runOnce(opts, normalizer, (c) => (child = c));
+      acpClient = new CursorAcpClient({ ...opts, resume }, wrappedCb);
+      const acpOutcome = await acpClient.run();
+      let outcome: Outcome = {
+        transient: Boolean(acpOutcome.error && mentionsTransient(acpOutcome.error)),
+        error: acpOutcome.error,
+      };
+
+      // A pre-ACP cursor-agent still runs headless with the same mode mapping
+      // (plan → --mode plan, everything else → --force), minus the plan modal.
+      if (outcome.error && acpUnavailable(outcome.error)) {
+        log.debug('cursor acp unavailable; falling back to headless print mode');
+        usingFallback = true;
+        outcome = await runOnce({ ...opts, resume }, normalizer, (c) => (child = c));
+        usingFallback = false;
+      }
       if (aborted) {
         log.debug('cursor run aborted');
         return;
@@ -162,9 +192,15 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
 
   return {
     abort: () => {
-      aborted = true;
-      abortController.abort();
-      child?.kill('SIGTERM');
+      if (usingFallback) {
+        // Headless mode is one process per reply — terminating it is the only
+        // interrupt primitive there.
+        aborted = true;
+        abortController.abort();
+        child?.kill('SIGTERM');
+        return;
+      }
+      acpClient?.abort();
     },
     done,
   };

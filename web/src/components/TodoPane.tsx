@@ -226,7 +226,7 @@ export function TodoPane({ sessionId, layout = 'composer' }: { sessionId: string
         className={cn(
           'animate-fade-in overflow-hidden',
           cli
-            ? 'font-mono'
+            ? 'cli-todo-pane font-mono'
             : 'rounded-xl border border-white/5 bg-ink-900/80 backdrop-blur-sm',
           layout === 'composer' && cn('mx-auto mb-2', cli ? 'max-w-4xl' : 'max-w-3xl'),
         )}

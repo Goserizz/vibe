@@ -17,12 +17,14 @@ import {
   Image,
   ArrowLeftRight,
   Clock,
+  RefreshCw,
 } from '../lib/icons';
 import type {
   AssistantBlock,
   ChatBlock,
   ErrorBlock,
   ResultBlock,
+  SystemBlock,
   ThinkingBlock,
   ToolBlock,
   UserBlock,
@@ -45,6 +47,8 @@ export const BlockView = memo(function BlockView({ block }: { block: ChatBlock }
       return <ResultView block={block} />;
     case 'error':
       return <ErrorView block={block} />;
+    case 'system':
+      return <SystemView block={block} />;
     default:
       return null;
   }
@@ -573,6 +577,21 @@ function ErrorView({ block }: { block: ErrorBlock }) {
     <div className="flex items-start gap-2.5 rounded-xl border border-rose-500/20 bg-rose-500/5 px-3.5 py-3 text-[13px] text-rose-300 animate-fade-in">
       <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
       <div className="whitespace-pre-wrap">{block.text}</div>
+    </div>
+  );
+}
+
+/** Muted engine notice as a dashed divider — e.g. a background task woke the agent. */
+function SystemView({ block }: { block: SystemBlock }) {
+  return (
+    <div className="flex animate-fade-in items-center gap-3 px-3 py-1.5">
+      <span className="min-w-8 flex-1 border-t border-dashed border-white/10" />
+      <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-slate-500">
+        <RefreshCw className="h-3 w-3" />
+        {block.text}
+        <span>· {beijingClock(block.ts)}</span>
+      </span>
+      <span className="min-w-8 flex-1 border-t border-dashed border-white/10" />
     </div>
   );
 }

@@ -28,6 +28,7 @@ import {
   Cpu as LucideCpu,
   Download as LucideDownload,
   Eye as LucideEye,
+  ExternalLink as LucideExternalLink,
   FileCog as LucideFileCog,
   FilePen as LucideFilePen,
   FileText as LucideFileText,
@@ -229,6 +230,7 @@ export const Copy = wrap('Copy', LucideCopy);
 export const Cpu = wrap('Cpu', LucideCpu);
 export const Download = wrap('Download', LucideDownload);
 export const Eye = wrap('Eye', LucideEye);
+export const ExternalLink = wrap('ExternalLink', LucideExternalLink);
 export const FileCog = wrap('FileCog', LucideFileCog);
 export const FilePen = wrap('FilePen', LucideFilePen);
 export const FileText = wrap('FileText', LucideFileText);

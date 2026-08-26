@@ -50,8 +50,14 @@ export class CursorStreamNormalizer {
   private readonly prefix = crypto.randomUUID();
   /** Whether any assistant text was emitted this turn — gates the result-text fallback. */
   private producedAssistantText = false;
-  /** input+cache+output of the last model request (context watermark). */
-  private lastRequestTokens?: number;
+  /** Whether any tool_call arrived this turn — a tool call is always followed by
+   *  another model request, so it marks the turn as multi-request. Cursor's
+   *  result.usage sums every request in the turn (verified: 3-request probe
+   *  reported 3× a single request's numbers), and its stream carries no
+   *  per-request usage to recover the watermark from — assistant messages have
+   *  none. So on multi-request turns the number cannot be trusted and is
+   *  omitted rather than shown inflated. */
+  private sawToolCall = false;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -135,10 +141,6 @@ export class CursorStreamNormalizer {
     // Partial fragments carry a timestamp; the final full-text message does not.
     const partial = typeof message.timestamp_ms === 'number';
     if (!Array.isArray(content)) return;
-    // Prefer the last per-request usage as the context watermark; the result
-    // event's usage sums the turn's requests and overcounts multi-round turns.
-    const used = usageContextTokens(message.message?.usage);
-    if (used) this.lastRequestTokens = used;
     for (const part of content) {
       if (!part || typeof part !== 'object') continue;
       if (part.type === 'text') this.segment('assistant', String(part.text ?? ''), partial);
@@ -160,6 +162,7 @@ export class CursorStreamNormalizer {
 
   private handleToolCall(message: any): void {
     this.flushStream();
+    this.sawToolCall = true;
     const tc = message.tool_call;
     if (!tc || typeof tc !== 'object') return;
     const { name, payload } = pickTool(tc);
@@ -195,7 +198,7 @@ export class CursorStreamNormalizer {
         durationMs: typeof message.duration_ms === 'number' ? message.duration_ms : undefined,
         isError,
         subtype: typeof message.subtype === 'string' ? message.subtype : undefined,
-        contextUsed: this.lastRequestTokens ?? usageContextTokens(message.usage),
+        contextUsed: this.sawToolCall ? undefined : usageContextTokens(message.usage),
         ts: Date.now(),
       },
     });

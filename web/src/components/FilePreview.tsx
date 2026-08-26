@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { X, Copy, Check, Download, Loader2, CircleAlert, FileText } from '../lib/icons';
+import { X, Copy, Check, Download, Loader2, CircleAlert, FileText, Image } from '../lib/icons';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
+import { basename, isImagePath } from '../lib/format';
 
 type LoadState =
   | { status: 'loading' }
@@ -19,9 +20,11 @@ export function FilePreview() {
   const [copied, setCopied] = useState(false);
 
   // Re-fetch whenever the previewed path/host changes (including the first open).
+  // Images skip the text fetch entirely — they stream from /files/raw via <img>.
   useEffect(() => {
     if (!file) return;
     setState({ status: 'loading' });
+    if (isImagePath(file.path)) return;
     let cancelled = false;
     api
       .readFile({ host: file.host, path: file.path })
@@ -48,6 +51,7 @@ export function FilePreview() {
 
   if (!file) return null;
   const path = file.path;
+  const imageMode = isImagePath(path);
 
   const copy = async () => {
     if (state.status !== 'done') return;
@@ -72,31 +76,35 @@ export function FilePreview() {
       >
         <div className="dialog-titlebar flex shrink-0 items-center justify-between gap-2 border-b border-white/5 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2">
-            <FileText className="h-4 w-4 shrink-0 text-accent" />
+            {imageMode ? (
+              <Image className="h-4 w-4 shrink-0 text-accent" />
+            ) : (
+              <FileText className="h-4 w-4 shrink-0 text-accent" />
+            )}
             <span className="truncate font-mono text-[12.5px] text-slate-200" title={path}>
               {path}
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {state.status === 'done' && (
-              <>
-                <button
-                  type="button"
-                  onClick={copy}
-                  className="rounded-md p-1.5 text-slate-500 transition hover:bg-ink-800 hover:text-slate-200"
-                  title={copied ? 'Copied' : 'Copy contents'}
-                >
-                  {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
-                </button>
-                <a
-                  href={api.downloadFileUrl({ host: file.host, path })}
-                  download
-                  className="rounded-md p-1.5 text-slate-500 transition hover:bg-ink-800 hover:text-slate-200"
-                  title="Download"
-                >
-                  <Download className="h-4 w-4" />
-                </a>
-              </>
+            {state.status === 'done' && !imageMode && (
+              <button
+                type="button"
+                onClick={copy}
+                className="rounded-md p-1.5 text-slate-500 transition hover:bg-ink-800 hover:text-slate-200"
+                title={copied ? 'Copied' : 'Copy contents'}
+              >
+                {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+              </button>
+            )}
+            {(imageMode || state.status === 'done') && (
+              <a
+                href={api.downloadFileUrl({ host: file.host, path })}
+                download
+                className="rounded-md p-1.5 text-slate-500 transition hover:bg-ink-800 hover:text-slate-200"
+                title="Download"
+              >
+                <Download className="h-4 w-4" />
+              </a>
             )}
             <button
               type="button"
@@ -110,6 +118,18 @@ export function FilePreview() {
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto rounded-b-2xl bg-ink-950">
+          {imageMode && state.status !== 'error' && (
+            <div className="flex items-center justify-center p-4">
+              <img
+                key={path}
+                src={api.fileRawUrl({ host: file.host, path })}
+                alt={basename(path)}
+                onLoad={() => setState({ status: 'done', content: '' })}
+                onError={() => setState({ status: 'error', message: 'Failed to load image' })}
+                className="max-h-[calc(100dvh-10rem)] max-w-full rounded-md object-contain"
+              />
+            </div>
+          )}
           {state.status === 'loading' && (
             <div className="flex items-center justify-center gap-2 py-16 text-sm text-slate-500">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading…
@@ -121,7 +141,7 @@ export function FilePreview() {
               <div className="whitespace-pre-wrap">{state.message}</div>
             </div>
           )}
-          {state.status === 'done' && <CodeLines content={state.content} />}
+          {!imageMode && state.status === 'done' && <CodeLines content={state.content} />}
         </div>
       </div>
     </div>

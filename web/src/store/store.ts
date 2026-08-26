@@ -67,6 +67,12 @@ const MODEL_REPULL_MS = 2_500;
 // run_state for that session; cleared if a fresh turn starts instead.
 const abortedSessions = new Set<string>();
 
+// Sessions with a subscribe in flight (subscribe sent, `subscribed` frame not
+// yet back). Their run_state frames are replayed history — e.g. a turn that
+// finished while we were unsubscribed already chimed via session_meta — so
+// opening such a session must not ring again.
+const replayingSubs = new Set<string>();
+
 type Theme = 'dark' | 'light';
 
 const LIGHT_MQ = '(prefers-color-scheme: light)';
@@ -221,9 +227,16 @@ interface StoreState {
 export const useStore = create<StoreState>((set, get) => {
   // -- socket event handling -------------------------------------------------
 
+  /** Send subscribe and mark the session as replaying until `subscribed`
+   *  arrives, so replayed run_state frames don't trigger the done chime. */
+  function sendSubscribe(id: string, lastSeq: number): void {
+    replayingSubs.add(id);
+    socket?.send({ t: 'subscribe', sessionId: id, lastSeq });
+  }
+
   function resubscribe(id: string): void {
     const view = get().views[id];
-    socket?.send({ t: 'subscribe', sessionId: id, lastSeq: view?.lastSeq ?? 0 });
+    sendSubscribe(id, view?.lastSeq ?? 0);
   }
 
   function handleStatus(status: ConnStatus, opts: { reconnected: boolean }): void {
@@ -281,17 +294,22 @@ export const useStore = create<StoreState>((set, get) => {
               // A fresh turn started — any stale abort flag is now irrelevant.
               abortedSessions.delete(msg.sessionId);
             } else {
-              // Notify when a live turn ends (true → false). Skip the subscribe/
-              // replay path (which only sets running via `subscribed`) and skip
-              // turns the user aborted. `delete` returns true iff it was an abort.
+              // Notify when a live turn ends (true → false). Skip replayed
+              // frames while a subscribe is in flight (old news — session_meta
+              // already chimed) and skip turns the user aborted. `delete`
+              // returns true iff it was an abort.
               const wasRunning = liveRunning.get(msg.sessionId) ?? state.views[msg.sessionId]?.running;
-              if (wasRunning && !abortedSessions.delete(msg.sessionId)) playDoneSound = true;
+              if (wasRunning && !replayingSubs.has(msg.sessionId) && !abortedSessions.delete(msg.sessionId)) {
+                playDoneSound = true;
+              }
             }
             liveRunning.set(msg.sessionId, msg.ev.running);
           }
           push(msg.sessionId, msg.seq, msg.ev);
           break;
         case 'subscribed':
+          // Replay (if any) landed ahead of this frame — back to live events.
+          replayingSubs.delete(msg.sessionId);
           setRunning[msg.sessionId] = msg.running;
           pendingPatch[msg.sessionId] = msg.pendingPermissions;
           taskPatch[msg.sessionId] = msg.tasks;
@@ -372,7 +390,7 @@ export const useStore = create<StoreState>((set, get) => {
       const { blocks, seq } = await api.getMessages(id);
       const running = get().sessions.find((s) => s.id === id)?.running ?? false;
       set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
-      socket?.send({ t: 'subscribe', sessionId: id, lastSeq: seq });
+      sendSubscribe(id, seq);
     } catch {
       /* ignore */
     }
@@ -823,7 +841,7 @@ export const useStore = create<StoreState>((set, get) => {
           const { blocks, seq } = await api.getMessages(id);
           const running = get().sessions.find((s) => s.id === id)?.running ?? false;
           set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
-          socket?.send({ t: 'subscribe', sessionId: id, lastSeq: seq });
+          sendSubscribe(id, seq);
           return;
         } catch {
           set({ toast: 'Failed to load conversation' });

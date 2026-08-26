@@ -5,7 +5,7 @@ import type { AgentKind, EffortLevel, PermissionMode, SessionPreset } from '../.
 
 const AGENTS: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
 const PERMISSIONS: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
-const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'nothink', 'enabled', 'disabled'];
 
 /** Normalize + validate a preset. Returns undefined if the name or any field is invalid. */
 function normalize(def: SessionPreset): SessionPreset | undefined {

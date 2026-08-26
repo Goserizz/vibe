@@ -3,6 +3,7 @@ import { WebSocket } from 'ws';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { startRun, type RunHandle } from '../claude/runner.js';
+import { isContentEvent } from '../claude/retry.js';
 import { startCursorRun } from '../cursor/runner.js';
 import { resolveCursorSessionSync } from '../cursor/discovery.js';
 import {
@@ -198,6 +199,11 @@ class SessionRuntime {
   private baselineClaudeSessionId?: string;
   private run?: RunHandle;
   private runUserTurns = 0;
+  /** True between a finished turn's result block and the next content — engine
+   *  content arriving in that window is a background-task wake, not a reply to
+   *  the user, and gets a notice block first. Covers wakes that happen mid-
+   *  output too (no running-state edge in that case). */
+  private wakeNoticePending = false;
   /** Headless CLI sessions persist normalized transcripts; this accumulates the turn. */
   private transcript?: CursorTranscriptBuilder;
   private turnStartBlocks = 0;
@@ -243,6 +249,12 @@ class SessionRuntime {
   }
 
   private emit(ev: LiveEvent): void {
+    // Engine content with no user message since the last turn ended = a
+    // background-task wake — mark it before the content renders. Result/error
+    // blocks close a turn and re-arm the detector for the next one.
+    if (ev.k === 'block' && ev.block.kind === 'result') this.wakeNoticePending = true;
+    else if (ev.k === 'error') this.wakeNoticePending = true;
+    else if (this.wakeNoticePending && this.run && isContentEvent(ev)) this.emitWakeNotice();
     this.seq += 1;
     const entry: LoggedEvent = { seq: this.seq, ev };
     this.logBuf.push(entry);
@@ -377,6 +389,18 @@ class SessionRuntime {
     this.onMeta();
   }
 
+  /** A background-task completion started an engine turn — content is about to
+   *  appear without a user message, so mark the cause in the chat. */
+  private emitWakeNotice(): void {
+    this.wakeNoticePending = false;
+    const recent = [...this.tasks.values()]
+      .filter((t) => t.endedAt != null && Date.now() - t.endedAt < 120_000)
+      .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
+    const desc = recent?.description?.trim();
+    const text = desc ? `后台任务「${desc}」完成，唤醒 agent 继续` : '后台任务完成，唤醒 agent 继续';
+    this.emit({ k: 'block', block: { id: `sys_${crypto.randomUUID()}`, kind: 'system', text, ts: Date.now() } });
+  }
+
   /**
    * Decide which transcript to read and the seq to subscribe from, for a
    * freshly opening client. The hub reads the transcript (locally or over SSH).
@@ -392,6 +416,7 @@ class SessionRuntime {
 
   startTurn(text: string, clientMsgId: string): boolean {
     if (this.running) return false;
+    this.wakeNoticePending = false;
 
     // Claude SDK, Kimi ACP, and Codex App Server remain connected while native
     // tasks run. Steer a new user message through that connection instead of
@@ -532,6 +557,7 @@ class SessionRuntime {
           cwd,
           model,
           permissionMode,
+          effort,
           resume: this.claudeSessionId,
           // ZCode consumes MCP from ~/.zcode/cli/config.json, not per-session.
           remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,

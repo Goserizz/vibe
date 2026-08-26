@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
+import { acpDiffText } from '../util/acpDiff.js';
 import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, sshConnectPrefix } from '../remote/ssh.js';
 import { type ChatBlock, type McpServerDef, type PermissionDecision, type PermissionMode, type PermissionRequest } from '../../../shared/protocol.js';
 import type { RunCallbacks } from '../claude/types.js';
@@ -97,7 +98,7 @@ function toolResultFromUpdate(update: any): { content: string; isError: boolean 
     const parts: string[] = [];
     for (const item of raw) {
       if (item?.type === 'content') parts.push(textOfContent(item.content));
-      else if (item?.type === 'diff') parts.push(`diff ${item.path ?? ''}`);
+      else if (item?.type === 'diff') parts.push(acpDiffText(item));
       else if (typeof item === 'string') parts.push(item);
       else parts.push(JSON.stringify(item));
     }

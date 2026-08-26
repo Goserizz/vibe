@@ -8,6 +8,15 @@ export function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
+
+/** True for image extensions /files/raw serves with an image MIME, so the UI
+ *  can render them via <img> instead of the text /files/read endpoint. */
+export function isImagePath(p: string): boolean {
+  const ext = p.split('.').pop()?.toLowerCase() ?? '';
+  return IMAGE_EXTS.has(ext);
+}
+
 export function shortenPath(p: string, max = 3): string {
   const parts = p.split('/').filter(Boolean);
   if (parts.length <= max) return p;
@@ -68,10 +77,11 @@ export const MODELS: { value: string; label: string }[] = [
 export interface ModelOption {
   value: string;
   label: string;
-  /** Codex only: the `model_reasoning_effort` values this model advertises (from
-   *  its cache). Drives the effort picker per-model. */
+  /** Codex/ZCode only: the reasoning values this model advertises (Codex from
+   *  its cache, ZCode from the live thought-level catalog). Drives the effort
+   *  picker per-model. */
   efforts?: string[];
-  /** Codex only: the model's default reasoning level. */
+  /** Codex/ZCode only: the model's default reasoning level. */
   defaultEffort?: string;
 }
 
@@ -218,7 +228,7 @@ export const EFFORT_LEVELS: { value: EffortLevel; label: string; hint: string }[
   { value: 'medium', label: 'Medium', hint: 'Moderate thinking' },
   { value: 'high', label: 'High', hint: 'Deep reasoning' },
   { value: 'xhigh', label: 'X-High', hint: 'Deeper than high' },
-  { value: 'max', label: 'Max', hint: 'Maximum effort (Claude default)' },
+  { value: 'max', label: 'Max', hint: 'Maximum effort' },
   { value: 'ultra', label: 'Ultra', hint: 'Beyond max — gpt-5.6 models' },
 ];
 
@@ -267,10 +277,29 @@ export const GROK_EFFORT_LEVELS: { value: EffortLevel; label: string; hint: stri
   { value: 'xhigh', label: 'Extra High', hint: 'Highest effort and reasoning level' },
 ];
 
+/** ZCode-only thought levels (models whose ladders aren't subsets of the shared
+ *  ladder: GLM-5.2 offers `nothink`; GLM-5-Turbo is an on/off switch). */
+const ZCODE_EXTRA_LEVELS: Partial<Record<EffortLevel, { label: string; hint: string }>> = {
+  nothink: { label: 'No thinking', hint: 'Reasoning disabled for this model' },
+  enabled: { label: 'Thinking on', hint: 'Reasoning enabled' },
+  disabled: { label: 'Thinking off', hint: 'Reasoning disabled' },
+};
+
+function zcodeEffortDescriptor(value: string): { value: EffortLevel; label: string; hint: string } | undefined {
+  const shared = EFFORT_LEVELS.find((x) => x.value === value);
+  if (shared) return shared;
+  const extra = ZCODE_EXTRA_LEVELS[value as EffortLevel];
+  return extra ? { value: value as EffortLevel, ...extra } : undefined;
+}
+
 export function effortLabel(value: EffortLevel, agent?: AgentKind): string {
   if (agent) {
     const hit = effortLevelsForAgent(agent).find((e) => e.value === value);
     if (hit) return hit.label;
+    if (agent === 'zcode') {
+      const extra = ZCODE_EXTRA_LEVELS[value];
+      if (extra) return extra.label;
+    }
   }
   return EFFORT_LEVELS.find((e) => e.value === value)?.label ?? value;
 }
@@ -282,20 +311,28 @@ export function defaultEffortForAgent(agent: AgentKind): EffortLevel {
   return 'max';
 }
 
-/** Effort levels an agent exposes. For Codex these are per-model — each model's
- *  cached `supported_reasoning_levels` (5.6 models add `max`/`ultra`); pass the
- *  selected model so the picker matches what the CLI offers for it. Cursor and
- *  Kimi do not expose a separate effort switch here. Kiro uses the Claude ladder.
- *  Grok is low / medium / high / extra-high. ZCode's thought level is per-model
- *  (not wired) — no separate switch. */
+/** Effort levels an agent exposes. Codex and ZCode are per-model — pass the
+ *  selected model so the picker matches what the CLI offers for it (Codex from
+ *  its cached `supported_reasoning_levels`; ZCode from the catalog probe's
+ *  thought-level ladders, e.g. GLM-5.3 low|high|max, GLM-5.2 max|high|nothink).
+ *  Cursor and Kimi do not expose a separate effort switch here. Kiro uses the
+ *  Claude ladder. Grok is low / medium / high / extra-high. */
 export function effortLevelsForAgent(
   agent: AgentKind,
-  codexModel?: ModelOption | null,
+  model?: ModelOption | null,
 ): { value: EffortLevel; label: string; hint: string }[] {
-  if (agent === 'cursor' || agent === 'kimi' || agent === 'zcode') return [];
+  if (agent === 'cursor' || agent === 'kimi') return [];
   if (agent === 'grok') return GROK_EFFORT_LEVELS;
+  if (agent === 'zcode') {
+    const efforts = model?.efforts;
+    if (!efforts?.length) return [];
+    // Preserve the catalog's order; drop anything we can't label.
+    return efforts
+      .map((e) => zcodeEffortDescriptor(e))
+      .filter((x): x is { value: EffortLevel; label: string; hint: string } => Boolean(x));
+  }
   if (agent === 'codex') {
-    const efforts = codexModel?.efforts;
+    const efforts = model?.efforts;
     if (efforts?.length) {
       // Preserve the cache's order; drop anything we can't label.
       return efforts

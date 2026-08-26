@@ -188,6 +188,9 @@ export async function* turnPieceStream(
         } else if (b.kind === 'error') {
           endThinking();
           push({ kind: 'main', value: `\n\nError: ${b.text}` });
+        } else if (b.kind === 'system') {
+          endThinking();
+          push({ kind: 'main', value: `\n\n⚡ ${b.text}` });
         }
         break;
       }

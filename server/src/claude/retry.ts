@@ -17,13 +17,13 @@ export function isTransientError(err: unknown): boolean {
   return /529|overloaded|访问量过大|过载|temporarily|try again/i.test(text);
 }
 
-/**
- * True if a raw output chunk (stdout/stderr) mentions a transient failure.
- * The remote CLI can emit the 529 text on stdout (a stream-json error result)
- * with an empty stderr, so we must scan the stream itself, not just the exit.
- */
+/** True if a raw output chunk (stdout/stderr) mentions a transient failure.
+ *  The remote CLI can emit the 529 text on stdout (a stream-json error result)
+ *  with an empty stderr, so we must scan the stream itself, not just the exit.
+ *  "Internal error" is Cursor's generic JSON-RPC 500 — observed in bursts that
+ *  clear on manual resend, always before any content streamed. */
 export function mentionsTransient(text: string): boolean {
-  return /529|overloaded|访问量过大|过载/i.test(text);
+  return /529|overloaded|internal error|访问量过大|过载/i.test(text);
 }
 
 /** Backoff (ms) for attempt N (0-based): base * 2^N + small jitter. */

@@ -6,11 +6,12 @@ import { sessionStore } from '../sessions/store.js';
 import { searchConversations } from '../sessions/search.js';
 import { hub, CallbackConn } from '../ws/hub.js';
 import { hostRegistry } from '../remote/hosts.js';
+import { parseSessionId } from '../remote/sessionId.js';
 import { mcpRegistry } from '../mcp/registry.js';
 import { presetRegistry } from '../presets/registry.js';
 import { createLocalWorkdir, validateDir } from '../projects.js';
 import { memoryStore } from './memories.js';
-import { createDelegateWatcher } from './delegate.js';
+import { createDelegateWatcher, teardownDelegateSession } from './delegate.js';
 import type { LlmToolDef } from './llm.js';
 import type { AgentKind, ChatBlock, EffortLevel, PermissionMode } from '../../../shared/protocol.js';
 import crypto from 'node:crypto';
@@ -111,6 +112,24 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
           autoApprove: { type: 'string', enum: ['safe', 'all'], description: 'Only with manage:"auto". safe (default): approve each prompt, remember safe tools, approve commands/plans per-call. all: run with no prompts at all (bypass) and just report completion.', default: 'safe' },
         },
         required: ['prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'continue_session',
+      description:
+        'Resume an EXISTING coding conversation (from list_sessions / search_sessions) by sending a follow-up prompt to it. The session keeps its own agent, model, host, cwd and full history — do not restate setup, just the next step. First read_session it and open your prompt with a short recap of where it left off (goal, decisions, files touched, what remains) so the agent picks up seamlessly. Errors if the session id is unknown or a turn is currently running there. By default (manage:"auto") you WATCH the continued turn exactly like a created one: auto-approve its permission prompts / plan approvals and get woken with an outcome tally. Use create_session when no existing session fits the task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sessionId: { type: 'string', description: 'The existing session id from list_sessions / search_sessions ("host::uuid" for remote, bare uuid for local).' },
+          prompt: { type: 'string', description: 'The follow-up to send, carrying the context the agent needs to continue where it left off.' },
+          manage: { type: 'string', enum: ['auto', 'none'], description: 'auto (default): Vibot watches the continued turn and auto-approves its permission prompts / plans, reporting a tally back. none: just send it; the user approves things themselves.', default: 'auto' },
+          autoApprove: { type: 'string', enum: ['safe', 'all'], description: 'Only with manage:"auto". safe (default): approve each prompt, remember safe tools, approve commands/plans per-call. all: run with no prompts at all (bypass) and just report completion.', default: 'safe' },
+        },
+        required: ['sessionId', 'prompt'],
       },
     },
   },
@@ -307,6 +326,96 @@ function createCodingSession(input: {
   return { sessionId: session.id, title: session.title, agent, host: host ?? config.localName, started, managed };
 }
 
+/**
+ * Resume an existing coding session with a new user turn — the same path the
+ * web UI takes when the user messages an old session (`hub.send`). The session
+ * keeps its own cwd/host/agent/model and its CLI-side history (`resume`), so
+ * only the follow-up prompt is needed. Optionally watched like create_session.
+ */
+async function continueCodingSession(input: {
+  sessionId: string;
+  prompt: string;
+  manage?: 'auto' | 'none';
+  autoApprove?: 'safe' | 'all';
+  /** The Vibot conversation to report watcher status notes back to. */
+  vibotConvId?: string;
+}): Promise<{ sessionId: string; title: string; agent: AgentKind; host: string; started: boolean; managed: boolean }> {
+  const sessionId = input.sessionId.trim();
+  if (!sessionId) throw new ToolError('sessionId is required. Call list_sessions for valid ids.');
+  if (!input.prompt.trim()) throw new ToolError('prompt is required');
+
+  const { host } = parseSessionId(sessionId);
+  if (host && !hostRegistry.get(host)) {
+    throw new ToolError(`Unknown host "${host}". Call list_hosts for valid names.`);
+  }
+  if (hub.isRunning(sessionId)) {
+    throw new ToolError('That session is currently running — wait for it to finish or create a new session instead.');
+  }
+
+  // The session must resolve to a runnable runtime (store row, local CLI
+  // discovery, or the remote discovery cache). Remote ids may need one warm
+  // discovery pass before the hub can route them over SSH.
+  if (!hub.locate(sessionId)) {
+    if (host) {
+      try {
+        await raceOrFail(awaitFullSessionList(), 8_000);
+      } catch { /* fall through to the not-found error */ }
+    }
+    if (!hub.locate(sessionId)) {
+      throw new ToolError(`Session ${sessionId} not found. Call list_sessions for valid ids.`);
+    }
+    // A turn may have started while discovery was warming.
+    if (hub.isRunning(sessionId)) {
+      throw new ToolError('That session is currently running — wait for it to finish or create a new session instead.');
+    }
+  }
+
+  const stored = sessionStore.get(sessionId);
+  const listed = peekSessionListCache()?.find((s) => s.id === sessionId);
+  const title = stored?.title ?? listed?.title ?? 'Session';
+  const agent: AgentKind = stored?.agent ?? listed?.agent ?? 'claude';
+  const hostName = stored?.host ?? host ?? listed?.host ?? config.localName;
+
+  const manage: 'auto' | 'none' = input.manage === 'none' ? 'none' : 'auto';
+  const managed = manage === 'auto' && Boolean(input.vibotConvId);
+
+  // Mirror create_session's autoApprove: 'all' (with manage:'auto') runs the
+  // turn with no prompts at all; 'safe' keeps prompts so the watcher can see
+  // and tally each one. startTurn re-reads the store, so writing the mode here
+  // (pre-adopting discovered sessions if needed) makes it stick for this turn.
+  if (manage === 'auto' && input.autoApprove === 'all' && stored?.permissionMode !== 'bypassPermissions') {
+    if (stored) {
+      sessionStore.update(sessionId, { permissionMode: 'bypassPermissions' });
+    } else if (listed) {
+      sessionStore.adopt({
+        id: sessionId,
+        claudeSessionId: listed.claudeSessionId ?? parseSessionId(sessionId).claudeSessionId,
+        cwd: listed.cwd,
+        title: listed.title,
+        model: listed.model,
+        permissionMode: 'bypassPermissions',
+        effort: listed.effort,
+        agent: listed.agent,
+        host,
+      });
+    }
+  }
+
+  // Same conn strategy as create_session: the managed watcher subscribes for
+  // the whole turn; otherwise fire-and-forget, unsubscribed right after.
+  const conn = managed
+    ? createDelegateWatcher(sessionId, title, input.vibotConvId!)
+    : new CallbackConn(() => { /* fire-and-forget */ });
+  hub.send(conn, sessionId, crypto.randomUUID(), input.prompt);
+  if (!managed) hub.unsubscribe(conn, sessionId);
+  // hub.send reports start failures on the conn (ignored above); running going
+  // true synchronously inside send is the reliable signal the turn began.
+  const started = hub.isRunning(sessionId);
+  if (!started && managed) teardownDelegateSession(sessionId);
+
+  return { sessionId, title, agent, host: hostName, started, managed };
+}
+
 class ToolError extends Error {}
 
 /** A safe Vibe configuration summary (no secrets). */
@@ -429,6 +538,16 @@ export async function dispatchTool(name: string, args: Record<string, any>, ctx:
           model: args.model,
           title: args.title,
           run: args.run,
+          manage: args.manage,
+          autoApprove: args.autoApprove,
+          vibotConvId: ctx.convId,
+        });
+        return clip(JSON.stringify(result));
+      }
+      case 'continue_session': {
+        const result = await continueCodingSession({
+          sessionId: String(args.sessionId ?? ''),
+          prompt: String(args.prompt ?? ''),
           manage: args.manage,
           autoApprove: args.autoApprove,
           vibotConvId: ctx.convId,

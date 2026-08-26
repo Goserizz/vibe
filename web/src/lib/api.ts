@@ -2,11 +2,14 @@ import type {
   AccountInfo,
   AgentKind,
   AgentLatestVersions,
+  AgentLoginAccount,
+  AgentLoginStatus,
   AgentUpdateResult,
   ChatBlock,
   EffortLevel,
   FileEntry,
   HostStatus,
+  LoginAgent,
   LoginRequest,
   LoginResponse,
   McpConfigSnapshot,
@@ -240,6 +243,29 @@ export const api = {
 
   latestAgentVersions: () =>
     request<{ versions: AgentLatestVersions }>('/agents/latest').then((r) => r.versions),
+
+  // -- Agent CLI sign-in (Cursor / Codex link-based login) ---------------------
+
+  agentLoginAccount: (agent: LoginAgent, host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<AgentLoginAccount>(`/agents/${agent}/account${q}`);
+  },
+
+  agentLoginStatus: (agent: LoginAgent, host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ login: AgentLoginStatus | null }>(`/agents/${agent}/login${q}`).then((r) => r.login);
+  },
+
+  startAgentLogin: (agent: LoginAgent, host?: string) =>
+    request<{ login: AgentLoginStatus }>(`/agents/${agent}/login`, {
+      method: 'POST',
+      body: JSON.stringify({ host: host ?? '' }),
+    }).then((r) => r.login),
+
+  cancelAgentLogin: (agent: LoginAgent, host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ ok: boolean }>(`/agents/${agent}/login${q}`, { method: 'DELETE' });
+  },
 
   updateHostAgent: (name: string, agent: AgentKind) =>
     request<AgentUpdateResult>(`/hosts/${encodeURIComponent(name)}/agents/${agent}/update`, {

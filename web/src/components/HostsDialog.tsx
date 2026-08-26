@@ -21,6 +21,7 @@ import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
 import { cn } from '../lib/format';
 import { McpEnableList } from './McpControls';
+import { AgentLoginControls, LOGIN_AGENTS } from './AgentSignIn';
 
 const AGENT_LABELS: Record<AgentKind, string> = {
   claude: 'Claude',
@@ -235,14 +236,16 @@ export function HostsDialog({ onClose }: { onClose: () => void }) {
                   machines over SSH (an <code className="text-slate-400">~/.ssh/config</code> alias or{' '}
                   <code className="text-slate-400">user@host</code>). Key-based auth / ssh-agent is required. Set a{' '}
                   <span className="text-slate-400">proxy</span> per host, and override it per agent (Claude / Cursor /
-                  Codex / Kimi) so each routes its API traffic independently. Check and update agent versions below.
+                  Codex / Kimi) so each routes its API traffic independently. Check and update agent versions, and sign
+                  Cursor / Codex into their accounts (Vibe fetches the login link for you), below.
                 </>
               ) : (
                 <>
                   Add the remote machines you manage over SSH (an <code className="text-slate-400">~/.ssh/config</code>{' '}
                   alias or <code className="text-slate-400">user@host</code>). Key-based auth / ssh-agent is required.
                   Set a <span className="text-slate-400">proxy</span> per host, and override it per agent so each routes
-                  its API traffic independently. Check and update agent versions below.
+                  its API traffic independently. Check and update agent versions, and sign Cursor / Codex into their
+                  accounts (Vibe fetches the login link for you), below.
                 </>
               )}
             </p>
@@ -527,6 +530,17 @@ function HostRow({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {expanded && online && (
+        <div className="mt-2 space-y-1.5 border-t border-white/5 pt-2">
+          <div className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Agent sign-in</div>
+          {LOGIN_AGENTS.map((a) =>
+            agents?.[a]?.installed === false ? null : (
+              <AgentLoginControls key={a} agent={a} host={local ? undefined : host.name} />
+            ),
+          )}
         </div>
       )}
 

@@ -49,6 +49,7 @@ import {
 } from '../zcode/models.js';
 import { deleteZcodeTranscript } from '../zcode/transcript.js';
 import { prefetchAgentModels } from '../agents/prefetchModels.js';
+import { agentLoginAccount, agentLoginManager } from '../agents/login.js';
 import { searchConversations } from '../sessions/search.js';
 import { hostRegistry, proxyForAgent, HostRegistryError } from '../remote/hosts.js';
 import { mcpRegistry } from '../mcp/registry.js';
@@ -76,6 +77,7 @@ import type {
   AgentKind,
   EffortLevel,
   FileEntry,
+  LoginAgent,
   PermissionMode,
   SkillDetail,
   SkillScope,
@@ -84,7 +86,7 @@ import type {
 } from '../../../shared/protocol.js';
 
 const permissionModes: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
-const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'nothink', 'enabled', 'disabled'] as const;
 
 /** Cache a remote session's resolution so the WS hub can build a runtime for it. */
 async function ensureRemoteCached(sessionId: string): Promise<void> {
@@ -1276,6 +1278,64 @@ export function createApiRouter(): Router {
   router.get('/agents/latest', async (_req, res) => {
     const versions = await getLatestAgentVersions();
     res.json({ versions });
+  });
+
+  // -- Agent CLI sign-in (Cursor / Codex link-based login) --------------------
+  // `?host=` (or body host) selects the machine whose CLI signs in: '' is this
+  // machine (admin-only), otherwise a configured remote host over SSH.
+
+  function loginAgentParam(res: express.Response, agent: string): LoginAgent | null {
+    if (agent === 'cursor' || agent === 'codex') return agent;
+    res.status(400).json({ error: 'agent must be cursor or codex' });
+    return null;
+  }
+
+  // Whether the CLI on a host is signed into an account (and as whom).
+  router.get('/agents/:agent/account', async (req, res) => {
+    const loginAgent = loginAgentParam(res, req.params.agent);
+    if (!loginAgent) return;
+    const host = typeof req.query.host === 'string' ? req.query.host : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    try {
+      const account = await agentLoginAccount(loginAgent, host);
+      res.json(account);
+    } catch (err) {
+      log.warn('agent account probe failed', err);
+      res.status(502).json({ error: err instanceof Error ? err.message : 'probe failed' });
+    }
+  });
+
+  // Begin a login: spawns the CLI's login command and returns immediately.
+  router.post('/agents/:agent/login', (req, res) => {
+    const loginAgent = loginAgentParam(res, req.params.agent);
+    if (!loginAgent) return;
+    const host = typeof req.body?.host === 'string' ? req.body.host : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    try {
+      const login = agentLoginManager.start(loginAgent, host);
+      res.json({ login });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'failed to start login' });
+    }
+  });
+
+  // Poll the running (or last finished) login flow.
+  router.get('/agents/:agent/login', (req, res) => {
+    const loginAgent = loginAgentParam(res, req.params.agent);
+    if (!loginAgent) return;
+    const host = typeof req.query.host === 'string' ? req.query.host : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    res.json({ login: agentLoginManager.status(loginAgent, host) });
+  });
+
+  // Abort a waiting login flow.
+  router.delete('/agents/:agent/login', (req, res) => {
+    const loginAgent = loginAgentParam(res, req.params.agent);
+    if (!loginAgent) return;
+    const host = typeof req.query.host === 'string' ? req.query.host : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    agentLoginManager.cancel(loginAgent, host);
+    res.json({ ok: true });
   });
 
   // Install or upgrade an agent CLI on a host (local machine or remote over SSH).

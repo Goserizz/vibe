@@ -1,9 +1,12 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, sshConnectPrefix } from '../remote/ssh.js';
 import {
+  type BackgroundTask,
+  type EffortLevel,
   type PermissionDecision,
   type PermissionMode,
   type PermissionRequest,
@@ -22,6 +25,10 @@ import { readZcodeConfigSync } from './models.js';
  *   session/subscribe {sessionId, deliveryKind:'desktop-continuous'}
  *   session/setMode   {sessionId, mode: build|edit|plan|yolo}
  *   session/setModel  {sessionId, model:{providerId,modelId}}           (object, not a string)
+ *   session/setThoughtLevel {sessionId, thoughtLevel}                   → .settings.thoughtLevel
+ *                                                                             (ladders are per-model;
+ *                                                                             invalid → "Unsupported
+ *                                                                             reasoning effort: <v>")
  *   session/send      {sessionId, content:string, runtimeModel?}        → ack {accepted}; the turn itself
  *                                                                             streams as session/event notifications
  *   session/stop      {sessionId}
@@ -55,6 +62,9 @@ export interface ZcodeRunOptions {
   cwd: string;
   model: string;
   permissionMode: PermissionMode;
+  /** Vibe effort → ZCode thought level (`session/setThoughtLevel`); mapped to
+   *  the selected model's own ladder, falling back to the nearest level. */
+  effort?: EffortLevel;
   /** Native ZCode session id (sess_<uuid>) to resume. */
   resume?: string;
   /** Accepted for interface parity; ZCode configures MCP via its config.json. */
@@ -74,6 +84,36 @@ function zcodeModeOf(mode: PermissionMode): string {
     default:
       return 'build';
   }
+}
+
+/** Rank thought levels so a Vibe effort can fall back to the nearest level a
+ *  model's ladder actually offers (low/medium/high/xhigh/max/ultra are Vibe's;
+ *  nothink/enabled/disabled appear in ZCode-only ladders). */
+const THOUGHT_RANKS: Record<string, number> = {
+  disabled: 0,
+  nothink: 0,
+  low: 1,
+  enabled: 2,
+  medium: 2,
+  high: 3,
+  xhigh: 4,
+  max: 5,
+  ultra: 6,
+};
+
+/** Highest ranked level ≤ the requested effort (or the ladder's lowest when
+ *  even that is out of reach). */
+function nearestThoughtLevel(effort: string, levels: string[]): string {
+  if (levels.includes(effort)) return effort;
+  const target = THOUGHT_RANKS[effort] ?? 5;
+  const ranked = levels
+    .map((l) => ({ l, r: THOUGHT_RANKS[l] ?? 0 }))
+    .sort((a, b) => a.r - b.r);
+  let best = ranked[0]!.l;
+  for (const { l, r } of ranked) {
+    if (r <= target) best = l;
+  }
+  return best;
 }
 
 /** Split a `providerID/modelID` model value (empty when unparseable). */
@@ -333,6 +373,14 @@ export class ZcodeAppServerClient {
   private tools = new Map<string, ToolState>();
   private subscribed = false;
   private currentModel: { providerId: string; modelId: string } | null = null;
+  /** Background tasks observed via session/read; keyed by native task id. */
+  private tasks = new Map<string, BackgroundTask>();
+  /** User prompts queued while the transport services background tasks. */
+  private promptQueue: string[] = [];
+  private wakeIdle?: () => void;
+  /** Per-model thought-level ladders from session/create|resume
+   *  (`settings.model.available[].reasoning`), keyed `providerId/modelId`. */
+  private reasoning = new Map<string, string[]>();
   private turnUsage: ZcodeTurnUsage = {};
   private contextWindow?: number;
   /** input+output of the last single model request — the context watermark.
@@ -341,10 +389,91 @@ export class ZcodeAppServerClient {
   private lastRequestTokens?: number;
   private settleTurn!: (usage: ZcodeTurnUsage) => void;
   private failTurn!: (error: Error) => void;
-  private readonly turnDone = new Promise<ZcodeTurnUsage>((resolve, reject) => {
-    this.settleTurn = resolve;
-    this.failTurn = reject;
-  });
+  /** Resolves when the CURRENT turn ends; reset by every sendTurn — a shared
+   *  one-shot promise would make later turns' awaits return instantly (that
+   *  bug played the end-of-turn chime before the reply streamed). */
+  private turnDone: Promise<ZcodeTurnUsage> = this.freshTurn();
+  /** Result blocks emitted per completed turn — gates the runner's fallback. */
+  private turnResults = 0;
+  /** Wall clock of the last engine-driven (non-vibe) turn start — dedupes the
+   *  polling layer's wake prompt against the harness's native notification. */
+  private lastNativeTurnAt = 0;
+  /** A native turn has started but not completed — keeps the transport alive;
+   *  tearing down mid-notification kills the wake content. */
+  private nativeTurnActive = false;
+  private vibeDrivenTurn = false;
+  /** While a vibe-driven turn streams, the service loop is blocked awaiting it —
+   *  so task settles are polled here instead and surfaced as mid-turn notices
+   *  (the harness folds the notification into the running turn, which has no
+   *  turn boundary hub could detect). Consuming the settle also prevents a
+   *  redundant polled wake after the turn ends. */
+  private midTurnWatcher?: ReturnType<typeof setInterval>;
+  private midTurnWatcherBusy = false;
+
+  private freshTurn(): Promise<ZcodeTurnUsage> {
+    const pending = new Promise<ZcodeTurnUsage>((resolve, reject) => {
+      this.settleTurn = resolve;
+      this.failTurn = reject;
+    });
+    // A turn nobody awaits (e.g. it fails between awaits) must not crash the
+    // process with an unhandled rejection.
+    pending.catch(() => undefined);
+    return pending;
+  }
+
+  private startMidTurnWatcher(): void {
+    if (this.midTurnWatcher) return;
+    this.midTurnWatcher = setInterval(() => {
+      if (this.midTurnWatcherBusy) return;
+      this.midTurnWatcherBusy = true;
+      void this.refreshTasks()
+        .then((settled) => {
+          for (const task of settled) {
+            const desc = task.description?.trim();
+            this.cb.onEvent({
+              k: 'block',
+              block: {
+                id: `sys_bg_${task.id}_${Date.now()}`,
+                kind: 'system',
+                text: desc ? `后台任务「${desc}」完成` : '后台任务完成',
+                ts: Date.now(),
+              },
+            });
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          this.midTurnWatcherBusy = false;
+        });
+    }, 5_000);
+  }
+
+  private stopMidTurnWatcher(): void {
+    if (!this.midTurnWatcher) return;
+    clearInterval(this.midTurnWatcher);
+    this.midTurnWatcher = undefined;
+  }
+
+  /** One result footer per completed engine turn — user and wake turns alike,
+   *  so sessions with live background tasks keep their per-turn footers instead
+   *  of waiting for a run-level block that may never come. The runner's
+   *  end-of-run block only covers runs where no turn ever completed. */
+  private emitTurnResult(): void {
+    this.turnResults += 1;
+    this.cb.onEvent({
+      k: 'block',
+      block: {
+        id: `zcode_turn_result_${Date.now()}`,
+        kind: 'result',
+        durationMs: this.turnUsage.durationMs,
+        isError: false,
+        subtype: 'success',
+        contextUsed: this.turnUsage.contextUsed,
+        contextWindow: this.turnUsage.contextWindow,
+        ts: Date.now(),
+      },
+    });
+  }
 
   constructor(
     private readonly opts: ZcodeRunOptions,
@@ -357,7 +486,7 @@ export class ZcodeAppServerClient {
     this.rpc?.kill();
   }
 
-  async run(): Promise<{ error?: string; usage?: ZcodeTurnUsage }> {
+  async run(): Promise<{ error?: string; usage?: ZcodeTurnUsage; turnResults?: number }> {
     const spawnSpec = buildZcodeSpawn(this.opts);
     if (!spawnSpec.bin) return { error: 'zcode not found — install ZCode or set ZCODE_CLI_PATH' };
 
@@ -376,6 +505,9 @@ export class ZcodeAppServerClient {
       this.cb.onClaudeSessionId(this.sessionId!);
       await this.subscribe();
       await this.applySessionConfig();
+      this.cb.onTurnState?.(true);
+      this.vibeDrivenTurn = true;
+      this.startMidTurnWatcher();
       await this.sendTurn();
       // Race the transport exit: a crash or abort must not leave us awaiting
       // turn events that will never arrive.
@@ -385,7 +517,14 @@ export class ZcodeAppServerClient {
           throw new Error('zcode app-server exited mid-turn');
         }),
       ]);
-      return this.aborted ? {} : { usage };
+      // Background tasks are detached OS processes, but only THIS app-server
+      // process can manage/cancel them (a new process sees them as "lost") —
+      // so the transport stays alive until they settle (codex pattern).
+      this.cb.onTurnState?.(false);
+      this.vibeDrivenTurn = false;
+      this.stopMidTurnWatcher();
+      await this.serviceBackgroundActivity();
+      return this.aborted ? {} : { usage, turnResults: this.turnResults };
     } catch (error) {
       if (this.aborted) return {};
       const message = error instanceof Error ? error.message : String(error);
@@ -393,6 +532,7 @@ export class ZcodeAppServerClient {
       return { error: detail && !message.includes(detail) ? `${message}\n${detail}` : message };
     } finally {
       this.flushStream();
+      this.stopMidTurnWatcher();
       await this.rpc.close();
     }
   }
@@ -406,6 +546,7 @@ export class ZcodeAppServerClient {
         const id = asString(resumed?.session?.sessionId) || this.opts.resume;
         this.sessionId = id;
         this.rememberModel(resumed?.settings?.model?.current);
+        this.captureReasoning(resumed);
         this.contextWindow = pickContextWindow(resumed) ?? this.contextWindow;
         return;
       } catch (error) {
@@ -417,7 +558,23 @@ export class ZcodeAppServerClient {
     if (!id) throw new Error('session/create did not return sessionId');
     this.sessionId = id;
     this.rememberModel(created?.settings?.model?.current);
+    this.captureReasoning(created);
     this.contextWindow = pickContextWindow(created) ?? this.contextWindow;
+  }
+
+  private captureReasoning(response: any): void {
+    const available = Array.isArray(response?.settings?.model?.available) ? response.settings.model.available : [];
+    for (const entry of available) {
+      const ref = (entry as { ref?: { providerId?: unknown; modelId?: unknown } })?.ref;
+      const providerId = asString(ref?.providerId);
+      const modelId = asString(ref?.modelId);
+      const reasoning = (entry as { reasoning?: { enabled?: unknown; levels?: unknown } } | undefined)?.reasoning;
+      if (!providerId || !modelId || !reasoning || reasoning.enabled !== true) continue;
+      const levels = (Array.isArray(reasoning.levels) ? reasoning.levels : [])
+        .map((l) => asString((l as { value?: unknown })?.value))
+        .filter(Boolean);
+      if (levels.length) this.reasoning.set(`${providerId}/${modelId}`, levels);
+    }
   }
 
   private rememberModel(ref: unknown): void {
@@ -451,10 +608,22 @@ export class ZcodeAppServerClient {
         log.debug('zcode session/setModel failed', this.opts.model, error);
       }
     }
+    if (this.opts.effort) {
+      const model = parsed ?? this.currentModel;
+      const ladder = model ? this.reasoning.get(`${model.providerId}/${model.modelId}`) : undefined;
+      // Without the ladder, pass the effort through and let ZCode validate it.
+      const level = ladder ? nearestThoughtLevel(this.opts.effort, ladder) : this.opts.effort;
+      try {
+        await this.rpc!.request('session/setThoughtLevel', { sessionId: this.sessionId, thoughtLevel: level });
+      } catch (error) {
+        log.debug('zcode session/setThoughtLevel failed', level, error);
+      }
+    }
   }
 
-  private async sendTurn(): Promise<void> {
-    const params: Record<string, unknown> = { sessionId: this.sessionId, content: this.opts.prompt };
+  private async sendTurn(content: string = this.opts.prompt): Promise<void> {
+    this.turnDone = this.freshTurn();
+    const params: Record<string, unknown> = { sessionId: this.sessionId, content };
     try {
       await this.rpc!.request('session/send', params);
     } catch (error) {
@@ -488,6 +657,221 @@ export class ZcodeAppServerClient {
       // turnDone settled → the promise below already resolved; nothing to wait on.
       if (events.some((event: any) => event?.type === 'turn.completed' || event?.type === 'turn.failed')) return;
     }
+  }
+
+  /** Map `projection.backgroundJobs` rows to Vibe tasks (tolerant of drift). */
+  private mapZcodeJobs(rows: unknown, now: number): BackgroundTask[] {
+    if (!Array.isArray(rows)) return [];
+    const out: BackgroundTask[] = [];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const rec = row as Record<string, unknown>;
+      const id = typeof rec.taskId === 'string' ? rec.taskId : '';
+      if (!id) continue;
+      const kindRaw = String(rec.taskKind ?? '').toLowerCase();
+      const statusRaw = String(rec.status ?? '').toLowerCase();
+      const status: BackgroundTask['status'] =
+        statusRaw === 'completed' ? 'completed'
+        : statusRaw === 'failed' || statusRaw === 'error' ? 'failed'
+        : statusRaw === 'cancelled' || statusRaw === 'canceled' ? 'stopped'
+        : 'running';
+      const startedAt = Date.parse(String(rec.startedAt ?? '')) || now;
+      out.push({
+        id,
+        agent: 'zcode',
+        kind: kindRaw.includes('agent') || kindRaw.includes('subagent') ? 'subagent' : kindRaw.includes('bash') || kindRaw.includes('command') ? 'command' : 'other',
+        status,
+        description: String(rec.description ?? rec.command ?? '') || `Task ${id}`,
+        startedAt,
+        updatedAt: now,
+        command: typeof rec.command === 'string' ? rec.command : undefined,
+        processId: rec.pid != null ? String(rec.pid) : undefined,
+        outputFile: typeof rec.outputPath === 'string' ? rec.outputPath : undefined,
+        canStop: status === 'running' && rec.cancellable !== false,
+      });
+    }
+    return out;
+  }
+
+  /** Last ~4KB of a task's output file (local sessions only — remote output
+   *  paths live on the SSH host and are not readable here). */
+  private readOutputTail(file: string | undefined): string | undefined {
+    if (!file || this.opts.remote) return undefined;
+    try {
+      const stat = fs.statSync(file);
+      const start = Math.max(0, stat.size - 4_096);
+      const fd = fs.openSync(file, 'r');
+      try {
+        const buf = Buffer.alloc(stat.size - start);
+        fs.readSync(fd, buf, 0, buf.length, start);
+        return buf.toString('utf8').slice(-4_000);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Refresh from `session/read` → `projection.backgroundJobs` (probed on
+   * 0.16.3: taskId/taskKind/command/description/status/pid/outputPath/
+   * cancellable). Disappearance from the list is the terminal edge — a
+   * finished task is simply no longer managed. Returns newly settled tasks.
+   */
+  private async refreshTasks(): Promise<BackgroundTask[]> {
+    const now = Date.now();
+    let rows: unknown = [];
+    try {
+      const read = await this.rpc!.request('session/read', { sessionId: this.sessionId });
+      rows = (read as { projection?: { backgroundJobs?: unknown } })?.projection?.backgroundJobs ?? [];
+    } catch (error) {
+      log.debug('zcode session/read failed', error);
+      return [];
+    }
+    const current = this.mapZcodeJobs(rows, now);
+    const seen = new Set(current.map((task) => task.id));
+    const settled: BackgroundTask[] = [];
+    for (const task of current) {
+      const previous = this.tasks.get(task.id);
+      const output = this.readOutputTail(task.outputFile) ?? previous?.output;
+      const merged: BackgroundTask = { ...task, output, startedAt: previous?.startedAt ?? task.startedAt };
+      if (previous && previous.status === 'running' && merged.status !== 'running') {
+        // mapZcodeJobs never sets endedAt; mark the settle edge so hub's wake
+        // notice can name the task (it filters by recently ended tasks).
+        merged.endedAt = now;
+        settled.push(merged);
+      }
+      this.tasks.set(task.id, merged);
+      this.cb.onTask?.(merged);
+    }
+    for (const [id, previous] of this.tasks) {
+      if (!seen.has(id) && previous.status === 'running') {
+        const merged: BackgroundTask = {
+          ...previous,
+          status: 'completed',
+          updatedAt: now,
+          endedAt: now,
+          canStop: false,
+          output: this.readOutputTail(previous.outputFile) ?? previous.output,
+        };
+        this.tasks.set(id, merged);
+        this.cb.onTask?.(merged);
+        settled.push(merged);
+      }
+    }
+    return settled;
+  }
+
+  /**
+   * Queue a user prompt on the still-live transport (hub's sendMessage path —
+   * this is what lets the user keep chatting while background tasks run).
+   * Returns false when the transport is closing and the caller should start a
+   * fresh run instead.
+   */
+  queueMessage(text: string): boolean {
+    if (this.aborted || !text.trim() || !this.rpc || this.rpc.closed) return false;
+    this.promptQueue.push(text);
+    this.wakeIdle?.();
+    return true;
+  }
+
+  /** Sleep that a queued prompt can cut short. */
+  private waitForWork(timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (this.wakeIdle === finish) this.wakeIdle = undefined;
+        resolve();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      this.wakeIdle = finish;
+    });
+  }
+
+  /** Keep the transport alive while background tasks run; settled tasks are
+   *  reported back to the model as a follow-up turn (codex pattern). A queued
+   *  user prompt always runs before an automatic task notification. */
+  private async serviceBackgroundActivity(): Promise<void> {
+    // No cap by default — closing the transport orphans running tasks (a new
+    // app-server cannot adopt them), and an idle connection polling every
+    // 2.5s is cheap. Set VIBE_ZCODE_TASK_SERVICE_HOURS to bound it (hours;
+    // unset/0 = unlimited).
+    const capHours = Number(process.env.VIBE_ZCODE_TASK_SERVICE_HOURS || 0);
+    const deadline = capHours > 0 ? Date.now() + capHours * 60 * 60_000 : Infinity;
+    const runQueuedTurn = async (content: string): Promise<void> => {
+      this.cb.onTurnState?.(true);
+      this.vibeDrivenTurn = true;
+      this.startMidTurnWatcher();
+      try {
+        await this.sendTurn(content);
+        await Promise.race([
+          this.turnDone,
+          this.rpc!.exitPromise.then(() => {
+            throw new Error('zcode app-server exited mid-turn');
+          }),
+        ]);
+      } finally {
+        this.vibeDrivenTurn = false;
+        this.stopMidTurnWatcher();
+        this.cb.onTurnState?.(false);
+      }
+    };
+    for (;;) {
+      const settled = await this.refreshTasks();
+      if (settled.length) {
+        // The harness ALSO pushes a native task-notification that starts its own
+        // turn; give that immediate channel a short grace so one completion
+        // doesn't wake the model twice (two dividers, two replies).
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const nativeSeen = this.nativeTurnActive || Date.now() - this.lastNativeTurnAt < 10_000;
+        if (!nativeSeen) {
+          const details = settled
+            .map((task) => `- ${task.id}: ${task.status} — ${task.description}\n${(task.error || task.output || '(no output)').slice(0, 8_000)}`)
+            .join('\n\n');
+          // Pushed to the TAIL: a user prompt already waiting runs first.
+          this.promptQueue.push(
+            `<background-task-notification>\n${details}\n</background-task-notification>\n` +
+            'The background task state changed while you were idle. Inspect the result, continue any dependent work, and reply with the updated outcome.',
+          );
+        } else {
+          log.info('zcode native task notification is steering the wake; polled prompt skipped');
+        }
+      }
+      const prompt = this.promptQueue.shift();
+      if (prompt) {
+        try {
+          await runQueuedTurn(prompt);
+        } catch (error) {
+          log.warn('zcode background-task turn failed', error);
+        }
+        continue;
+      }
+      // An in-flight native notification turn must finish before the transport
+      // may close — tearing down mid-turn kills the wake content.
+      const active =
+        this.nativeTurnActive ||
+        [...this.tasks.values()].some((task) => task.status === 'running' || task.status === 'pending');
+      if (!active || this.aborted || Date.now() > deadline) {
+        log.info(`zcode transport closing (active=${active} aborted=${this.aborted})`);
+        if (active && !this.aborted) log.warn(`zcode background tasks still running after ${capHours}h — closing transport (tasks continue unmanaged)`);
+        return;
+      }
+      await this.waitForWork(2_500);
+    }
+  }
+
+  /** Stop one background task (only while this transport is alive). */
+  async stopTask(taskId: string): Promise<void> {
+    try {
+      await this.rpc!.request('session/cancelBackgroundTask', { sessionId: this.sessionId, taskId });
+    } catch (error) {
+      log.debug('zcode session/cancelBackgroundTask failed', taskId, error);
+    }
+    await this.refreshTasks();
   }
 
   private handleRequest(id: JsonRpcId, method: string, params: any): void {
@@ -644,7 +1028,16 @@ export class ZcodeAppServerClient {
       case 'tool.updated':
         this.handleToolUpdated(payload);
         return;
+      case 'turn.started':
+        // Turns the harness starts on its own (native task notifications) —
+        // remembered so the polling layer can skip its duplicate wake prompt.
+        if (!this.vibeDrivenTurn) {
+          this.lastNativeTurnAt = Date.now();
+          this.nativeTurnActive = true;
+        }
+        return;
       case 'turn.completed': {
+        this.nativeTurnActive = false;
         this.flushStream();
         const usage = asRecord(payload?.usage);
         this.turnUsage = {
@@ -653,10 +1046,12 @@ export class ZcodeAppServerClient {
             ?? (typeof usage?.totalTokens === 'number' ? usage.totalTokens : undefined),
           contextWindow: this.contextWindow,
         };
+        this.emitTurnResult();
         this.settleTurn(this.turnUsage);
         return;
       }
       case 'turn.failed': {
+        this.nativeTurnActive = false;
         this.flushStream();
         const error = payload?.error ?? payload?.message ?? payload;
         this.failTurn(new Error(typeof error === 'string' ? error : JSON.stringify(error).slice(0, 500)));

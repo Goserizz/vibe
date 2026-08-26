@@ -1093,3 +1093,11 @@ html.hc.cli-mode .app-titlebar {
   border-bottom-color: rgb(var(--hc-line)) !important;
 }
 
+/* The CLI TodoWrite pane is deliberately bare (terminal aesthetic) — the other
+   composer panes (Background tasks) keep a hairline that hc boosts. Give it an
+   edge only in high contrast so it doesn't float borderless next to them. */
+html.hc .cli-todo-pane {
+  border: 1px solid rgb(var(--hc-line));
+  border-radius: 0.75rem;
+}
+

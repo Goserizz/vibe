@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import { join } from 'node:path';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
@@ -9,6 +11,11 @@ import { createSwrCache } from '../util/swrCache.js';
 export interface ZcodeModelOption {
   value: string;
   label: string;
+  /** ZCode thought levels this model advertises (from the live catalog probe);
+   *  drives the effort picker per-model, like Codex's `efforts`. */
+  efforts?: string[];
+  /** The model's default thought level. */
+  defaultEffort?: string;
 }
 
 export interface ZcodePermissionOption {
@@ -129,23 +136,111 @@ async function fetchRemote(hostName: string): Promise<ZcodeModelOption[] | null>
   return models.length > 1 ? models : null;
 }
 
-export function invalidateZcodeModelsCache(hostName?: string): void {
-  cache.invalidate(hostName ?? '');
-}
-
 /** Models configured in the local ~/.zcode/cli/config.json. Never blocks. */
 export function listZcodeModels(): ZcodeModelOption[] {
-  return cache.serve('', fetchLocal);
+  return attachCatalog(cache.serve('', fetchLocal));
 }
 
 /** Models configured on a remote host's ZCode. Never blocks on SSH. */
-export function listRemoteZcodeModels(hostName: string): Promise<ZcodeModelOption[]> {
-  if (!hostRegistry.get(hostName)) return Promise.resolve(listZcodeModels());
-  return Promise.resolve(cache.serve(hostName, () => fetchRemote(hostName)));
+export function listRemoteZcodeModels(hostName: string): ZcodeModelOption[] {
+  if (!hostRegistry.get(hostName)) return listZcodeModels();
+  return attachCatalog(cache.serve(hostName, () => fetchRemote(hostName)));
 }
 
 /** Warm local (and optionally remote) caches in the background. */
 export function prefetchZcodeModels(hostNames: string[] = []): void {
   cache.refresh('', fetchLocal);
   for (const name of hostNames) cache.refresh(name, () => fetchRemote(name));
+  catalogCache.refresh('', fetchCatalog);
+}
+
+export function invalidateZcodeModelsCache(hostName?: string): void {
+  cache.invalidate(hostName ?? '');
+  // The catalog changes only with the zcode version; an install/update is
+  // exactly when it should be re-probed.
+  catalogCache.invalidate('');
+}
+
+// ---------------------------------------------------------------------------
+// Thought-level catalog
+// ---------------------------------------------------------------------------
+
+/** Per-model thought levels keyed by `providerID/modelID`. */
+type ZcodeCatalog = Record<string, { efforts: string[]; defaultEffort?: string }>;
+
+const catalogCache = createSwrCache<ZcodeCatalog>({
+  ttlMs: 10 * 60_000,
+  fallback: {},
+  isEmpty: (c) => Object.keys(c).length === 0,
+  onError: (key, err) => log.debug('zcode catalog probe failed', key || 'local', err),
+});
+
+/**
+ * Probe the live model catalog: one short-lived app-server, session/create in a
+ * throwaway workspace, read `settings.model.available[].reasoning` (probed on
+ * 0.16.3: every model carries `levels: [{value,label}]` + `defaultLevel`, e.g.
+ * GLM-5.3 low|high|max, GLM-5.2 max|high|nothink, GLM-5-Turbo enabled|disabled).
+ */
+async function fetchCatalog(): Promise<ZcodeCatalog | null> {
+  if (!config.zcodeExecutable) return null;
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'vibe-zcode-catalog-'));
+  let sessionId = '';
+  try {
+    const { withZcodeAppServer } = await import('./appServer.js');
+    return await withZcodeAppServer<ZcodeCatalog | null>({ cwd: dir, timeoutMs: 30_000 }, async (request) => {
+      const created = await request('session/create', {
+        workspace: { workspaceKey: dir, workspacePath: dir },
+      });
+      sessionId = typeof created?.session?.sessionId === 'string' ? created.session.sessionId : '';
+      const available: unknown[] = Array.isArray(created?.settings?.model?.available)
+        ? created.settings.model.available
+        : [];
+      const catalog: ZcodeCatalog = {};
+      for (const entry of available) {
+        const ref = (entry as { ref?: { providerId?: unknown; modelId?: unknown } })?.ref;
+        const providerId = typeof ref?.providerId === 'string' ? ref.providerId : '';
+        const modelId = typeof ref?.modelId === 'string' ? ref.modelId : '';
+        if (!providerId || !modelId) continue;
+        const reasoning = (entry as { reasoning?: { enabled?: unknown; levels?: unknown; defaultLevel?: unknown } })
+          ?.reasoning;
+        if (!reasoning || reasoning.enabled !== true) continue;
+        const levels: string[] = (Array.isArray(reasoning.levels) ? reasoning.levels : [])
+          .map((l) => (typeof (l as { value?: unknown })?.value === 'string' ? (l as { value: string }).value : ''))
+          .filter(Boolean);
+        if (!levels.length) continue;
+        catalog[`${providerId}/${modelId}`] = {
+          efforts: levels,
+          defaultEffort: typeof reasoning.defaultLevel === 'string' ? reasoning.defaultLevel : undefined,
+        };
+      }
+      return Object.keys(catalog).length ? catalog : null;
+    });
+  } catch (error) {
+    log.debug('zcode catalog probe error', error);
+    return null;
+  } finally {
+    // The probe session lands in ZCode's SQLite session list otherwise.
+    if (sessionId) {
+      void import('./appServer.js').then(({ withZcodeAppServer }) =>
+        withZcodeAppServer({ timeoutMs: 10_000 }, (request) =>
+          request('session/close', { sessionId }).catch(() => undefined),
+        ).catch(() => undefined),
+      );
+    }
+    fs.rm(dir, { recursive: true, force: true }, () => undefined);
+  }
+}
+
+/**
+ * Attach thought levels to a config-derived model list. Remote hosts share the
+ * local catalog: the push-install fleet keeps zcode versions in lockstep, and
+ * the ladder is part of the CLI's built-in catalog, not the host config.
+ */
+function attachCatalog(models: ZcodeModelOption[]): ZcodeModelOption[] {
+  const catalog = catalogCache.serve('', fetchCatalog);
+  if (!Object.keys(catalog).length) return models;
+  return models.map((m) => {
+    const hit = catalog[m.value];
+    return hit ? { ...m, efforts: hit.efforts, defaultEffort: hit.defaultEffort } : m;
+  });
 }

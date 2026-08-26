@@ -77,6 +77,15 @@ const EFFORTS_GROK: { value: EffortLevel; label: string }[] = [
   { value: 'xhigh', label: 'Extra High' },
 ];
 
+/** Telegram's model-agnostic ZCode ladder (union of the per-model ladders the
+ *  catalog probe returns; the server maps to the nearest level per model). */
+const EFFORTS_ZCODE: { value: EffortLevel; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'high', label: 'High' },
+  { value: 'max', label: 'Max' },
+  { value: 'nothink', label: 'No thinking' },
+];
+
 function defaultEffort(agent: AgentKind): EffortLevel {
   if (agent === 'codex') return 'xhigh';
   if (agent === 'grok') return 'high';
@@ -90,9 +99,10 @@ function clampEffort(agent: AgentKind, effort: EffortLevel | undefined): EffortL
 }
 
 function effortsFor(agent: AgentKind): { value: EffortLevel; label: string }[] {
-  if (agent === 'kimi' || agent === 'cursor' || agent === 'zcode') return [];
+  if (agent === 'kimi' || agent === 'cursor') return [];
   if (agent === 'codex') return EFFORTS_CODEX;
   if (agent === 'grok') return EFFORTS_GROK;
+  if (agent === 'zcode') return EFFORTS_ZCODE;
   return EFFORTS_CLAUDE;
 }
 

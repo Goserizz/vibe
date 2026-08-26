@@ -12,7 +12,7 @@ import { html } from '@codemirror/lang-html';
 import { ArrowUp, ChevronRight, Folder, FileText, Image as ImageIcon, Save, Loader2, AlertCircle, Upload, Download, RefreshCw } from '../lib/icons';
 import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
-import { cn, basename } from '../lib/format';
+import { cn, basename, isImagePath } from '../lib/format';
 import type { FileEntry } from '@shared/protocol';
 
 /** Pick a CodeMirror language extension from a filename (empty = plain text). */
@@ -26,12 +26,6 @@ function languageForPath(filePath: string) {
   if (['css', 'scss', 'less'].includes(ext)) return [css()];
   if (['html', 'htm', 'xml', 'svg'].includes(ext)) return [html()];
   return [];
-}
-
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
-function isImage(filePath: string): boolean {
-  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
-  return IMAGE_EXTS.has(ext);
 }
 
 function joinPath(dir: string, name: string): string {
@@ -310,7 +304,7 @@ export function FilesPane() {
       replaceDoc('');
       return;
     }
-    if (isImage(p)) {
+    if (isImagePath(p)) {
       // Images render via <img src=/files/raw>; there's no text content to load.
       setFileName(basename(p));
       setReadError(null);
@@ -358,7 +352,7 @@ export function FilesPane() {
     return acc;
   }, [cwd, dir]);
 
-  const imageMode = !!selected && isImage(selected);
+  const imageMode = !!selected && isImagePath(selected);
   const editorVisible = !!session && !!selected && !imageMode && !readLoading && !readError;
 
   return (
@@ -490,7 +484,7 @@ export function FilesPane() {
                   >
                     {e.dir ? (
                       <Folder className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                    ) : isImage(e.name) ? (
+                    ) : isImagePath(e.name) ? (
                       <ImageIcon className="h-3.5 w-3.5 shrink-0 text-slate-500" />
                     ) : (
                       <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />

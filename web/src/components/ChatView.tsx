@@ -303,7 +303,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
 
       <div className="flex flex-wrap items-center gap-1.5 pl-10 md:justify-end md:pl-0">
       <ModelControl align={align} />
-      {session.agent !== 'cursor' && session.agent !== 'kimi' && session.agent !== 'zcode' && <EffortControl align={align} />}
+      {session.agent !== 'cursor' && session.agent !== 'kimi' && <EffortControl align={align} />}
       <PermissionControl align={align} />
       <button type="button" onClick={onToggleTerminal} aria-label="Terminal" title="Terminal">
         <ControlChip title="Terminal" active={rightTab === 'terminal'}>
@@ -370,14 +370,19 @@ function EffortControl({ align }: { align: 'left' | 'right' }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
   const cli = useStore((s) => s.viewMode) === 'cli';
   const codexModels = useStore((s) => s.codexModels);
-  const codexModelOpt = codexModels.find((m) => m.value === session.model) ?? null;
+  const zcodeModels = useStore((s) => s.zcodeModels);
+  const models = session.agent === 'zcode' ? zcodeModels : codexModels;
+  const modelOpt = models.find((m) => m.value === session.model) ?? null;
+  const levels = effortLevelsForAgent(session.agent, modelOpt);
   const label = effortLabel(session.effort, session.agent);
+  // A ZCode model without a thought-level ladder (e.g. `auto`) has nothing to pick.
+  if (!levels.length) return null;
 
   return (
     <Menu
       align={align}
       triggerLabel={`Effort: ${label}`}
-      items={effortLevelsForAgent(session.agent, codexModelOpt).map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
+      items={levels.map((e) => ({ value: e.value, label: e.label, hint: e.hint, active: e.value === session.effort }))}
       onSelect={(value) => void patchSession(session.id, { effort: value as EffortLevel })}
       trigger={
         <ControlChip title={`Effort: ${label}`}>
