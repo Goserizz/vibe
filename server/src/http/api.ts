@@ -73,6 +73,7 @@ import { hub } from '../ws/hub.js';
 import { loadVibotConfig, updateVibotConfig, vibotConfigClient } from '../vibot/config.js';
 import { vibotHub } from '../vibot/hub.js';
 import { memoryStore } from '../vibot/memories.js';
+import { teardownDelegateSession } from '../vibot/delegate.js';
 import type {
   AgentKind,
   EffortLevel,
@@ -1638,6 +1639,8 @@ export function createApiRouter(): Router {
         model: z.string().optional(),
         systemPrompt: z.string().optional(),
         temperature: z.number().min(0).max(2).optional(),
+        // null clears back to the API default; invalid levels are rejected here.
+        reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high', 'max']).nullish(),
       })
       .safeParse(req.body);
     if (!parsed.success) {
@@ -1675,6 +1678,17 @@ export function createApiRouter(): Router {
   router.delete('/vibot/conversations/:id', (req, res) => {
     vibotHub.deleteConversation(req.params.id);
     res.json({ ok: true });
+  });
+
+  router.delete('/vibot/conversations/:id/sessions/:sessionId', (req, res) => {
+    const conv = vibotHub.unlinkSession(req.params.id, req.params.sessionId);
+    if (!conv) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    // Stop Vibot's auto-manage watcher for this link only — coding session stays.
+    teardownDelegateSession(req.params.sessionId);
+    res.json({ conv });
   });
 
   router.get('/vibot/conversations/:id/messages', async (req, res) => {

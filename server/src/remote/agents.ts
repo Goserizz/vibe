@@ -248,10 +248,18 @@ async function fetchGrokLatest(): Promise<string | undefined> {
   }
 }
 
+/** ZCode "latest" is always the local CLI; never freeze it inside the npm TTL. */
+function overlayLocalZcode(versions: AgentLatestVersions): AgentLatestVersions {
+  const zcode = localZcodeVersion();
+  if (zcode) versions.zcode = zcode;
+  else delete versions.zcode;
+  return versions;
+}
+
 /** Fetch (and cache ~15 min) the latest published version for each agent CLI. */
 export async function getLatestAgentVersions(force = false): Promise<AgentLatestVersions> {
   if (!force && latestCache && Date.now() - latestCache.at < LATEST_TTL_MS) {
-    return latestCache.versions;
+    return overlayLocalZcode(latestCache.versions);
   }
   const [claude, cursor, codex, kimi, kiro, grok] = await Promise.all([
     npmViewVersion('@anthropic-ai/claude-code'),
@@ -270,10 +278,8 @@ export async function getLatestAgentVersions(force = false): Promise<AgentLatest
   if (grok) versions.grok = grok;
   // ZCode publishes no registry — the local CLI the push installer ships IS
   // the latest, so hosts lagging it show an Update button.
-  const zcode = localZcodeVersion();
-  if (zcode) versions.zcode = zcode;
   latestCache = { at: Date.now(), versions };
-  return versions;
+  return overlayLocalZcode(versions);
 }
 
 // -- Update / install on a remote host ---------------------------------------
@@ -352,7 +358,7 @@ function updateCommand(agent: AgentKind): string {
       // so a private Node 24 lands under /opt when the host node is older).
       // Follows the documented extraction procedure; re-running is a no-op.
       return [
-        'ZCODE_RELEASE=3.7.7',
+        'ZCODE_RELEASE=3.9.2',
         'case "$(uname -s):$(uname -m)" in',
         '  Linux:x86_64) ;;',
         '  *) echo "ZCode install supports linux-x64 only (this host: $(uname -s) $(uname -m))" >&2; exit 1 ;;',
@@ -424,8 +430,13 @@ function updateResultFromExec(agent: AgentKind, res: SshResult): AgentUpdateResu
   if (res.timedOut) {
     return { ok: false, agent, error: 'update timed out', log: logTail };
   }
-  if (!done || (res.code !== 0 && !version)) {
-    const errLine = cleanRemoteStderr(res.stderr).split('\n').pop() || 'update failed';
+  // `claude update` often exits 0 after printing this; don't treat it as success.
+  const failedInstall = /Failed to install update/i.test(out);
+  if (!done || failedInstall || (res.code !== 0 && !version)) {
+    const errLine =
+      (failedInstall ? 'Failed to install update' : undefined) ||
+      cleanRemoteStderr(res.stderr).split('\n').pop() ||
+      'update failed';
     return { ok: false, agent, error: errLine, log: logTail, version };
   }
   return { ok: true, agent, version, log: logTail };

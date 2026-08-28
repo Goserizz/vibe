@@ -233,7 +233,7 @@ export function BackgroundTasksPane({ sessionId, layout = 'composer' }: { sessio
     <div className={cn(layout === 'composer' && 'px-4 md:px-6')}>
       <div
         className={cn(
-          'animate-fade-in overflow-hidden rounded-xl border border-white/5 bg-ink-900/80 backdrop-blur-sm',
+          'task-pane animate-fade-in overflow-hidden rounded-xl border border-white/5 bg-ink-900/80 backdrop-blur-sm',
           layout === 'composer' && 'mx-auto mb-2 max-w-3xl',
         )}
       >

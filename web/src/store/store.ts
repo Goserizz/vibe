@@ -244,11 +244,11 @@ export const useStore = create<StoreState>((set, get) => {
     if (status === 'open') {
       const { activeId } = get();
       if (activeId) resubscribe(activeId);
-      if (opts.reconnected) {
-        void get().refreshSessions();
-        // The Vibot interface shares this socket; let it resubscribe too.
-        void useVibotStore.getState().onReconnect();
-      }
+      if (opts.reconnected) void get().refreshSessions();
+      // Every open (first connect + reconnect): Vibot must resubscribe. A
+      // subscribe sent while the socket was still connecting was previously
+      // dropped on the floor — wake notes then never arrived until refresh.
+      void useVibotStore.getState().onReconnect();
     }
   }
 

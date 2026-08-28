@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  ClientMessage,
   ServerEvent,
   VibotConfigClient,
   VibotConvMeta,
@@ -13,6 +14,66 @@ import { emptyView, reduceView, viewFromBlocks, type SessionView } from './block
 import { getSocket } from './store';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+
+type VibotClientMessage = Extract<ClientMessage, { t: `vibot_${string}` }>;
+
+/** Outbound vibot frames waiting for the shared socket to become OPEN. */
+let pendingVibot: VibotClientMessage[] = [];
+
+function sendRaw(msg: VibotClientMessage): boolean {
+  return getSocket()?.send(msg) ?? false;
+}
+
+/** Drop older vibot_subscribe frames for the same convId (keep newest only). */
+function coalesceSubscribes(queue: VibotClientMessage[]): VibotClientMessage[] {
+  const latestSub = new Map<string, number>();
+  for (let i = 0; i < queue.length; i++) {
+    const m = queue[i];
+    if (m.t === 'vibot_subscribe') latestSub.set(m.convId, i);
+  }
+  return queue.filter((m, i) => m.t !== 'vibot_subscribe' || latestSub.get(m.convId) === i);
+}
+
+function enqueueVibot(msg: VibotClientMessage): void {
+  pendingVibot.push(msg);
+  pendingVibot = coalesceSubscribes(pendingVibot);
+}
+
+/** Refresh subscribe lastSeq from the live view so a queued frame stays current. */
+function materialize(msg: VibotClientMessage): VibotClientMessage {
+  if (msg.t !== 'vibot_subscribe') return msg;
+  const lastSeq = useVibotStore.getState().views[msg.convId]?.lastSeq ?? msg.lastSeq;
+  return { t: 'vibot_subscribe', convId: msg.convId, lastSeq };
+}
+
+/** Drain the pending queue in order. Re-queues the remainder if send fails mid-flush. */
+export function flushVibotPending(): void {
+  if (pendingVibot.length === 0) return;
+  const queue = coalesceSubscribes(pendingVibot);
+  pendingVibot = [];
+  for (let i = 0; i < queue.length; i++) {
+    const msg = materialize(queue[i]);
+    if (!sendRaw(msg)) {
+      pendingVibot = coalesceSubscribes([msg, ...queue.slice(i + 1)]);
+      return;
+    }
+  }
+}
+
+/**
+ * Send a vibot client frame, or queue it until the shared socket is OPEN.
+ * Subscribe frames for the same conversation collapse to the newest one;
+ * lastSeq is refreshed from the store at flush time.
+ */
+function sendVibotFrame(msg: VibotClientMessage): void {
+  if (pendingVibot.length === 0 && sendRaw(msg)) return;
+  // Socket down, or backlog exists — never leapfrog queued frames.
+  if (pendingVibot.length > 0) {
+    flushVibotPending();
+    if (pendingVibot.length === 0 && sendRaw(msg)) return;
+  }
+  enqueueVibot(msg);
+}
 
 /**
  * Separate store for the Vibot assistant interface. It never touches the coding
@@ -34,12 +95,13 @@ interface VibotState {
   handleBatch: (events: ServerEvent[]) => void;
   onReconnect: () => void;
   loadConfig: () => Promise<void>;
-  saveConfig: (input: { baseUrl?: string; apiKey?: string; model?: string; systemPrompt?: string; temperature?: number }) => Promise<boolean>;
+  saveConfig: (input: { baseUrl?: string; apiKey?: string; model?: string; systemPrompt?: string; temperature?: number; reasoning_effort?: string | null }) => Promise<boolean>;
   loadMemories: () => Promise<void>;
   newConversation: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, title: string) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
+  unlinkSession: (convId: string, sessionId: string) => Promise<boolean>;
   sendMessage: (text: string) => void;
   abort: () => void;
   setToast: (msg: string | null) => void;
@@ -119,9 +181,12 @@ export const useVibotStore = create<VibotState>((set, get) => ({
   },
 
   onReconnect() {
-    void get().init().then(() => {
+    // Socket is OPEN: resubscribe the active chat first (idempotent), then
+    // flush any vibot_send / vibot_abort that waited while we were down.
+    void get().init().then(async () => {
       const id = get().activeConvId;
-      if (id) void get().openConversation(id);
+      if (id) await get().openConversation(id);
+      flushVibotPending();
     });
   },
 
@@ -165,7 +230,7 @@ export const useVibotStore = create<VibotState>((set, get) => ({
   async openConversation(id) {
     const prev = get().activeConvId;
     if (prev && prev !== id) {
-      getSocket()?.send({ t: 'vibot_unsubscribe', convId: prev });
+      sendVibotFrame({ t: 'vibot_unsubscribe', convId: prev });
     }
     set({ activeConvId: id });
 
@@ -175,14 +240,14 @@ export const useVibotStore = create<VibotState>((set, get) => ({
         const { blocks, seq } = await api.getVibotMessages(id);
         const running = get().convs.find((c) => c.id === id)?.running ?? false;
         set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
-        getSocket()?.send({ t: 'vibot_subscribe', convId: id, lastSeq: seq });
+        sendVibotFrame({ t: 'vibot_subscribe', convId: id, lastSeq: seq });
         return;
       } catch {
         set({ toast: 'Failed to load conversation' });
         return;
       }
     }
-    getSocket()?.send({ t: 'vibot_subscribe', convId: id, lastSeq: existing.lastSeq });
+    sendVibotFrame({ t: 'vibot_subscribe', convId: id, lastSeq: existing.lastSeq });
   },
 
   async renameConversation(id, title) {
@@ -211,6 +276,19 @@ export const useVibotStore = create<VibotState>((set, get) => ({
     if (next) void get().openConversation(next);
   },
 
+  async unlinkSession(convId, sessionId) {
+    try {
+      const conv = await api.unlinkVibotSession(convId, sessionId);
+      set((s) => ({
+        convs: sortConvs(s.convs.map((c) => (c.id === convId ? conv : c))),
+      }));
+      return true;
+    } catch (err) {
+      set({ toast: err instanceof ApiError ? err.message : 'Failed to unlink session' });
+      return false;
+    }
+  },
+
   sendMessage(text) {
     const trimmed = text.trim();
     const id = get().activeConvId;
@@ -226,12 +304,12 @@ export const useVibotStore = create<VibotState>((set, get) => ({
       ]);
       return { views: { ...s.views, [id]: next } };
     });
-    getSocket()?.send({ t: 'vibot_send', convId: id, clientMsgId, text: trimmed });
+    sendVibotFrame({ t: 'vibot_send', convId: id, clientMsgId, text: trimmed });
   },
 
   abort() {
     const id = get().activeConvId;
-    if (id) getSocket()?.send({ t: 'vibot_abort', convId: id });
+    if (id) sendVibotFrame({ t: 'vibot_abort', convId: id });
   },
 
   setToast(msg) {
@@ -245,7 +323,7 @@ async function reloadAndResubscribe(id: string): Promise<void> {
     const { blocks, seq } = await api.getVibotMessages(id);
     const running = useVibotStore.getState().convs.find((c) => c.id === id)?.running ?? false;
     useVibotStore.setState((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
-    getSocket()?.send({ t: 'vibot_subscribe', convId: id, lastSeq: seq });
+    sendVibotFrame({ t: 'vibot_subscribe', convId: id, lastSeq: seq });
   } catch {
     /* ignore */
   }

@@ -13,6 +13,7 @@ import {
 } from '../../../shared/protocol.js';
 import type { RunCallbacks } from '../claude/types.js';
 import { readZcodeConfigSync } from './models.js';
+import { isDelegateWakeActive, peekDelegateWakePrompt } from '../vibot/wakeSuppress.js';
 
 /**
  * ZCode Protocol client ("zcode app-server").
@@ -67,6 +68,9 @@ export interface ZcodeRunOptions {
   effort?: EffortLevel;
   /** Native ZCode session id (sess_<uuid>) to resume. */
   resume?: string;
+  /** Vibe session id (hub runtime) — used to detect an in-flight Vibot delegate
+   *  wake so this poller can defer instead of starting a second turn. */
+  vibeSessionId?: string;
   /** Accepted for interface parity; ZCode configures MCP via its config.json. */
   mcpServers?: unknown;
   remote?: { sshTarget: string; cwd: string; proxy?: string };
@@ -792,9 +796,11 @@ export class ZcodeAppServerClient {
     });
   }
 
-  /** Keep the transport alive while background tasks run; settled tasks are
-   *  reported back to the model as a follow-up turn (codex pattern). A queued
-   *  user prompt always runs before an automatic task notification. */
+  /** Master/slave vs Vibot: when this Vibe session was just woken via a
+   *  delegate watcher, Vibot's silent turn owns the follow-up (full summary
+   *  prompt). This poller must not start a second turn for the same settle —
+   *  native harness turns may still appear (uncancellable); we only skip our
+   *  polled duplicate. The wake prompt is already on Vibot via markDelegateWake. */
   private async serviceBackgroundActivity(): Promise<void> {
     // No cap by default — closing the transport orphans running tasks (a new
     // app-server cannot adopt them), and an idle connection polling every
@@ -802,6 +808,7 @@ export class ZcodeAppServerClient {
     // unset/0 = unlimited).
     const capHours = Number(process.env.VIBE_ZCODE_TASK_SERVICE_HOURS || 0);
     const deadline = capHours > 0 ? Date.now() + capHours * 60 * 60_000 : Infinity;
+    const vibeSessionId = this.opts.vibeSessionId;
     const runQueuedTurn = async (content: string): Promise<void> => {
       this.cb.onTurnState?.(true);
       this.vibeDrivenTurn = true;
@@ -827,8 +834,22 @@ export class ZcodeAppServerClient {
         // turn; give that immediate channel a short grace so one completion
         // doesn't wake the model twice (two dividers, two replies).
         await new Promise((resolve) => setTimeout(resolve, 1500));
+        const vibotOwns = isDelegateWakeActive(vibeSessionId);
         const nativeSeen = this.nativeTurnActive || Date.now() - this.lastNativeTurnAt < 10_000;
-        if (!nativeSeen) {
+        if (vibotOwns) {
+          // Vibot silent wake is the master follow-up for managed delegates —
+          // skip the polled duplicate. Native harness turns may still fire
+          // (we can't cancel them); we just don't add a second Vibe-driven turn.
+          // Content lives on Vibot via markDelegateWake + vibotHub.wake; if
+          // native raced ahead, peekDelegateWakePrompt confirms the summary was
+          // already captured for the Vibot turn (no coding-side reinject).
+          const captured = peekDelegateWakePrompt(vibeSessionId);
+          log.info(
+            captured
+              ? 'zcode deferring task wake to Vibot delegate follow-up (prompt captured)'
+              : 'zcode deferring task wake to Vibot delegate follow-up',
+          );
+        } else if (!nativeSeen) {
           const details = settled
             .map((task) => `- ${task.id}: ${task.status} — ${task.description}\n${(task.error || task.output || '(no output)').slice(0, 8_000)}`)
             .join('\n\n');

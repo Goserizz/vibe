@@ -4,7 +4,16 @@ import { BlockView } from './blocks';
 import { CliBlockView } from './CliBlocks';
 import { cn } from '../lib/format';
 
-export function MessageList({ sessionId, bottomPad }: { sessionId: string; bottomPad?: number }) {
+export function MessageList({
+  sessionId,
+  bottomPad,
+  embedded,
+}: {
+  sessionId: string;
+  bottomPad?: number;
+  /** Vibot (and similar) embeds: solid header above, skip floating-titlebar padding. */
+  embedded?: boolean;
+}) {
   const blocks = useStore((s) => s.views[sessionId]?.blocks);
   const viewMode = useStore((s) => s.viewMode);
   const cli = viewMode === 'cli';
@@ -40,8 +49,9 @@ export function MessageList({ sessionId, bottomPad }: { sessionId: string; botto
     <div ref={containerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
       <div
         className={cn(
-          'messages-pad mx-auto flex flex-col px-4 pt-28 md:px-6 md:pt-20',
+          'messages-pad mx-auto flex flex-col px-4 md:px-6',
           cli ? 'max-w-4xl gap-2' : 'max-w-3xl gap-4',
+          embedded ? 'pt-6 pb-8' : 'pt-28 md:pt-20',
         )}
         // Measured composer-stack height wins over the CSS fallback, so the last
         // message always parks above it — including when the task pane is open.

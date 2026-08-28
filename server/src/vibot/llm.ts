@@ -50,6 +50,11 @@ export interface StreamChatOpts {
   messages: LlmMessage[];
   tools?: LlmToolDef[];
   temperature?: number;
+  /** OpenAI-style reasoning effort (`minimal`…`max`). Omitted from the body
+   *  when unset so the API default applies; endpoints that don't support the
+   *  parameter ignore it (Anthropic-style thinking/budget_tokens is not used —
+   *  Vibot only speaks the OpenAI-compatible Chat Completions protocol). */
+  reasoning_effort?: string;
   signal: AbortSignal;
 }
 
@@ -97,6 +102,7 @@ export async function* streamChat(opts: StreamChatOpts): AsyncIterable<LlmStream
   };
   if (opts.tools?.length) body.tools = opts.tools;
   if (typeof opts.temperature === 'number') body.temperature = opts.temperature;
+  if (opts.reasoning_effort) body.reasoning_effort = opts.reasoning_effort;
 
   const res = await fetch(completionsUrl(opts.baseUrl), {
     method: 'POST',

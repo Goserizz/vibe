@@ -158,6 +158,23 @@ function unwrapToolResult(block: ToolBlock): string {
       ) {
         return parsed.content;
       }
+      // Vibot run_command (and similar) → { exitCode, output, timedOut, … }
+      if (kind === 'bash' && typeof parsed.output === 'string' && ('exitCode' in parsed || 'timedOut' in parsed || parsed.denied)) {
+        const status = parsed.denied
+          ? `denied — ${typeof parsed.reason === 'string' ? parsed.reason : 'blocked'}`
+          : [
+              parsed.timedOut ? 'timed out' : null,
+              parsed.exitCode != null ? `exit ${parsed.exitCode}` : null,
+              parsed.truncated ? 'truncated' : null,
+              typeof parsed.host === 'string' ? `@ ${parsed.host}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ');
+        const out = parsed.output as string;
+        if (status && out) return `${status}\n${out}`;
+        if (status) return status;
+        return out;
+      }
       if (typeof parsed.stdout === 'string' || typeof parsed.stderr === 'string') {
         return `${parsed.stdout ?? ''}${parsed.stderr ?? ''}`;
       }

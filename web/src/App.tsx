@@ -40,6 +40,12 @@ export default function App() {
     try { localStorage.setItem(MODE_KEY, m); } catch { /* ignore */ }
   };
 
+  /** Jump from a Vibot-linked coding session into the coding UI and open it. */
+  const openCodingSession = (sessionId: string) => {
+    switchMode('coding');
+    void useStore.getState().openSession(sessionId);
+  };
+
   useEffect(() => {
     const token = resolveToken();
     if (token) {
@@ -88,7 +94,7 @@ export default function App() {
   // tools can drive any host, so non-admin accounts never enter this mode
   // (even via a stale localStorage preference).
   if (mode === 'vibot' && isAdmin) {
-    return <VibotView onBack={() => switchMode('coding')} />;
+    return <VibotView onBack={() => switchMode('coding')} onOpenInCoding={openCodingSession} />;
   }
 
   return (

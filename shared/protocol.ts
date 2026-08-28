@@ -518,6 +518,10 @@ export interface PermissionDecision {
  * (streaming + tool calls), which covers GLM, DeepSeek, Kimi/Moonshot, OpenAI,
  * OpenRouter, and local servers via a single {baseUrl, apiKey, model} triple.
  */
+/** Reasoning effort Vibot asks its LLM for (OpenAI-style `reasoning_effort`).
+ *  Unset ⇒ the param is omitted and the API default applies. */
+export type VibotReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'max';
+
 export interface VibotConfig {
   /** Base URL of an OpenAI-compatible endpoint, no `/chat/completions`. */
   baseUrl: string;
@@ -528,6 +532,8 @@ export interface VibotConfig {
   /** Editable system prompt; defaults to the built-in Vibot prompt. */
   systemPrompt: string;
   temperature?: number;
+  /** Optional reasoning effort; omitted from the request when unset. */
+  reasoning_effort?: VibotReasoningEffort;
 }
 
 /** Safe-to-send projection of {@link VibotConfig}: the key never leaves the
@@ -537,7 +543,19 @@ export interface VibotConfigClient {
   model: string;
   systemPrompt: string;
   temperature?: number;
+  reasoning_effort?: VibotReasoningEffort;
   hasApiKey: boolean;
+}
+
+/** A coding session this Vibot conversation created or continued. Shown under
+ *  the expandable Vibot chat row so the user can jump into the agent turn. */
+export interface VibotLinkedSession {
+  id: string;
+  title: string;
+  agent: AgentKind;
+  host: string;
+  /** When Vibot last linked / continued this session. */
+  linkedAt: number;
 }
 
 /** A Vibot conversation row for the sidebar. Lives only in the Vibot store —
@@ -549,6 +567,8 @@ export interface VibotConvMeta {
   updatedAt: number;
   messageCount: number;
   running: boolean;
+  /** Coding sessions this Vibot chat has opened (newest first). */
+  sessions: VibotLinkedSession[];
 }
 
 /** A durable note Vibot chose to remember. */

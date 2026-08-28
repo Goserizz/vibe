@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { log } from '../log.js';
-import type { VibotConfig, VibotConfigClient } from '../../../shared/protocol.js';
+import type { VibotConfig, VibotConfigClient, VibotReasoningEffort } from '../../../shared/protocol.js';
 
 /**
  * Vibot's built-in system prompt. The user can replace it from the Vibot
@@ -15,13 +15,14 @@ import type { VibotConfig, VibotConfigClient } from '../../../shared/protocol.js
  */
 export const DEFAULT_VIBOT_SYSTEM_PROMPT = `You are **Vibot**, the built-in assistant for **Vibe** — a web UI that runs coding agents (Claude, Codex, Cursor, Kimi, Kiro) on this machine and on remote SSH hosts.
 
-You are **not** a coding agent. You never write, edit, or run code yourself. Your job is to **understand, oversee, and orchestrate** the user's coding work across Vibe.
+You are **not** a coding agent. You do not write or edit application code yourself. Your job is to **understand, oversee, and orchestrate** the user's coding work across Vibe. You may run a few short, mostly read-only shell commands to inspect state — never to implement features or make lasting changes.
 
 You see everything in Vibe through your tools:
 - **list_sessions / search_sessions / read_session** — every conversation across *all hosts and all agents*, present and past.
 - **get_config / list_hosts** — how Vibe is set up (defaults, hosts, MCP servers, presets, your own settings).
 - **create_session** — spin up a new coding conversation with the right agent/model/host and hand the task to that agent. You delegate; the coding agent does the work. By default you also *manage* it: you auto-approve its permission prompts and plan approvals and report a tally back here.
 - **continue_session** — resume an EXISTING coding conversation with a follow-up prompt. The session keeps its own agent/model/host/cwd and full history; you manage the continued turn just like a created one.
+- **run_command** — run a *simple* shell command locally or on a remote host (ls, cat, ps, df, du, git status, systemctl status, hostname, uname, …). Use it only for quick inspection. Do **not** use it to edit files, write code, install packages, reconfigure the machine, or run long / interactive jobs — those belong in \`create_session\` / \`continue_session\`. Destructive and power commands are blocked server-side.
 - **save_memory / list_memories / read_memory / delete_memory** — remember durable, important facts for later.
 
 How to behave:
@@ -31,13 +32,22 @@ How to behave:
   - **Continue** when: the user says "keep going / also do X" about earlier work; the task is the next step of a recent session in the same repo; a bug report arrives for code a recent session wrote.
   - **Create new** when: the topic or project is unrelated; the work belongs on a different host; the matching session is \`running\` (it can't be continued — say so and offer to wait or start fresh); or the old session is long-stale and its context no longer helps.
   - When genuinely unsure between a recent, on-topic session and a new one, continuing usually beats re-explaining a codebase from scratch.
+- **Keep \`run_command\` light.** Prefer one short command at a time. If you need edits, builds, tests, or multi-step work, hand it to a coding agent instead of chaining shell mutations yourself.
 - **Be concise and direct.** Use short paragraphs or bullets. Lead with the answer; skip filler.
 - **Save a memory only when something is genuinely worth remembering long-term** — a key decision, a durable preference, an important constraint, a hard-won fact. Do not memorize trivia or transient state.
-- If a tool errors (a remote host is offline, your API config is missing, an id is unknown), report it plainly and suggest the fix.
+- If a tool errors (a remote host is offline, your API config is missing, an id is unknown, a command was denied), report it plainly and suggest the fix.
 - You never see the user's private API keys, and you never need them.`;
 
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
 const DEFAULT_MODEL = 'glm-4.6';
+
+/** Accepted reasoning-effort levels (mirrored by the settings-panel dropdown). */
+const EFFORTS: VibotReasoningEffort[] = ['minimal', 'low', 'medium', 'high', 'max'];
+
+/** Coerce an unknown value to a valid effort, or undefined (= API default). */
+function normalizeEffort(v: unknown): VibotReasoningEffort | undefined {
+  return typeof v === 'string' && (EFFORTS as string[]).includes(v) ? (v as VibotReasoningEffort) : undefined;
+}
 
 function defaultConfig(): VibotConfig {
   return {
@@ -71,6 +81,7 @@ function normalize(raw: unknown): VibotConfig {
     model: o.model.trim() || base.model,
     systemPrompt: typeof o.systemPrompt === 'string' && o.systemPrompt.trim() ? o.systemPrompt : base.systemPrompt,
     temperature: typeof o.temperature === 'number' && Number.isFinite(o.temperature) ? o.temperature : base.temperature,
+    reasoning_effort: normalizeEffort(o.reasoning_effort),
   };
 }
 
@@ -98,8 +109,14 @@ function persist(cfg: VibotConfig): void {
   try { fs.chmodSync(config.vibotConfigFile, 0o600); } catch { /* best effort */ }
 }
 
+/** Partial update shape: `reasoning_effort` also accepts null (= clear back to
+ *  the API default), matching the `.nullish()` zod field in http/api.ts. */
+export type VibotConfigPatch = Partial<Omit<VibotConfig, 'reasoning_effort'>> & {
+  reasoning_effort?: VibotReasoningEffort | null;
+};
+
 /** Apply a partial update (empty apiKey ⇒ keep the existing key). */
-export function updateVibotConfig(patch: Partial<VibotConfig>): VibotConfig {
+export function updateVibotConfig(patch: VibotConfigPatch): VibotConfig {
   const current = loadVibotConfig();
   const next: VibotConfig = {
     baseUrl: patch.baseUrl != null ? patch.baseUrl : current.baseUrl,
@@ -116,6 +133,11 @@ export function updateVibotConfig(patch: Partial<VibotConfig>): VibotConfig {
           ? patch.systemPrompt
           : current.systemPrompt,
     temperature: patch.temperature != null ? patch.temperature : current.temperature,
+    // Valid level ⇒ set; explicit null ⇒ clear back to the API default;
+    // undefined ⇒ leave unchanged.
+    reasoning_effort:
+      normalizeEffort(patch.reasoning_effort) ??
+      (patch.reasoning_effort == null ? undefined : current.reasoning_effort),
   };
   persist(next);
   cached = next;
@@ -130,6 +152,7 @@ export function vibotConfigClient(cfg: VibotConfig = loadVibotConfig()): VibotCo
     model: cfg.model,
     systemPrompt: cfg.systemPrompt,
     temperature: cfg.temperature,
+    reasoning_effort: cfg.reasoning_effort,
     hasApiKey: Boolean(cfg.apiKey),
   };
 }

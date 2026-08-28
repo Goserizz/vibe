@@ -109,6 +109,7 @@ const GLYPHS: Record<string, string | ((props: LucideProps) => string)> = {
   Cpu: 'M',
   Download: 'v',
   Eye: 'o',
+  ExternalLink: '↗',
   FileCog: '*',
   FilePen: '~',
   FileText: '▤',
@@ -119,6 +120,7 @@ const GLYPHS: Record<string, string | ((props: LucideProps) => string)> = {
   Globe: 'o',
   HelpCircle: '?',
   Image: '▦',
+  KeyRound: '⚿',
   ListTodo: '≡',
   Loader2: '+',
   LogIn: '→',
@@ -190,7 +192,7 @@ function wrap(name: string, Cmp: LucideIcon): LucideIcon {
         return <TuiSpinner className={className.replace(/\banimate-spin\b/g, '')} />;
       }
       const spec = GLYPHS[name];
-      const glyph = typeof spec === 'function' ? spec(props) : spec;
+      const glyph = typeof spec === 'function' ? spec(props) : (spec ?? '?');
       return (
         <span className={cn('tui-icon inline-flex shrink-0 select-none items-center justify-center', className)} aria-hidden>
           {glyph}

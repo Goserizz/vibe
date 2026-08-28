@@ -4,6 +4,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { fetchZcodeCdnLatest } from './cdn.js';
+import { invalidateLocalZcodeVersion } from './bundle.js';
 
 /**
  * Keep the LOCAL ZCode CLI current — in the push-install model the local
@@ -132,6 +133,7 @@ export async function installZcodeRelease(version: string): Promise<{ cliVersion
     fs.rmSync(APP_ROOT, { recursive: true, force: true });
     fs.renameSync(extracted, APP_ROOT);
     writeInstalledDesktop(version);
+    invalidateLocalZcodeVersion();
     log.ok(`zcode auto-update: installed desktop ${version} (CLI ${cliVersion}) at ${APP_ROOT}`);
     return { cliVersion };
   } finally {

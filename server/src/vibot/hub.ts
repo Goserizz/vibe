@@ -1,8 +1,10 @@
 import type { Conn } from '../ws/hub.js';
-import type { ChatBlock, LiveEvent, VibotConvMeta } from '../../../shared/protocol.js';
+import type { AgentKind, ChatBlock, LiveEvent, VibotConvMeta } from '../../../shared/protocol.js';
 import { convStore, toMeta, type StoredConv } from './conversations.js';
 import { startVibotRun, applyEventToBlocks, type VibotRunHandle, type VibotRunResult } from './runner.js';
 import { loadVibotConfig, vibotConfigured } from './config.js';
+import { refreshDelegateWake } from './wakeSuppress.js';
+import { log } from '../log.js';
 
 const LOG_CAP = 2000;
 const IDLE_GC_MS = 5 * 60_000;
@@ -32,8 +34,24 @@ class VibotRuntime {
   private turnBlocks: ChatBlock[] = [];
   private runBaseSeq = 0;
   private run?: VibotRunHandle;
+  /** LLM prompts waiting to start a silent wake turn once the current run ends.
+   *  Keyed by delegate session id so same-session wakes coalesce to the latest
+   *  prompt; different sessions stay until drain (joined into one turn).
+   *  Visible system notes are posted immediately in {@link VibotHub.wake}, not here. */
+  private pendingWakePrompts = new Map<string, string>();
+  /** True while the in-flight turn was started as a silent (wake) turn. */
+  private silentTurn = false;
 
-  constructor(readonly convId: string) {}
+  constructor(
+    readonly convId: string,
+    /** Fired whenever `running` flips so the hub can broadcast sidebar meta. */
+    private readonly onRunningChange: () => void,
+  ) {}
+
+  /** Remember a wake prompt to fire after the in-flight turn finishes. */
+  queueWakePrompt(sessionId: string, promptText: string): void {
+    this.pendingWakePrompts.set(sessionId, promptText);
+  }
 
   /** seq++, log, fold, broadcast — without touching the turn-block accumulator.
    *  Used by both the runner's emit and by {@link appendNote} (which must not
@@ -59,11 +77,11 @@ class VibotRuntime {
     applyEventToBlocks(this.turnBlocks, ev);
   }
 
-  /** Post a UI note into this conversation outside a model turn (e.g. a delegate
-   *  status update from the watcher). Broadcast live AND persist to blocks, but
+  /** Post a UI system notice into this conversation outside a model turn
+   *  (coding-style dashed divider). Broadcast live AND persist to blocks, but
    *  keep it out of the LLM message history — it's a status line, not dialogue. */
   appendNote(text: string): void {
-    const block: ChatBlock = { id: `vn_${++noteSeq}`, kind: 'assistant', text, streaming: false, ts: Date.now() };
+    const block: ChatBlock = { id: `vn_${++noteSeq}`, kind: 'system', text, ts: Date.now() };
     this.push({ k: 'block', block });
     convStore.appendBlock(this.convId, block);
     this.lastActivity = Date.now();
@@ -140,14 +158,16 @@ class VibotRuntime {
     this.running = running;
     this.lastActivity = Date.now();
     this.emit({ k: 'run_state', running });
+    this.onRunningChange();
   }
 
-  startTurn(text: string, clientMsgId: string, opts?: { silent?: boolean }): boolean {
+  startTurn(text: string, clientMsgId: string, opts?: { silent?: boolean; wakeSessionId?: string }): boolean {
     if (this.running || this.run) return false;
     if (!vibotConfigured()) return false;
 
     this.runBaseSeq = this.seq;
     this.turnBlocks = [];
+    this.silentTurn = !!opts?.silent;
     this.lastActivity = Date.now();
     this.setRunning(true);
     // A normal user turn shows the prompt as a user block. A background wake
@@ -155,6 +175,10 @@ class VibotRuntime {
     // caller has already posted a status note as the visible marker.
     if (!opts?.silent) {
       this.emit({ k: 'block', block: { id: clientMsgId, kind: 'user', text, ts: Date.now() } });
+    } else if (opts.wakeSessionId) {
+      // Silent turn may start long after markDelegateWake (queued behind a user
+      // turn) — refresh so zcode keeps deferring through the actual wake.
+      refreshDelegateWake(opts.wakeSessionId);
     }
 
     this.run = startVibotRun(
@@ -169,12 +193,38 @@ class VibotRuntime {
   private finishTurn(result: VibotRunResult, run: VibotRunHandle): void {
     if (this.run !== run) return;
     this.run = undefined;
+    const wasSilent = this.silentTurn;
+    this.silentTurn = false;
+    if (wasSilent) {
+      const hasAssistant = result.newMessages.some(
+        (m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length > 0,
+      );
+      const hasTools = result.newMessages.some((m) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0);
+      if (!hasAssistant && !hasTools) {
+        log.warn(`vibot: silent wake turn produced no assistant output (conv ${this.convId}, ${result.error ?? 'no error'})`);
+      }
+    }
     // Persist this turn's LLM messages + rendered blocks.
     convStore.appendRun(this.convId, result.newMessages, this.turnBlocks, 1);
     this.turnBlocks = [];
     this.streamKinds.clear();
     this.setRunning(false);
     this.lastActivity = Date.now();
+    // Drain deferred background wake prompts (notes were already posted at queue time).
+    this.drainPendingWakePrompts();
+  }
+
+  /** Start one silent turn for all queued wake prompts (same session → latest only). */
+  private drainPendingWakePrompts(): void {
+    if (this.pendingWakePrompts.size === 0) return;
+    const entries = [...this.pendingWakePrompts.entries()];
+    this.pendingWakePrompts.clear();
+    if (!vibotConfigured()) return;
+    for (const [sid] of entries) refreshDelegateWake(sid);
+    this.startTurn(entries.map(([, t]) => t).join('\n\n'), `vw_${++wakeSeq}`, {
+      silent: true,
+      wakeSessionId: entries.length === 1 ? entries[0][0] : undefined,
+    });
   }
 
   abort(): void {
@@ -195,15 +245,46 @@ class VibotRuntime {
 export class VibotHub {
   private runtimes = new Map<string, VibotRuntime>();
   private conns = new Set<Conn>();
+  /**
+   * Durable subscribe intent per conversation. Survives idle runtime GC so a
+   * rebuilt runtime can reattach the same sockets — without the wake-time
+   * "add every connected client" hammer that polluted other chats' streams.
+   */
+  private subscribersByConv = new Map<string, Set<Conn>>();
 
   private runtimeFor(convId: string): VibotRuntime | undefined {
     let rt = this.runtimes.get(convId);
     if (rt) return rt;
     const conv = convStore.get(convId);
     if (!conv) return undefined;
-    rt = new VibotRuntime(convId);
+    rt = new VibotRuntime(convId, () => this.broadcastMeta(convId));
+    // Restore push targets only — seq / logBuf start fresh; clients still use
+    // lastSeq + replay/reset on the next vibot_subscribe as before.
+    const saved = this.subscribersByConv.get(convId);
+    if (saved) {
+      for (const c of saved) rt.subscribers.add(c);
+    }
     this.runtimes.set(convId, rt);
     return rt;
+  }
+
+  private trackSubscriber(convId: string, conn: Conn, rt: VibotRuntime): void {
+    let set = this.subscribersByConv.get(convId);
+    if (!set) {
+      set = new Set();
+      this.subscribersByConv.set(convId, set);
+    }
+    set.add(conn);
+    rt.subscribers.add(conn);
+  }
+
+  private untrackSubscriber(convId: string, conn: Conn): void {
+    const set = this.subscribersByConv.get(convId);
+    if (set) {
+      set.delete(conn);
+      if (set.size === 0) this.subscribersByConv.delete(convId);
+    }
+    this.runtimes.get(convId)?.subscribers.delete(conn);
   }
 
   // -- connection lifecycle --------------------------------------------------
@@ -215,6 +296,10 @@ export class VibotHub {
 
   removeConn(conn: Conn): void {
     this.conns.delete(conn);
+    for (const [convId, set] of this.subscribersByConv) {
+      if (!set.delete(conn)) continue;
+      if (set.size === 0) this.subscribersByConv.delete(convId);
+    }
     for (const rt of this.runtimes.values()) rt.subscribers.delete(conn);
     this.gc();
   }
@@ -227,13 +312,13 @@ export class VibotHub {
       conn.send({ t: 'error', message: 'vibot conversation not found' });
       return;
     }
-    rt.subscribers.add(conn);
+    this.trackSubscriber(convId, conn, rt);
     const ok = rt.replay(conn, lastSeq);
     conn.send({ t: 'vibot_subscribed', convId, seq: rt.seq, running: rt.running, reset: !ok });
   }
 
   unsubscribe(conn: Conn, convId: string): void {
-    this.runtimes.get(convId)?.subscribers.delete(conn);
+    this.untrackSubscriber(convId, conn);
   }
 
   send(conn: Conn, convId: string, clientMsgId: string, text: string): boolean {
@@ -242,7 +327,7 @@ export class VibotHub {
       conn.send({ t: 'error', message: 'vibot conversation not found' });
       return false;
     }
-    rt.subscribers.add(conn);
+    this.trackSubscriber(convId, conn, rt);
     const started = rt.startTurn(text, clientMsgId);
     if (!started) {
       conn.send({
@@ -295,6 +380,7 @@ export class VibotHub {
   deleteConversation(convId: string): boolean {
     const existed = convStore.remove(convId);
     this.runtimes.delete(convId);
+    this.subscribersByConv.delete(convId);
     if (existed) this.broadcast({ t: 'vibot_conv_removed', convId });
     return existed;
   }
@@ -317,17 +403,48 @@ export class VibotHub {
     rt.appendNote(text);
   }
 
-  /** A delegated session finished in the background — wake Vibot so it produces
-   *  a follow-up reply. Posts the outcome as a visible note, then starts a new
-   *  silent turn seeded with the same outcome (so the model reasons about it).
-   *  If a turn is already running (the user is actively chatting), fall back to
-   *  just the note rather than clobbering the live turn. */
-  wake(convId: string, outcomeText: string): void {
+  /** Record a coding session this Vibot chat opened/continued and broadcast
+   *  the updated meta so the sidebar's expandable child list stays in sync. */
+  linkSession(
+    convId: string,
+    session: { id: string; title: string; agent: AgentKind; host: string },
+  ): void {
+    const conv = convStore.linkSession(convId, session);
+    if (!conv) return;
+    this.broadcast({ t: 'vibot_conv_meta', conv: toMeta(conv, this.isRunning(convId)) });
+  }
+
+  /** Remove a coding-session link from this Vibot chat. Does not delete or stop
+   *  the coding session itself. Returns the updated meta, or null if the conv /
+   *  link was missing. Caller may also stop a delegate watcher separately. */
+  unlinkSession(convId: string, sessionId: string): VibotConvMeta | null {
+    const conv = convStore.unlinkSession(convId, sessionId);
+    if (!conv) return null;
+    const meta = toMeta(conv, this.isRunning(convId));
+    this.broadcast({ t: 'vibot_conv_meta', conv: meta });
+    return meta;
+  }
+
+  /** A delegated session's foreground turn finished — wake Vibot so it produces
+   *  a follow-up reply. Posts a short coding-style system notice (visible), then
+   *  starts a silent turn seeded with the full LLM prompt (not shown as a user
+   *  bubble). If a turn is already running, the note still posts immediately and
+   *  only the prompt is queued (same sessionId replaces an older pending prompt). */
+  wake(convId: string, noteText: string, promptText: string, sessionId?: string): void {
     const rt = this.runtimeFor(convId);
-    if (!rt) return;
-    rt.appendNote(outcomeText);
-    if (rt.running) return;
-    rt.startTurn(outcomeText, `vw_${++wakeSeq}`, { silent: true });
+    if (!rt) {
+      log.warn(`vibot: wake skipped — conversation ${convId} not found`);
+      return;
+    }
+    // Subscribers come from subscribersByConv restore in runtimeFor — do not
+    // fan out to every vibot socket (that leaked conv A events into chat B).
+    rt.appendNote(noteText);
+    if (rt.running) {
+      rt.queueWakePrompt(sessionId || convId, promptText);
+      if (sessionId) refreshDelegateWake(sessionId);
+      return;
+    }
+    rt.startTurn(promptText, `vw_${++wakeSeq}`, { silent: true, wakeSessionId: sessionId });
     this.broadcastMeta(convId);
   }
 

@@ -13,6 +13,7 @@ export function VibotSettings({ onClose }: { onClose: () => void }) {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('');
   const [temperature, setTemperature] = useState('0.3');
+  const [effort, setEffort] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -23,6 +24,7 @@ export function VibotSettings({ onClose }: { onClose: () => void }) {
     setApiKey('');
     setModel(config.model);
     setTemperature(typeof config.temperature === 'number' ? String(config.temperature) : '0.3');
+    setEffort(config.reasoning_effort ?? '');
     setSystemPrompt(config.systemPrompt);
   }, [config]);
 
@@ -40,6 +42,8 @@ export function VibotSettings({ onClose }: { onClose: () => void }) {
       baseUrl: baseUrl.trim(),
       model: model.trim(),
       temperature: Number.isFinite(tempNum) ? Math.max(0, Math.min(2, tempNum)) : undefined,
+      // '' means "API default" — send null so the server clears a stored level.
+      reasoning_effort: effort || null,
       systemPrompt,
       ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
     });
@@ -85,7 +89,7 @@ export function VibotSettings({ onClose }: { onClose: () => void }) {
             <input className={inputCls} type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={config?.hasApiKey ? '••••••••' : 'sk-…'} autoComplete="off" />
           </Field>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-4 gap-3">
             <div className="col-span-2">
               <Field label="Model">
                 <input className={inputCls} value={model} onChange={(e) => setModel(e.target.value)} placeholder="glm-4.6" />
@@ -93,6 +97,16 @@ export function VibotSettings({ onClose }: { onClose: () => void }) {
             </div>
             <Field label="Temperature">
               <input className={inputCls} value={temperature} onChange={(e) => setTemperature(e.target.value)} placeholder="0.3" />
+            </Field>
+            <Field label="Reasoning">
+              <select className={inputCls} value={effort} onChange={(e) => setEffort(e.target.value)}>
+                <option value="">API default</option>
+                {EFFORT_OPTIONS.map((lvl) => (
+                  <option key={lvl} value={lvl}>
+                    {lvl}
+                  </option>
+                ))}
+              </select>
             </Field>
           </div>
 
@@ -136,6 +150,9 @@ export function VibotSettings({ onClose }: { onClose: () => void }) {
 
 const inputCls =
   'w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-[13px] text-slate-200 outline-none transition focus:border-accent/40';
+
+/** Must stay in sync with the server-side zod enum in http/api.ts. */
+const EFFORT_OPTIONS = ['minimal', 'low', 'medium', 'high', 'max'] as const;
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (

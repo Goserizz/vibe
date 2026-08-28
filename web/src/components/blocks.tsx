@@ -490,6 +490,40 @@ function ToolResultBody({ block }: { block: ToolBlock }) {
     ) {
       return <ReadContentView content={p.content} meta={p} isError={block.isError} />;
     }
+    // Vibot run_command (and similar) returns { exitCode, output, timedOut, … }.
+    if (kind === 'bash' && typeof p.output === 'string' && ('exitCode' in p || 'timedOut' in p || p.denied)) {
+      const status = p.denied
+        ? `denied — ${p.reason ?? 'blocked'}`
+        : [
+            p.timedOut ? 'timed out' : null,
+            p.exitCode != null ? `exit ${p.exitCode}` : null,
+            p.truncated ? 'truncated' : null,
+            p.host ? `@ ${p.host}` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ');
+      return (
+        <div className="space-y-1.5">
+          {status && (
+            <div className={cn('font-mono text-[11px]', p.denied || p.timedOut || block.isError ? 'text-rose-400' : 'text-slate-500')}>
+              {status}
+            </div>
+          )}
+          {p.output ? (
+            <pre
+              className={cn(
+                'code-block max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] leading-relaxed',
+                block.isError || p.denied ? 'text-rose-300' : 'text-slate-400',
+              )}
+            >
+              {p.output}
+            </pre>
+          ) : p.denied ? null : (
+            <div className="font-mono text-[11px] text-slate-600">(no output)</div>
+          )}
+        </div>
+      );
+    }
   }
 
   if (!raw) return null;

@@ -51,6 +51,9 @@ function bundleFingerprint(root: string): string | null {
 
 /** Local zcode CLI version (briefly cached; only used for install logs). */
 let versionCache: { at: number; value?: string } | null = null;
+export function invalidateLocalZcodeVersion(): void {
+  versionCache = null;
+}
 export function localZcodeVersion(): string | undefined {
   if (!config.zcodeExecutable) return undefined;
   if (versionCache && Date.now() - versionCache.at < 60_000) return versionCache.value;

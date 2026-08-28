@@ -11,7 +11,10 @@ import { mcpRegistry } from '../mcp/registry.js';
 import { presetRegistry } from '../presets/registry.js';
 import { createLocalWorkdir, validateDir } from '../projects.js';
 import { memoryStore } from './memories.js';
+import { loadVibotConfig } from './config.js';
 import { createDelegateWatcher, teardownDelegateSession } from './delegate.js';
+import { vibotHub } from './hub.js';
+import { runCommand } from './runCommand.js';
 import type { LlmToolDef } from './llm.js';
 import type { AgentKind, ChatBlock, EffortLevel, PermissionMode } from '../../../shared/protocol.js';
 import crypto from 'node:crypto';
@@ -173,6 +176,31 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
       parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description:
+        'Run a SHORT, mostly read-only shell command on the local machine or a remote SSH host (ls, cat, ps, df, git status, systemctl status, …). Returns exitCode, combined stdout/stderr (truncated at 10KB), and timedOut. Destructive / power commands are server-blocked. Do NOT use this to edit code, install packages, write files, or run long jobs — delegate those to create_session / continue_session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The shell command to run (executed via bash -c).' },
+          host: {
+            type: 'string',
+            description: 'Remote host name from list_hosts. Omit for the local machine.',
+          },
+          cwd: { type: 'string', description: 'Working directory for the command.' },
+          timeout_ms: {
+            type: 'integer',
+            description: 'Kill the command after this many ms. Default 30000; max 120000.',
+            default: 30000,
+          },
+        },
+        required: ['command'],
+      },
+    },
+  },
 ];
 
 /** Render a session's normalized blocks into readable text for the model. */
@@ -302,6 +330,17 @@ function createCodingSession(input: {
   });
   hub.broadcastMeta(session.id);
 
+  // Always link so the Vibot sidebar can expand this chat and jump into the
+  // coding session — even when manage:"none" (no watcher / no wake).
+  if (input.vibotConvId) {
+    vibotHub.linkSession(input.vibotConvId, {
+      id: session.id,
+      title: session.title,
+      agent,
+      host: host ?? config.localName,
+    });
+  }
+
   let started = false;
   const shouldRun = input.run !== false;
   const hasPrompt = input.prompt.trim().length > 0;
@@ -401,6 +440,17 @@ async function continueCodingSession(input: {
     }
   }
 
+  // Link before send so the sidebar shows the child even if the turn fails to
+  // start (and so continue_session also surfaces previously-discovered sessions).
+  if (input.vibotConvId) {
+    vibotHub.linkSession(input.vibotConvId, {
+      id: sessionId,
+      title,
+      agent,
+      host: hostName,
+    });
+  }
+
   // Same conn strategy as create_session: the managed watcher subscribes for
   // the whole turn; otherwise fire-and-forget, unsubscribed right after.
   const conn = managed
@@ -422,6 +472,7 @@ class ToolError extends Error {}
 function configSummary(): string {
   const mcp = mcpRegistry.snapshot();
   const presets = presetRegistry.list();
+  const vibot = loadVibotConfig();
   return JSON.stringify(
     {
       defaults: {
@@ -440,6 +491,11 @@ function configSummary(): string {
         zcode: Boolean(config.zcodeExecutable),
       },
       hosts: hostRegistry.list().map((h) => ({ name: h.name, ssh: h.ssh, proxy: h.proxy })),
+      // Vibot's own settings (non-secret projection — no key, no baseUrl creds).
+      vibot: {
+        model: vibot.model,
+        reasoning_effort: vibot.reasoning_effort ?? null,
+      },
       mcp: {
         servers: mcp.servers.map((s) => ({ name: s.name, transport: s.transport })),
         enabled: mcp.enabled,
@@ -575,6 +631,15 @@ export async function dispatchTool(name: string, args: Record<string, any>, ctx:
       case 'delete_memory': {
         const ok = memoryStore.remove(String(args.name ?? ''));
         return ok ? `Deleted memory "${args.name}".` : `No memory named "${args.name}".`;
+      }
+      case 'run_command': {
+        const result = await runCommand({
+          command: String(args.command ?? ''),
+          host: args.host,
+          cwd: args.cwd,
+          timeoutMs: args.timeout_ms ?? args.timeoutMs,
+        });
+        return clip(JSON.stringify(result));
       }
       default:
         return `Unknown tool: ${name}`;

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
-import { Plus, MessageSquareText, Terminal, Trash2, Check, X, Pencil, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users } from '../lib/icons';
+import { Plus, Trash2, Check, X, Pencil, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users } from '../lib/icons';
+import { SessionStatusIcon } from './SessionStatusIcon';
 import type { SearchResult, SessionMeta } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { Logo } from './Logo';
@@ -414,47 +415,13 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
         }}
       >
         <div className="mt-0.5 flex w-4 shrink-0 flex-col items-center gap-1">
-          {cli ? (
-            <span
-              className={cn(
-                'select-none text-[14px] leading-none',
-                session.running && 'animate-pulse-dot text-accent',
-                !session.running && unread && 'text-accent',
-                !session.running && !unread && session.backgroundTasksRunning && 'text-amber-400',
-                !session.running && !unread && !session.backgroundTasksRunning && (active ? 'text-accent-soft' : 'text-slate-600'),
-              )}
-              title={
-                session.running
-                  ? undefined
-                  : unread
-                    ? 'New reply — click to view'
-                    : session.backgroundTasksRunning
-                      ? 'Reply viewed; background tasks still running'
-                      : undefined
-              }
-            >
-              ■
-            </span>
-          ) : session.running ? (
-            <span className="block h-4 w-4">
-              <span className="block h-2 w-2 translate-x-1 translate-y-1 animate-pulse-dot rounded-full bg-accent" />
-            </span>
-          ) : unread ? (
-            // Turn finished but not yet opened — a steady accent dot (no pulse)
-            // signals "new reply", distinct from the pulsing dot of an active run.
-            <span className="block h-4 w-4" title="New reply — click to view">
-              <span className="block h-2 w-2 translate-x-1 translate-y-1 rounded-full bg-accent" />
-            </span>
-          ) : session.backgroundTasksRunning ? (
-            <span className="block h-4 w-4" title="Reply viewed; background tasks still running">
-              <Terminal
-                className="h-4 w-4 text-amber-400"
-                aria-label="Reply viewed; background tasks still running"
-              />
-            </span>
-          ) : (
-            <MessageSquareText className={cn('h-4 w-4', active ? 'text-accent-soft' : 'text-slate-600')} />
-          )}
+          <SessionStatusIcon
+            running={session.running}
+            unread={unread}
+            backgroundTasksRunning={session.backgroundTasksRunning}
+            active={active}
+            cli={cli}
+          />
           {!editing && (
             <button
               onClick={(e) => {

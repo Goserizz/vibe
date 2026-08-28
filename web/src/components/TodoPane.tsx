@@ -243,7 +243,7 @@ export function TodoPane({ sessionId, layout = 'composer' }: { sessionId: string
           ) : (
             <ListTodo className="h-4 w-4 shrink-0 text-accent-soft" />
           )}
-          <span className={cn(cli ? 'text-[13px] text-slate-300' : 'text-[12.5px] font-medium text-slate-200')}>
+          <span className="text-[12.5px] font-medium text-slate-200">
             {cli ? `TodoWrite` : 'Tasks'}
           </span>
           <span className={cn(cli ? 'text-[12px] text-slate-600' : 'rounded-full bg-white/5 px-1.5 py-px text-[10px] font-medium text-slate-400')}>

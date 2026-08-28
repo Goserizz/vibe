@@ -5,16 +5,25 @@ import crypto from 'node:crypto';
 import { config } from './config.js';
 import type { ProjectDir } from '../../shared/protocol.js';
 
+const CWD_RE = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+/** Cap transcript scanning — cwd is always on an early record, but the first
+ *  user line can be megabytes long so a fixed 8 KiB peek misses it. */
+const CWD_SCAN_MAX_BYTES = 512 * 1024;
+
 /** Read the `cwd` recorded inside a transcript without parsing the whole file. */
 function readCwdFromTranscript(file: string): string | undefined {
   let fd: number | undefined;
   try {
     fd = fs.openSync(file, 'r');
-    const buf = Buffer.alloc(8192);
-    const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
-    const text = buf.subarray(0, bytes).toString('utf8');
-    for (const line of text.split('\n')) {
-      const m = line.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const chunk = Buffer.alloc(65536);
+    let scanned = 0;
+    let text = '';
+    while (scanned < CWD_SCAN_MAX_BYTES) {
+      const n = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (n === 0) break;
+      scanned += n;
+      text += chunk.subarray(0, n).toString('utf8');
+      const m = text.match(CWD_RE);
       if (m) return JSON.parse(`"${m[1]}"`);
     }
   } catch {

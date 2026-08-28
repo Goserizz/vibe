@@ -80,6 +80,7 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
           messages: live(),
           tools: VIBOT_TOOLS,
           temperature: opts.config.temperature,
+          reasoning_effort: opts.config.reasoning_effort,
           signal: ac.signal,
         })) {
           if (ev.type === 'text') {

@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, Paperclip, Square, X, Loader2, FileText, Image as ImageIcon } from '../lib/icons';
 import { useStore } from '../store/store';
 import { agentLabel, cn } from '../lib/format';
 import { api, ApiError } from '../lib/api';
 import { buildMessage } from '../lib/attachments';
 import { Glass } from './LiquidGlass';
+import { CliPromptTextarea } from './CliPromptTextarea';
 
 /** crypto.randomUUID needs a secure context; on plain-http LAN URLs it's
  *  undefined, so fall back (same pattern the store uses). */
@@ -15,13 +16,6 @@ function isImage(name: string): boolean {
   return IMAGE_EXTS.has(name.split('.').pop()?.toLowerCase() ?? '');
 }
 
-/** Code point at `index` for reverse-video block caret (CJK is one full cell). */
-function caretUnit(value: string, index: number): { unit: string; empty: boolean } {
-  if (index >= value.length) return { unit: '', empty: true };
-  const cp = value.codePointAt(index)!;
-  if (cp === 10) return { unit: '\n', empty: true };
-  return { unit: value.slice(index, index + (cp > 0xffff ? 2 : 1)), empty: false };
-}
 function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -56,17 +50,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // that Enter would wrongly send. We record when a composition ended and also
   // ignore Enter for a short window after — that rogue Enter always lands within
   // milliseconds of compositionend, whereas a real send comes much later.
-  const [caret, setCaret] = useState(0);
-  const [promptFocused, setPromptFocused] = useState(false);
   const composingRef = useRef(false);
   const endedAtRef = useRef(0);
-  const mirrorRef = useRef<HTMLDivElement>(null);
-
-  const syncCaret = () => {
-    const el = ref.current;
-    if (!el) return;
-    setCaret(el.selectionStart ?? 0);
-  };
 
   // Auto-grow up to a sensible cap.
   useEffect(() => {
@@ -75,26 +60,6 @@ export function Composer({ sessionId }: { sessionId: string }) {
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
-
-  useLayoutEffect(() => {
-    const ta = ref.current;
-    const mirror = mirrorRef.current;
-    if (!ta || !mirror) return;
-    const sync = () => {
-      mirror.scrollTop = ta.scrollTop;
-      mirror.scrollLeft = ta.scrollLeft;
-    };
-    sync();
-    ta.addEventListener('scroll', sync);
-    return () => ta.removeEventListener('scroll', sync);
-  }, [cli, text, caret, promptFocused]);
-
-  useEffect(() => {
-    if (!cli || !promptFocused) return;
-    const onSel = () => syncCaret();
-    document.addEventListener('selectionchange', onSel);
-    return () => document.removeEventListener('selectionchange', onSel);
-  }, [cli, promptFocused]);
 
   // Refocus when switching sessions or flipping chat/CLI chrome (the textarea remounts).
   useEffect(() => {
@@ -263,52 +228,27 @@ export function Composer({ sessionId }: { sessionId: string }) {
     </button>
   );
 
-  const textarea = (
-    <textarea
-      ref={ref}
-      value={text}
-      onChange={(e) => {
-        setText(e.target.value);
-        setCaret(e.target.selectionStart ?? e.target.value.length);
-      }}
-      onKeyDown={onKeyDown}
-      onKeyUp={syncCaret}
-      onClick={syncCaret}
-      onSelect={syncCaret}
-      onPaste={onPaste}
-      onFocus={() => {
-        setPromptFocused(true);
-        syncCaret();
-      }}
-      onBlur={() => setPromptFocused(false)}
-      onCompositionStart={() => {
-        composingRef.current = true;
-      }}
-      onCompositionEnd={() => {
-        composingRef.current = false;
-        endedAtRef.current = Date.now();
-      }}
-      rows={1}
-      placeholder={
-        running
-          ? `${agentName} is working…`
-          : activeTaskCount
-            ? `Message ${agentName} — ${activeTaskCount} background task${activeTaskCount === 1 ? '' : 's'} still running`
-            : isDesktop
-              ? cli
-                ? `${agentName} › enter to send`
-                : `Message ${agentName} — Enter to send, Shift+Enter for newline`
-              : `Message ${agentName}`
-      }
-      className={cn(
-        'max-h-[220px] flex-1 resize-none py-1.5 leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none',
-        cli ? 'cli-prompt bg-ink-950 font-mono text-[13.5px]' : 'bg-transparent text-[14.5px]',
-      )}
-    />
-  );
+  const placeholder = running
+    ? `${agentName} is working…`
+    : activeTaskCount
+      ? `Message ${agentName} — ${activeTaskCount} background task${activeTaskCount === 1 ? '' : 's'} still running`
+      : isDesktop
+        ? cli
+          ? `${agentName} › enter to send`
+          : `Message ${agentName} — Enter to send, Shift+Enter for newline`
+        : `Message ${agentName}`;
+
+  const compositionHandlers = {
+    onCompositionStart: () => {
+      composingRef.current = true;
+    },
+    onCompositionEnd: () => {
+      composingRef.current = false;
+      endedAtRef.current = Date.now();
+    },
+  };
 
   if (cli) {
-    const { unit: caretCh, empty: caretEmpty } = caretUnit(text, caret);
     return (
       <div className="shrink-0 bg-ink-950 px-4 pb-5 pt-2 md:px-6">
         <div className="mx-auto max-w-4xl">
@@ -331,20 +271,15 @@ export function Composer({ sessionId }: { sessionId: string }) {
               >
                 +
               </button>
-              <div className="cli-prompt-wrap min-w-0 flex-1">
-                {textarea}
-                {promptFocused && (
-                  <div ref={mirrorRef} className="cli-prompt-mirror" aria-hidden>
-                    {text.slice(0, caret)}
-                    <span className={cn('cli-cursor--prompt', caretEmpty && 'cli-cursor--prompt-empty')}>
-                      {caretEmpty ? '\u00a0' : caretCh}
-                    </span>
-                    {caretCh === '\n' ? '\n' : ''}
-                    {caretEmpty ? text.slice(caret) : text.slice(caret + caretCh.length)}
-                    {'\n'}
-                  </div>
-                )}
-              </div>
+              <CliPromptTextarea
+                textareaRef={ref}
+                value={text}
+                onChange={setText}
+                onKeyDown={onKeyDown}
+                onPaste={onPaste}
+                placeholder={placeholder}
+                {...compositionHandlers}
+              />
               {(running || busy || !isDesktop) && actionButton}
             </div>
           </div>
@@ -386,7 +321,17 @@ export function Composer({ sessionId }: { sessionId: string }) {
               >
                 <Paperclip className="h-4 w-4" />
               </button>
-              {textarea}
+              <textarea
+                ref={ref}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={onKeyDown}
+                onPaste={onPaste}
+                {...compositionHandlers}
+                rows={1}
+                placeholder={placeholder}
+                className="max-h-[220px] flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none"
+              />
               {actionButton}
             </div>
           </Glass>

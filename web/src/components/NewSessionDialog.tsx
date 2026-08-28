@@ -203,16 +203,22 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     setEffort(defaultEffortForAgent(agent));
   }, [agent, effort, effortLevels, modelOpt]);
 
-  // Local: recently used local project dirs. Remote: cwds seen in that host's sessions.
+  // Local: Claude recent projects + local session cwds. Remote: that host's session cwds.
   const suggestions = useMemo(() => {
+    const seen = new Map<string, { path: string; name: string }>();
     if (isRemote) {
-      const seen = new Map<string, { path: string; name: string }>();
       for (const s of sessions) {
         if (s.host === host && !s.ephemeral && !seen.has(s.cwd)) seen.set(s.cwd, { path: s.cwd, name: basename(s.cwd) });
       }
-      return [...seen.values()];
+    } else {
+      for (const p of projects) {
+        if (!seen.has(p.path)) seen.set(p.path, { path: p.path, name: p.name });
+      }
+      for (const s of sessions) {
+        if (!s.host && !s.ephemeral && !seen.has(s.cwd)) seen.set(s.cwd, { path: s.cwd, name: basename(s.cwd) });
+      }
     }
-    return projects.map((p) => ({ path: p.path, name: p.name }));
+    return [...seen.values()];
   }, [isRemote, host, sessions, projects]);
 
   const filtered = useMemo(() => {

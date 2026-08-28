@@ -660,6 +660,7 @@ class SessionRuntime {
           permissionMode,
           effort,
           resume: this.claudeSessionId,
+          vibeSessionId: this.sessionId,
           // ZCode consumes MCP from ~/.zcode/cli/config.json, not per-session.
           remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
         },

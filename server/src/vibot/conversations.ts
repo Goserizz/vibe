@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import type { LlmMessage } from './llm.js';
-import type { ChatBlock, VibotConvMeta } from '../../../shared/protocol.js';
+import type { AgentKind, ChatBlock, VibotConvMeta, VibotLinkedSession } from '../../../shared/protocol.js';
 
 /** Persisted shape of one Vibot conversation. */
 export interface StoredConv {
@@ -13,6 +13,8 @@ export interface StoredConv {
   createdAt: number;
   updatedAt: number;
   messageCount: number;
+  /** Coding sessions this conversation created or continued (newest first). */
+  sessions: VibotLinkedSession[];
   /** Raw OpenAI-format LLM history — replayed verbatim into the model so
    *  multi-turn tool-calling resumes losslessly. */
   messages: LlmMessage[];
@@ -53,6 +55,7 @@ class ConvStore {
         const raw = fs.readFileSync(path.join(this.dir(), f), 'utf8');
         const conv = JSON.parse(raw) as StoredConv;
         if (conv && conv.id && Array.isArray(conv.messages)) {
+          if (!Array.isArray(conv.sessions)) conv.sessions = [];
           this.convs.set(conv.id, conv);
         }
       } catch (err) {
@@ -73,7 +76,7 @@ class ConvStore {
   list(): VibotConvMeta[] {
     this.load();
     return [...this.convs.values()]
-      .map((c) => ({ ...c, running: false }))
+      .map((c) => toMeta(c, false))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
@@ -91,6 +94,7 @@ class ConvStore {
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
+      sessions: [],
       messages: [],
       blocks: [],
     };
@@ -104,6 +108,46 @@ class ConvStore {
     const conv = this.convs.get(id);
     if (!conv) return undefined;
     conv.title = title.trim() || conv.title;
+    conv.updatedAt = Date.now();
+    this.persist(conv);
+    return conv;
+  }
+
+  /** Record (or refresh) a coding session this Vibot chat opened. Newest first;
+   *  re-linking an existing id moves it to the front and updates its title. */
+  linkSession(
+    id: string,
+    session: { id: string; title: string; agent: AgentKind; host: string },
+  ): StoredConv | undefined {
+    this.load();
+    const conv = this.convs.get(id);
+    if (!conv) return undefined;
+    if (!Array.isArray(conv.sessions)) conv.sessions = [];
+    const linked: VibotLinkedSession = {
+      id: session.id,
+      title: session.title,
+      agent: session.agent,
+      host: session.host,
+      linkedAt: Date.now(),
+    };
+    conv.sessions = [linked, ...conv.sessions.filter((s) => s.id !== session.id)];
+    // Cap so a long-lived orchestrator chat can't bloat the sidebar forever.
+    if (conv.sessions.length > 40) conv.sessions = conv.sessions.slice(0, 40);
+    conv.updatedAt = Date.now();
+    this.persist(conv);
+    return conv;
+  }
+
+  /** Drop a coding-session link from this Vibot chat. Does not delete or stop
+   *  the coding session itself — only removes the sidebar/rail association. */
+  unlinkSession(id: string, sessionId: string): StoredConv | undefined {
+    this.load();
+    const conv = this.convs.get(id);
+    if (!conv) return undefined;
+    if (!Array.isArray(conv.sessions)) conv.sessions = [];
+    const before = conv.sessions.length;
+    conv.sessions = conv.sessions.filter((s) => s.id !== sessionId);
+    if (conv.sessions.length === before) return undefined; // session was not linked
     conv.updatedAt = Date.now();
     this.persist(conv);
     return conv;
@@ -167,5 +211,6 @@ export function toMeta(c: StoredConv, running: boolean): VibotConvMeta {
     updatedAt: c.updatedAt,
     messageCount: c.messageCount,
     running,
+    sessions: Array.isArray(c.sessions) ? c.sessions : [],
   };
 }

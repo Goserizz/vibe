@@ -1,6 +1,7 @@
 import { log } from '../log.js';
 import { hub, CallbackConn } from '../ws/hub.js';
 import { vibotHub } from './hub.js';
+import { isDelegateWakeActive, markDelegateWake } from './wakeSuppress.js';
 import type { PermissionDecision, ServerEvent } from '../../../shared/protocol.js';
 
 /**
@@ -9,19 +10,14 @@ import type { PermissionDecision, ServerEvent } from '../../../shared/protocol.j
  *
  *  - **During the run**: every permission prompt the agent raises is resolved
  *    automatically per a whitelist policy, and plans (ExitPlanMode) are approved.
- *  - **On completion**: the agent ran in the background, so when it finishes
- *    (foreground idle AND no native background tasks left) Vibot is *woken* — a
- *    new Vibot turn starts, seeded with the outcome tally, so it can report
- *    results and decide on next steps. Exactly how Claude's own background-task
- *    completion re-engages the agent.
+ *  - **On each foreground turn end**: Vibot is *woken* with an outcome tally
+ *    (and a note if native background tasks are still running). A new turn on
+ *    the same session resets the wake latch so every turn can notify Vibot.
  *
  * The watcher is a long-lived {@link CallbackConn} subscribed to the delegate
  * session. It outlives Vibot's own turn (which ends as soon as `create_session`
  * returns) because prompts and task notifications arrive asynchronously. It
  * tears itself down after a few minutes of inactivity so it never leaks.
- *
- * This layers cleanly on top of the permission auto-approval (during-run) — the
- * wake is the after-run counterpart, and the two never overlap.
  */
 
 const IDLE_TEARDOWN_MS = 3 * 60_000;
@@ -52,18 +48,23 @@ interface Manager {
   commands: number;
   plans: number;
   errored: boolean;
-  /** True once we've woken Vibot for this delegate run. */
+  /** True after a wake for the current foreground turn; cleared when a new turn starts. */
   woken: boolean;
   /** Foreground model turn currently running (run_state). */
   foregroundRunning: boolean;
-  /** Native background task ids still in flight (task_upsert). */
-  activeTasks: Set<string>;
+  /** Native background tasks still in flight (task_upsert) — id → short label for wake summaries. */
+  activeTasks: Map<string, string>;
+  /** Recently settled tasks (for wake-prompt detail); capped, newest last. */
+  settledTasks: Array<{ id: string; label: string; status: string }>;
   lastEventAt: number;
   timer: ReturnType<typeof setInterval> | null;
   torn: boolean;
 }
 
 const managers = new Map<string, Manager>();
+
+/** Re-export suppress helpers so callers (zcode) can import from delegate. */
+export { isDelegateWakeActive, markDelegateWake, peekDelegateWakePrompt, refreshDelegateWake } from './wakeSuppress.js';
 
 /**
  * Create the watcher for a delegate session. The returned connection must be
@@ -83,7 +84,8 @@ export function createDelegateWatcher(sessionId: string, title: string, vibotCon
     errored: false,
     woken: false,
     foregroundRunning: true, // the turn is starting; assume busy until proven idle
-    activeTasks: new Set(),
+    activeTasks: new Map(),
+    settledTasks: [],
     lastEventAt: Date.now(),
     timer: null,
     torn: false,
@@ -126,12 +128,25 @@ function handle(m: Manager, msg: ServerEvent): void {
       const ev = msg.ev;
       if (ev.k === 'run_state') {
         m.foregroundRunning = ev.running;
+        // A new foreground turn can wake Vibot again when it ends — except
+        // turns that start inside the post-wake suppress window (zcode native
+        // task notifications / polled wakes), which must not re-arm the latch.
+        if (ev.running && !isDelegateWakeActive(m.sessionId)) m.woken = false;
         maybeWake(m);
       } else if (ev.k === 'task_upsert') {
         const id = ev.task.id;
-        if (ACTIVE_TASK_STATUS.has(ev.task.status)) m.activeTasks.add(id);
-        else m.activeTasks.delete(id);
-        maybeWake(m);
+        const label = (ev.task.description || ev.task.command || id).trim() || id;
+        const short = label.length > 80 ? `${label.slice(0, 77)}…` : label;
+        if (ACTIVE_TASK_STATUS.has(ev.task.status)) {
+          m.activeTasks.set(id, short);
+        } else {
+          m.activeTasks.delete(id);
+          m.settledTasks = [
+            ...m.settledTasks.filter((t) => t.id !== id),
+            { id, label: short, status: ev.task.status },
+          ].slice(-6);
+        }
+        // Background tasks do not gate wake; tracking is for the next wake summary only.
       } else if (ev.k === 'error') {
         m.errored = true;
       }
@@ -143,16 +158,21 @@ function handle(m: Manager, msg: ServerEvent): void {
 }
 
 /**
- * Wake Vibot once the delegate is truly idle — foreground turn finished AND no
- * native background tasks still in flight. Mirrors how Claude waits for its
- * background tasks before closing a turn. Fires at most once per delegate run.
+ * Wake Vibot when the delegate's foreground turn finishes. Background tasks may
+ * still be running — the prompt says so. At most one wake per foreground turn
+ * (`woken` resets when the next turn starts).
  */
 function maybeWake(m: Manager): void {
-  if (m.woken || m.foregroundRunning || m.activeTasks.size > 0) return;
+  if (m.woken || m.foregroundRunning) return;
   m.woken = true;
-  const summary = summaryText(m, true);
-  log.info(`vibot: delegate ${m.sessionId} finished — waking conv ${m.vibotConvId}`);
-  vibotHub.wake(m.vibotConvId, summary);
+  const note = noteText(m);
+  const prompt = promptText(m);
+  // Suppress zcode polled/native-steered duplicates BEFORE vibotHub.wake so the
+  // coding transport's service loop (which runs right after onTurnState false)
+  // already sees the window.
+  markDelegateWake(m.sessionId, prompt);
+  log.info(`vibot: delegate ${m.sessionId} turn finished — waking conv ${m.vibotConvId}`);
+  vibotHub.wake(m.vibotConvId, note, prompt, m.sessionId);
 }
 
 function maybeIdleTeardown(m: Manager): void {
@@ -172,17 +192,54 @@ function teardown(sessionId: string): void {
     /* runtime may already be gone */
   }
   managers.delete(sessionId);
-  // If we never got to wake Vibot (e.g. the session was deleted mid-run, or it
-  // never went idle), leave a final static note so the tally isn't lost.
-  if (!m.woken) vibotHub.appendNote(m.vibotConvId, summaryText(m, true));
+  // If we never woke for the current turn (e.g. session deleted mid-run), leave
+  // a final static note so the tally isn't lost. Normal multi-turn wakes already
+  // fire on each foreground idle, so this is mostly a mid-run delete path.
+  if (!m.woken) vibotHub.appendNote(m.vibotConvId, noteText(m));
   log.info(`vibot: stopped watching delegate session ${sessionId} (approved ${m.approved})`);
 }
 
-/** Build the one-line outcome summary shown to the user / fed to the wake turn. */
-function summaryText(m: Manager, _final: boolean): string {
+/** Short coding-style system notice (dashed divider in the chat UI). */
+function noteText(m: Manager): string {
   const parts: string[] = [`approved ${m.approved} tool call${m.approved === 1 ? '' : 's'}`];
   if (m.commands) parts.push(`${m.commands} command${m.commands === 1 ? '' : 's'}`);
   if (m.plans) parts.push(`${m.plans} plan${m.plans === 1 ? '' : 's'}`);
-  const tail = m.errored ? ' ⚠️ finished with errors' : ' · finished';
-  return `🤖 Delegate “${m.title}” ${parts.join(', ')}.${tail} Review the outcome and update the user; use read_session if you need details.`;
+  const status = m.errored
+    ? 'finished with errors'
+    : m.activeTasks.size > 0
+      ? `${m.activeTasks.size} background task${m.activeTasks.size === 1 ? '' : 's'} still running`
+      : 'finished';
+  // Mirrors coding hub emitWakeNotice: short title + reason to re-engage.
+  return `委托「${m.title}」回合结束 · ${parts.join(', ')} · ${status}，唤醒 Vibot 继续`;
+}
+
+/** Full silent-turn seed for the LLM (not shown as a user bubble). */
+function promptText(m: Manager): string {
+  const parts: string[] = [`approved ${m.approved} tool call${m.approved === 1 ? '' : 's'}`];
+  if (m.commands) parts.push(`${m.commands} command${m.commands === 1 ? '' : 's'}`);
+  if (m.plans) parts.push(`${m.plans} plan${m.plans === 1 ? '' : 's'}`);
+  const tail = m.errored ? ' finished with errors' : ' finished';
+  const bgLabels = [...m.activeTasks.values()];
+  let bgNote = '';
+  if (bgLabels.length > 0) {
+    const shown = bgLabels.slice(0, 3).map((l) => `"${l}"`).join(', ');
+    const more = bgLabels.length > 3 ? ` (+${bgLabels.length - 3} more)` : '';
+    bgNote =
+      ` ${bgLabels.length} background task${bgLabels.length === 1 ? '' : 's'} still running` +
+      ` (${shown}${more}) — outcome may not be final yet; you can remind the user to check back later.`;
+  }
+  let settledNote = '';
+  if (m.settledTasks.length > 0) {
+    const lines = m.settledTasks
+      .slice(-4)
+      .map((t) => `- ${t.id}: ${t.status} — ${t.label}`)
+      .join('\n');
+    settledNote = ` Recent background-task updates:\n${lines}\n`;
+  }
+  return (
+    `Delegate "${m.title}" (session ${m.sessionId}) ${parts.join(', ')}.${tail}.${bgNote}` +
+    settledNote +
+    ` Review the outcome (call read_session with sessionId "${m.sessionId}" if you need details)` +
+    ` and update the user; then decide on any next steps.`
+  );
 }

@@ -942,8 +942,16 @@ html.cli-mode .code-block {
 }
 
 html.cli-mode textarea,
+html.cli-mode select,
 html.cli-mode input:not([type='color']):not([type='checkbox']):not([type='radio']) {
   background-color: rgb(var(--tui-bg));
+}
+
+/* BackgroundTasksPane / VibotAgentsPane cards: kill residual glass translucency
+   so the rail matches solid TUI chrome (TodoPane already switches class in JS). */
+html.cli-mode .task-pane {
+  background: rgb(var(--tui-bg)) !important;
+  border: 1px solid rgb(var(--ink-700));
 }
 
 html.cli-mode button:focus-visible,
@@ -1086,7 +1094,8 @@ html.hc *::-webkit-scrollbar-thumb {
    them from --hc-line (box-shadows stay killed by cli-mode's none!important,
    so the border is the whole edge here). */
 html.hc.cli-mode .new-session-panel,
-html.hc.cli-mode .vglass.vglass--thin:not(.app-titlebar) {
+html.hc.cli-mode .vglass.vglass--thin:not(.app-titlebar),
+html.hc.cli-mode .task-pane {
   border-color: rgb(var(--hc-line)) !important;
 }
 html.hc.cli-mode .app-titlebar {

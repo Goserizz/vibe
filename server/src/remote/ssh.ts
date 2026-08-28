@@ -88,9 +88,11 @@ export interface SshResult {
 export function sshExec(
   target: string,
   remoteCmd: string,
-  opts: { timeoutMs?: number; input?: string | Buffer } = {},
+  opts: { timeoutMs?: number; input?: string | Buffer; /** Default true. Set false so killing this client tears down the remote command (no ControlMaster). */ mux?: boolean } = {},
 ): Promise<SshResult> {
-  const { bin, args } = sshArgv(target, remoteCmd);
+  const useMux = opts.mux !== false;
+  const { bin, base } = sshBin();
+  const args = [...base, ...COMMON_OPTS, ...(useMux ? muxOpts(target) : []), target, remoteCmd];
   return new Promise((resolve) => {
     const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     // Collect output as Buffer chunks and concat once at the end. String += on

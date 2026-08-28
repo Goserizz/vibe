@@ -383,7 +383,7 @@ export const api = {
 
   getVibotConfig: () => request<{ config: VibotConfigClient }>('/vibot/config').then((r) => r.config),
 
-  saveVibotConfig: (input: { baseUrl?: string; apiKey?: string; model?: string; systemPrompt?: string; temperature?: number }) =>
+  saveVibotConfig: (input: { baseUrl?: string; apiKey?: string; model?: string; systemPrompt?: string; temperature?: number; reasoning_effort?: string | null }) =>
     request<{ config: VibotConfigClient }>('/vibot/config', { method: 'PUT', body: JSON.stringify(input) }).then((r) => r.config),
 
   listVibotConversations: () => request<{ convs: VibotConvMeta[] }>('/vibot/conversations').then((r) => r.convs),
@@ -395,6 +395,10 @@ export const api = {
     request<{ conv: VibotConvMeta }>(`/vibot/conversations/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }).then((r) => r.conv),
 
   deleteVibotConversation: (id: string) => request<{ ok: boolean }>(`/vibot/conversations/${id}`, { method: 'DELETE' }),
+
+  /** Unlink a coding session from a Vibot chat (does not delete the session). */
+  unlinkVibotSession: (convId: string, sessionId: string) =>
+    request<{ conv: VibotConvMeta }>(`/vibot/conversations/${convId}/sessions/${sessionId}`, { method: 'DELETE' }).then((r) => r.conv),
 
   getVibotMessages: (id: string) => request<{ blocks: ChatBlock[]; seq: number }>(`/vibot/conversations/${id}/messages`),
 

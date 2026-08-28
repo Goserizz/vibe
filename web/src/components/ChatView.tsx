@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from '../lib/icons';
 import type { EffortLevel, PermissionMode } from '@shared/protocol';
 import { api } from '../lib/api';
@@ -8,6 +8,7 @@ import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
 import { latestTodos, TodoPane } from './TodoPane';
 import { BackgroundTasksPane } from './BackgroundTasksPane';
+import { TaskRail } from './TaskRail';
 import { Menu } from './Menu';
 import { Logo } from './Logo';
 import {
@@ -29,15 +30,21 @@ interface ChatViewProps {
   rightTab?: 'terminal' | 'files' | null;
   onToggleTerminal?: () => void;
   onToggleFiles?: () => void;
+  /** Replaces the mobile hamburger in the header (e.g. Vibot ← Back). */
+  headerStart?: ReactNode;
+  /** Extra controls after Terminal/Files (e.g. “Open in coding”). */
+  headerEnd?: ReactNode;
 }
 
-const TASK_RAIL_MIN_WIDTH = 260;
-const TASK_RAIL_DEFAULT_WIDTH = 320;
-const TASK_RAIL_MAX_WIDTH = 640;
-const TASK_RAIL_CHAT_MIN_WIDTH = 360;
-const TASK_RAIL_WIDTH_KEY = 'vibe.taskRailWidth';
-
-export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTerminal, onToggleFiles }: ChatViewProps) {
+export function ChatView({
+  onOpenSidebar,
+  onNewSession,
+  rightTab,
+  onToggleTerminal,
+  onToggleFiles,
+  headerStart,
+  headerEnd,
+}: ChatViewProps) {
   const activeId = useStore((s) => s.activeId);
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
   const viewMode = useStore((s) => s.viewMode);
@@ -62,13 +69,20 @@ export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTermin
 
   return (
     <main className={cn('relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-950', viewMode === 'cli' && 'cli-surface')}>
-      <Header onOpenSidebar={onOpenSidebar} rightTab={rightTab} onToggleTerminal={onToggleTerminal} onToggleFiles={onToggleFiles} />
+      <Header
+        onOpenSidebar={onOpenSidebar}
+        rightTab={rightTab}
+        onToggleTerminal={onToggleTerminal}
+        onToggleFiles={onToggleFiles}
+        headerStart={headerStart}
+        headerEnd={headerEnd}
+      />
       <div className="flex min-h-0 flex-1">
         <section className="relative flex min-w-0 flex-1 flex-col">
           <MessageList sessionId={activeId} bottomPad={overlayHeight} />
           {/* Composer (+ permission prompts) floats over the conversation. On
               compact viewports the task panes stay in this stack; wide desktop
-              moves them into DesktopTaskRail instead. */}
+              moves them into TaskRail instead. */}
           <div className={cn('pointer-events-none absolute inset-x-0 bottom-0 z-20', viewMode === 'cli' && 'border-t border-ink-700 bg-ink-950')}>
             <div ref={overlayRef} className="pointer-events-auto">
               <PermissionPrompt sessionId={activeId} />
@@ -80,132 +94,23 @@ export function ChatView({ onOpenSidebar, onNewSession, rightTab, onToggleTermin
             </div>
           </div>
         </section>
-        {!rightTab && <DesktopTaskRail sessionId={activeId} />}
+        {!rightTab && <ChatTaskRail sessionId={activeId} />}
       </div>
     </main>
   );
 }
 
-/** Wide-screen task column. It only claims horizontal space when this session
- *  actually has a todo/background-task list; narrower screens retain the
- *  composer-stack layout above. Terminal/Files temporarily take its place. */
-function DesktopTaskRail({ sessionId }: { sessionId: string }) {
+/** Only mounts TaskRail when this session has todos or background tasks. */
+function ChatTaskRail({ sessionId }: { sessionId: string }) {
   const blocks = useStore((s) => s.views[sessionId]?.blocks);
   const backgroundTasks = useStore((s) => s.tasks[sessionId]);
   const hasTodos = useMemo(() => Boolean(latestTodos(blocks)?.length), [blocks]);
-  const railRef = useRef<HTMLElement>(null);
-  const dragCleanupRef = useRef<(() => void) | null>(null);
-  const [width, setWidth] = useState(() => {
-    let saved = Number.NaN;
-    try {
-      saved = Number(localStorage.getItem(TASK_RAIL_WIDTH_KEY));
-    } catch {
-      /* use the default when storage is unavailable */
-    }
-    return Number.isFinite(saved) && saved >= TASK_RAIL_MIN_WIDTH
-      ? Math.min(saved, TASK_RAIL_MAX_WIDTH)
-      : TASK_RAIL_DEFAULT_WIDTH;
-  });
-
-  const maxWidth = () => {
-    const available = railRef.current?.parentElement?.clientWidth ?? window.innerWidth;
-    return Math.max(TASK_RAIL_MIN_WIDTH, Math.min(TASK_RAIL_MAX_WIDTH, available - TASK_RAIL_CHAT_MIN_WIDTH));
-  };
-  const clampWidth = (value: number) => Math.max(TASK_RAIL_MIN_WIDTH, Math.min(maxWidth(), value));
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(TASK_RAIL_WIDTH_KEY, String(width));
-    } catch {
-      /* ignore unavailable storage */
-    }
-  }, [width]);
-
-  useEffect(() => {
-    const clampToViewport = () => {
-      const rail = railRef.current;
-      // The same component stays mounted on compact viewports but is hidden by
-      // CSS. Do not let a phone-sized viewport overwrite the saved desktop width.
-      if (!rail || getComputedStyle(rail).display === 'none') return;
-      const available = rail.parentElement?.clientWidth ?? window.innerWidth;
-      const maximum = Math.max(
-        TASK_RAIL_MIN_WIDTH,
-        Math.min(TASK_RAIL_MAX_WIDTH, available - TASK_RAIL_CHAT_MIN_WIDTH),
-      );
-      setWidth((value) => Math.max(TASK_RAIL_MIN_WIDTH, Math.min(maximum, value)));
-    };
-    window.addEventListener('resize', clampToViewport);
-    clampToViewport();
-    return () => window.removeEventListener('resize', clampToViewport);
-  }, []);
-
-  useEffect(() => () => dragCleanupRef.current?.(), []);
-
-  const resizeBy = (delta: number) => setWidth((value) => clampWidth(value + delta));
-  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const rail = railRef.current;
-    if (!rail || (event.pointerType === 'mouse' && event.button !== 0)) return;
-    event.preventDefault();
-    dragCleanupRef.current?.();
-    const right = rail.getBoundingClientRect().right;
-    const onMove = (moveEvent: PointerEvent) => setWidth(clampWidth(right - moveEvent.clientX));
-    const previousUserSelect = document.body.style.userSelect;
-    const previousCursor = document.body.style.cursor;
-    const finishDrag = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', finishDrag);
-      window.removeEventListener('pointercancel', finishDrag);
-      document.body.style.userSelect = previousUserSelect;
-      document.body.style.cursor = previousCursor;
-      if (dragCleanupRef.current === finishDrag) dragCleanupRef.current = null;
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', finishDrag);
-    window.addEventListener('pointercancel', finishDrag);
-    dragCleanupRef.current = finishDrag;
-    document.body.style.userSelect = 'none';
-    document.body.style.cursor = 'col-resize';
-  };
-
   if (!hasTodos && !backgroundTasks?.length) return null;
-
   return (
-    <aside
-      ref={railRef}
-      aria-label="Session tasks"
-      style={{ width: `${width}px` }}
-      className="relative hidden shrink-0 border-l border-white/5 bg-ink-900/25 pt-16 lg:flex lg:flex-col"
-    >
-      <div
-        role="separator"
-        aria-label="Resize task panel"
-        aria-orientation="vertical"
-        aria-valuemin={TASK_RAIL_MIN_WIDTH}
-        aria-valuemax={Math.round(maxWidth())}
-        aria-valuenow={Math.round(width)}
-        tabIndex={0}
-        title="Drag to resize · Double-click to reset"
-        onPointerDown={startDrag}
-        onDoubleClick={() => setWidth(clampWidth(TASK_RAIL_DEFAULT_WIDTH))}
-        onKeyDown={(event) => {
-          if (event.key === 'ArrowLeft') {
-            event.preventDefault();
-            resizeBy(16);
-          } else if (event.key === 'ArrowRight') {
-            event.preventDefault();
-            resizeBy(-16);
-          } else if (event.key === 'Home') {
-            event.preventDefault();
-            setWidth(TASK_RAIL_MIN_WIDTH);
-          }
-        }}
-        className="absolute inset-y-0 -left-1 z-20 hidden w-2 cursor-col-resize touch-none transition-colors hover:bg-accent/30 focus:bg-accent/30 focus:outline-none lg:block"
-      />
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        <BackgroundTasksPane sessionId={sessionId} layout="rail" />
-        <TodoPane sessionId={sessionId} layout="rail" />
-      </div>
-    </aside>
+    <TaskRail aria-label="Session tasks">
+      <BackgroundTasksPane sessionId={sessionId} layout="rail" />
+      <TodoPane sessionId={sessionId} layout="rail" />
+    </TaskRail>
   );
 }
 
@@ -252,7 +157,21 @@ function ControlChip({
   );
 }
 
-function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { onOpenSidebar: () => void; rightTab?: 'terminal' | 'files' | null; onToggleTerminal?: () => void; onToggleFiles?: () => void }) {
+function Header({
+  onOpenSidebar,
+  rightTab,
+  onToggleTerminal,
+  onToggleFiles,
+  headerStart,
+  headerEnd,
+}: {
+  onOpenSidebar: () => void;
+  rightTab?: 'terminal' | 'files' | null;
+  onToggleTerminal?: () => void;
+  onToggleFiles?: () => void;
+  headerStart?: ReactNode;
+  headerEnd?: ReactNode;
+}) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
   const cli = useStore((s) => s.viewMode) === 'cli';
   const desktop = useMdUp();
@@ -266,9 +185,11 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
         thin
       >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-      <button onClick={onOpenSidebar} className="rounded-lg p-1.5 text-slate-400 hover:bg-ink-800 md:hidden">
-        <MenuIcon className="h-5 w-5" />
-      </button>
+      {headerStart ?? (
+        <button onClick={onOpenSidebar} className="rounded-lg p-1.5 text-slate-400 hover:bg-ink-800 md:hidden">
+          <MenuIcon className="h-5 w-5" />
+        </button>
+      )}
 
       <div className="min-w-0 flex-1">
         <div className="truncate text-[14px] font-medium text-slate-100">{session.title}</div>
@@ -315,6 +236,7 @@ function Header({ onOpenSidebar, rightTab, onToggleTerminal, onToggleFiles }: { 
           {cli ? 'files' : <FolderOpen className="h-4 w-4" />}
         </ControlChip>
       </button>
+      {headerEnd}
       </div>
       </Glass>
     </header>
