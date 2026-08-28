@@ -68,9 +68,18 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const assistantId = `va_${crypto.randomUUID()}`;
+      const thinkingId = `vt_${crypto.randomUUID()}`;
       let text = '';
+      let thinking = '';
       let blockOpen = false;
+      let thinkingOpen = false;
       let toolCalls: LlmToolCall[] = [];
+
+      const closeThinking = () => {
+        if (!thinkingOpen) return;
+        thinkingOpen = false;
+        cb.onEvent({ k: 'block_end', id: thinkingId, text: thinking });
+      };
 
       try {
         for await (const ev of streamChat({
@@ -83,7 +92,21 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
           reasoning_effort: opts.config.reasoning_effort,
           signal: ac.signal,
         })) {
-          if (ev.type === 'text') {
+          if (ev.type === 'thinking') {
+            if (!thinkingOpen) {
+              thinkingOpen = true;
+              cb.onEvent({
+                k: 'block',
+                block: { id: thinkingId, kind: 'thinking', text: '', streaming: true, ts: Date.now() },
+              });
+            }
+            if (ev.delta) {
+              thinking += ev.delta;
+              cb.onEvent({ k: 'delta', id: thinkingId, field: 'text', chunk: ev.delta });
+            }
+          } else if (ev.type === 'text') {
+            // Reasoning finishes when visible content (or tools) begins.
+            closeThinking();
             if (!blockOpen) {
               blockOpen = true;
               cb.onEvent({ k: 'block', block: { id: assistantId, kind: 'assistant', text: '', streaming: true, ts: Date.now() } });
@@ -93,6 +116,7 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
               cb.onEvent({ k: 'delta', id: assistantId, field: 'text', chunk: ev.delta });
             }
           } else if (ev.type === 'tool_calls') {
+            closeThinking();
             toolCalls = ev.calls;
           } else if (ev.type === 'done' && ev.usage) {
             const u = ev.usage;
@@ -103,11 +127,13 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
       } catch (err) {
         if (ac.signal.aborted) {
           log.debug('vibot run aborted');
+          closeThinking();
           if (blockOpen) cb.onEvent({ k: 'block_end', id: assistantId, text });
           return { newMessages: turn };
         }
         const msg = err instanceof LlmError ? err.message : err instanceof Error ? err.message : String(err);
         log.warn('vibot llm error:', msg);
+        closeThinking();
         if (blockOpen) cb.onEvent({ k: 'block_end', id: assistantId, text });
         // Keep a partial assistant message so the exchange stays well-formed.
         if (text) turn.push({ role: 'assistant', content: text });
@@ -115,10 +141,14 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
         return { newMessages: turn, error: msg };
       }
 
+      // Stream ended with reasoning only (no text / tools yet) — close cleanly.
+      closeThinking();
+
       // Finalize the streamed assistant block.
       if (blockOpen) cb.onEvent({ k: 'block_end', id: assistantId, text });
 
-      // Record the assistant turn (text and/or tool calls).
+      // Record the assistant turn (text and/or tool calls). Thinking is UI-only
+      // and must not enter the LLM message history.
       if (text || toolCalls.length) {
         const aMsg: LlmMessage = { role: 'assistant', content: text || null };
         if (toolCalls.length) aMsg.tool_calls = toolCalls;

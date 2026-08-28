@@ -40,6 +40,7 @@ export interface LlmToolDef {
 
 export type LlmStreamEvent =
   | { type: 'text'; delta: string }
+  | { type: 'thinking'; delta: string }
   | { type: 'tool_calls'; calls: LlmToolCall[] }
   | { type: 'done'; usage?: { inputTokens?: number; outputTokens?: number } };
 
@@ -165,6 +166,9 @@ export async function* streamChat(opts: StreamChatOpts): AsyncIterable<LlmStream
         }
         const choice = chunk?.choices?.[0];
         const delta = choice?.delta;
+        // DeepSeek / GLM-style reasoning stream (UI-only; not fed back into messages).
+        const reasoning = delta?.reasoning_content ?? delta?.reasoning;
+        if (reasoning) yield { type: 'thinking', delta: String(reasoning) };
         if (delta?.content) yield { type: 'text', delta: String(delta.content) };
         if (Array.isArray(delta?.tool_calls)) {
           for (const tc of delta.tool_calls) {
