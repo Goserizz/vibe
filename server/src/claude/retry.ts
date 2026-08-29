@@ -23,9 +23,12 @@ export function isTransientError(err: unknown): boolean {
  *  "Internal error" is Cursor's generic JSON-RPC 500 — observed in bursts that
  *  clear on manual resend, always before any content streamed. "app-server
  *  closed" and SSH "kex_exchange_identification" resets are transport blips
- *  (SSH MaxStartups throttling, network drops) that a backoff retry clears. */
+ *  (SSH MaxStartups throttling, network drops) that a backoff retry clears.
+ *  "RetriableError … http/2 stream closed" is cursor-agent's wrapper for the
+ *  backend gRPC stream being cancelled (network jitter / proxies cutting long
+ *  connections), often mid-turn after content already streamed. */
 export function mentionsTransient(text: string): boolean {
-  return /529|overloaded|internal error|app-server closed|kex_exchange_identification|访问量过大|过载/i.test(text);
+  return /529|overloaded|internal error|app-server closed|kex_exchange_identification|http\/2 stream closed|RetriableError|访问量过大|过载/i.test(text);
 }
 
 /** Backoff (ms) for attempt N (0-based): base * 2^N + small jitter. */

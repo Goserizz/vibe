@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../config.js';
 import { log } from '../log.js';
@@ -112,6 +113,14 @@ function acpUnavailable(error: string): boolean {
   return /(?:unknown|unrecognized|invalid)\s+(?:command|subcommand).*\bacp\b|unknown command ['"]?acp/i.test(error);
 }
 
+/** Synthetic follow-up for a mid-stream auto-resume. ACP has no "continue the
+ *  cancelled turn" primitive — after session/resume the turn only advances via
+ *  session/prompt — so we nudge the model to pick up where the cancelled turn
+ *  stopped instead of re-sending the original prompt, which would re-run (and
+ *  duplicate in the UI) everything already streamed. */
+const RESUME_PROMPT =
+  'Your previous reply was cut off by a transient network error. Continue exactly where you left off; do not repeat content you already produced.';
+
 /**
  * Drive one Cursor turn through ACP (`cursor-agent acp`) so interactive
  * approvals are real — plan review (cursor/create_plan → ExitPlanMode) and
@@ -126,10 +135,14 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
   let aborted = false;
   let usingFallback = false;
 
-  // Only retry before any content streams — retrying mid-stream would duplicate
-  // text already rendered.
+  // Pre-content retries only fire while nothing has streamed (retrying then
+  // would duplicate nothing). Once content has streamed, a transient transport
+  // death (e.g. http/2 stream cancel) is instead auto-resumed once on the same
+  // session with a "continue" nudge.
   let producedAny = false;
+  let autoResumed = false;
   let resume = opts.resume;
+  let prompt = opts.prompt;
   const wrappedCb: RunCallbacks = {
     ...cb,
     onClaudeSessionId: (id) => {
@@ -152,7 +165,7 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
     for (let attempt = 0; ; attempt++) {
       // Fresh normalizer per attempt so state from a failed run can't leak in.
       const normalizer = new CursorStreamNormalizer(wrappedCb);
-      acpClient = new CursorAcpClient({ ...opts, resume }, wrappedCb);
+      acpClient = new CursorAcpClient({ ...opts, prompt, resume }, wrappedCb);
       const acpOutcome = await acpClient.run();
       let outcome: Outcome = {
         transient: Boolean(acpOutcome.error && mentionsTransient(acpOutcome.error)),
@@ -164,7 +177,7 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
       if (outcome.error && acpUnavailable(outcome.error)) {
         log.debug('cursor acp unavailable; falling back to headless print mode');
         usingFallback = true;
-        outcome = await runOnce({ ...opts, resume }, normalizer, (c) => (child = c));
+        outcome = await runOnce({ ...opts, prompt, resume }, normalizer, (c) => (child = c));
         usingFallback = false;
       }
       if (aborted) {
@@ -182,6 +195,32 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
         }
         continue;
       }
+      if (outcome.transient && producedAny && !autoResumed) {
+        // Mid-stream transport death (http/2 stream cancel etc.): the turn's
+        // partial output is already rendered, so instead of failing the whole
+        // turn, resume the same session once and ask the model to continue.
+        autoResumed = true;
+        log.warn('cursor transient error mid-stream, auto-resuming once:', outcome.error);
+        wrappedCb.onEvent({
+          k: 'block',
+          block: {
+            id: `cur_resume_${crypto.randomUUID()}`,
+            kind: 'assistant',
+            text: '（传输中断，正在自动续跑…）',
+            streaming: false,
+            ts: Date.now(),
+          },
+        });
+        prompt = RESUME_PROMPT;
+        const backoff = backoffFor(0);
+        try {
+          await sleep(backoff, abortController.signal);
+        } catch {
+          log.debug('cursor run aborted during resume backoff');
+          return;
+        }
+        continue;
+      }
       if (outcome.error) {
         log.error('cursor run error:', outcome.error);
         cb.onEvent({ k: 'error', text: outcome.error });
@@ -192,11 +231,13 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
 
   return {
     abort: () => {
+      // Mark the run aborted and cut any in-flight backoff short in both modes,
+      // so a pending retry/auto-resume never fires after the user aborted.
+      aborted = true;
+      abortController.abort();
       if (usingFallback) {
         // Headless mode is one process per reply — terminating it is the only
         // interrupt primitive there.
-        aborted = true;
-        abortController.abort();
         child?.kill('SIGTERM');
         return;
       }
