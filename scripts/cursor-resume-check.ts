@@ -6,6 +6,9 @@
  * exactly once with a "continue" prompt (not the original prompt), inserts a
  * UI note, and preserves the streamed content — and that a second transient
  * death after the resume still surfaces the error with no third attempt.
+ * Also covers the folded variant (the agent catches the transport error and
+ * ends its reply with it, so the turn "succeeds" at the ACP layer): that too
+ * auto-resumes once, while a clean reply with no error never triggers one.
  * Fully isolated: stub CLI, temp HOME (so ~/.cursor/mcp.json is untouched)
  * and temp VIBE_HOME. Run: npx tsx scripts/cursor-resume-check.ts
  */
@@ -19,7 +22,9 @@ fs.mkdirSync(path.join(tmp, 'home'));
 
 // Stub cursor-agent: speaks just enough ACP. Round 1 streams a partial reply
 // then exits with the http/2 cancel error; round 2 completes — unless
-// STUB_FAIL_TWICE=1, in which case round 2 dies the same way.
+// STUB_FAIL_TWICE=1, in which case round 2 dies the same way. STUB_FOLD_ERROR=1
+// instead makes round 1 end "successfully" with the agent folding the transport
+// error into its final reply text; STUB_NORMAL=1 makes round 1 complete cleanly.
 const stub = path.join(tmp, 'cursor-agent');
 fs.writeFileSync(
   stub,
@@ -27,6 +32,8 @@ fs.writeFileSync(
 const fs = require('fs');
 const dir = process.env.STUB_DIR;
 const failTwice = process.env.STUB_FAIL_TWICE === '1';
+const foldError = process.env.STUB_FOLD_ERROR === '1';
+const normalFirst = process.env.STUB_NORMAL === '1';
 let n = 0;
 try { n = Number(fs.readFileSync(dir + '/count', 'utf8').trim()) || 0; } catch {}
 n += 1;
@@ -61,6 +68,19 @@ function handle(msg) {
     log({ invocation: n, method: 'session/prompt', prompt: text });
     const sid = msg.params && msg.params.sessionId;
     const chunk = (t) => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: t } } } });
+    if (foldError && n === 1) {
+      chunk('progress fine, wrapping up shortly.');
+      chunk('\\n\\nError: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)');
+      respond(msg.id, { stopReason: 'end_turn' });
+      setTimeout(() => process.exit(0), 30);
+      return;
+    }
+    if (normalFirst && n === 1) {
+      chunk('all done, no error here');
+      respond(msg.id, { stopReason: 'end_turn' });
+      setTimeout(() => process.exit(0), 30);
+      return;
+    }
     if (n === 1 || (failTwice && n === 2)) {
       chunk('partial ' + n);
       const delay = (n === 1 && Number(process.env.STUB_ROUND1_DELAY_MS)) || 30;
@@ -168,6 +188,42 @@ const reset = () => { for (const f of [tracePath, countPath]) if (fs.existsSync(
   assert.ok(events.some((e) => e.k === 'block' && e.block?.text === RESUME_NOTE), 'failure already struck');
   assert.equal(invocations(), 1, 'abort during backoff must not start the resume attempt');
   assert.ok(!events.some((e) => e.k === 'error'));
+}
+
+// --- 4. agent folds the transport error into its reply → still one resume --
+{
+  reset();
+  delete process.env.STUB_ROUND1_DELAY_MS;
+  process.env.STUB_FOLD_ERROR = '1';
+  const events = await runTurn();
+  assert.equal(invocations(), 2, 'folded error still triggers exactly one auto-resume');
+  const tr = trace();
+  const resumed = tr.find((e: any) => e.method === 'session/resume');
+  assert.ok(resumed, 'second invocation resumes the session');
+  assert.equal(resumed.sessionId, 'stub-s1', 'resumes the session from the folded-error turn');
+  const prompts = tr.filter((e: any) => e.method === 'session/prompt');
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1].prompt, /Continue exactly where you left off/, 'resume sends a continue nudge');
+  assert.ok(events.some((e) => e.k === 'block' && e.block?.text === RESUME_NOTE), 'UI resume note present');
+  assert.ok(
+    events.some((e) => e.k === 'block_end' && /http\/2 stream closed/.test(e.text ?? '')),
+    'folded error text kept in the rendered output',
+  );
+  assert.ok(events.some((e) => e.k === 'block' && e.block?.text === 'resumed-final'), 'round-2 content streamed');
+  assert.ok(!events.some((e) => e.k === 'error'), 'folded variant surfaces no error event');
+}
+
+// --- 5. clean reply with no folded error → no resume (false-hit guard) ------
+{
+  reset();
+  delete process.env.STUB_FOLD_ERROR;
+  process.env.STUB_NORMAL = '1';
+  const events = await runTurn();
+  assert.equal(invocations(), 1, 'clean turn must not trigger a resume');
+  assert.ok(!trace().some((e: any) => e.method === 'session/resume'), 'no session/resume issued');
+  assert.ok(!events.some((e) => e.k === 'block' && e.block?.text === RESUME_NOTE), 'no resume note');
+  assert.ok(events.some((e) => e.k === 'block' && e.block?.text === 'all done, no error here'), 'reply streamed');
+  assert.ok(!events.some((e) => e.k === 'error'), 'no error surfaced');
 }
 
 console.log('cursor-resume-check: all assertions passed');

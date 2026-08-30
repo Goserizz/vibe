@@ -121,6 +121,17 @@ function acpUnavailable(error: string): boolean {
 const RESUME_PROMPT =
   'Your previous reply was cut off by a transient network error. Continue exactly where you left off; do not repeat content you already produced.';
 
+/** cursor-agent sometimes catches the cancelled backend stream itself and folds
+ *  the wrapper error into its final reply as literal text ("\n\nError:
+ *  RetriableError: [canceled] http/2 stream closed …"), so the turn ends
+ *  "successfully" at the ACP layer with acpOutcome.error unset. Returns the
+ *  folded error line when it is the last thing in `text`, else undefined. */
+function foldedTransportError(text: string): string | undefined {
+  const m = /(?:^|\n)[ \t]*Error: (?:RetriableError|NonRetryableError)?[^\n]*http\/2 stream closed[^\n]*/.exec(text);
+  if (!m) return undefined;
+  return text.slice(m.index + m[0].length).trim() === '' ? m[0].trim() : undefined;
+}
+
 /**
  * Drive one Cursor turn through ACP (`cursor-agent acp`) so interactive
  * approvals are real — plan review (cursor/create_plan → ExitPlanMode) and
@@ -141,6 +152,11 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
   // session with a "continue" nudge.
   let producedAny = false;
   let autoResumed = false;
+  // Last assistant text of the current attempt, kept so the folded-error
+  // check below can see how the turn's reply ended. A streamed block is
+  // captured from its final `block_end`; standalone blocks carry full text.
+  let lastAssistantText = '';
+  let openStreamIsAssistant = false;
   let resume = opts.resume;
   let prompt = opts.prompt;
   const wrappedCb: RunCallbacks = {
@@ -151,6 +167,14 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
     },
     onEvent: (ev) => {
       if (isContentEvent(ev)) producedAny = true;
+      const b = ev.k === 'block' ? ev.block : undefined;
+      if (b?.kind === 'assistant' || b?.kind === 'thinking') {
+        openStreamIsAssistant = b.kind === 'assistant' && b.streaming;
+        if (b.kind === 'assistant' && !b.streaming) lastAssistantText = b.text;
+      } else if (ev.k === 'block_end' && openStreamIsAssistant) {
+        lastAssistantText = ev.text ?? '';
+        openStreamIsAssistant = false;
+      }
       cb.onEvent(ev);
     },
   };
@@ -163,8 +187,12 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
     await applyCursorMcp(opts.mcpServers ?? [], opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined);
 
     for (let attempt = 0; ; attempt++) {
-      // Fresh normalizer per attempt so state from a failed run can't leak in.
+      // Fresh normalizer per attempt so state from a failed run can't leak in;
+      // same for the last-assistant-text probe (a prior attempt's reply — or
+      // the resume note itself — must not satisfy the folded-error check).
       const normalizer = new CursorStreamNormalizer(wrappedCb);
+      lastAssistantText = '';
+      openStreamIsAssistant = false;
       acpClient = new CursorAcpClient({ ...opts, prompt, resume }, wrappedCb);
       const acpOutcome = await acpClient.run();
       let outcome: Outcome = {
@@ -179,6 +207,15 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
         usingFallback = true;
         outcome = await runOnce({ ...opts, prompt, resume }, normalizer, (c) => (child = c));
         usingFallback = false;
+      }
+      // The agent folding the transport error into its reply is the same
+      // mid-stream death, just reported as a "successful" turn — treat it as
+      // transient but keep `error` unset, so a second hit after the one resume
+      // ends the turn normally instead of surfacing an ACP-level error.
+      let foldedTail: string | undefined;
+      if (!outcome.error && lastAssistantText) {
+        foldedTail = foldedTransportError(lastAssistantText);
+        if (foldedTail) outcome = { transient: true };
       }
       if (aborted) {
         log.debug('cursor run aborted');
@@ -200,7 +237,7 @@ export function startCursorRun(opts: CursorRunOptions, cb: RunCallbacks): RunHan
         // partial output is already rendered, so instead of failing the whole
         // turn, resume the same session once and ask the model to continue.
         autoResumed = true;
-        log.warn('cursor transient error mid-stream, auto-resuming once:', outcome.error);
+        log.warn('cursor transient error mid-stream, auto-resuming once:', outcome.error ?? foldedTail);
         wrappedCb.onEvent({
           k: 'block',
           block: {
