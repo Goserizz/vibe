@@ -399,7 +399,9 @@ class CodexAppServerRun {
       return;
     }
     if (method === 'turn/started') {
-      this.currentTurnId = String(params?.turn?.id ?? this.currentTurnId);
+      const turn = params?.turn ?? {};
+      this.currentTurnId = String(turn.id ?? this.currentTurnId);
+      this.normalizer.push({ ...turn, type: 'turn.started' });
       this.interruptCurrentTurn();
       return;
     }
@@ -430,6 +432,7 @@ class CodexAppServerRun {
       return;
     }
     if (method === 'thread/tokenUsage/updated') {
+      this.normalizer.push({ ...params, type: 'thread/tokenUsage/updated' });
       return;
     }
     if (method === 'turn/completed') {
@@ -438,11 +441,11 @@ class CodexAppServerRun {
         for (const item of turn.items) this.captureCommand(item, true);
       }
       if (turn.status === 'failed') {
-        this.normalizer.push({ type: 'turn.failed', error: turn.error });
+        this.normalizer.push({ ...turn, type: 'turn.failed', error: turn.error });
       } else if (turn.status === 'interrupted') {
-        this.normalizer.push({ type: 'turn.aborted' });
+        this.normalizer.push({ ...turn, type: 'turn.aborted' });
       } else {
-        this.normalizer.push({ type: 'turn.completed' });
+        this.normalizer.push({ ...turn, type: 'turn.completed' });
       }
       this.interruptRequested = false;
       if (this.interruptingTurnId === String(turn.id ?? this.currentTurnId)) this.interruptingTurnId = '';

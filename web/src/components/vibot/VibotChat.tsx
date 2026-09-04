@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useRef } from 'react';
-import { Brain, Settings, Sparkles } from '../../lib/icons';
-import type { ChatBlock } from '@shared/protocol';
+import { Brain, Check, HelpCircle, Settings, Sparkles } from '../../lib/icons';
+import type { ChatBlock, ToolBlock, VibotAskQuestion } from '@shared/protocol';
 import { useStore } from '../../store/store';
 import { useVibotStore } from '../../store/vibot';
 import { BlockView } from '../blocks';
@@ -153,7 +153,13 @@ function MessageList({ blocks, convId }: { blocks: ChatBlock[]; convId: string }
               {b.kind === 'user' && i > 0 && (
                 <div className={cn('border-t', cli ? 'mt-2 border-ink-700' : 'mt-4 border-white/10')} />
               )}
-              {cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
+              {isAskUserQuestionBlock(b) ? (
+                <AskUserQuestionCard block={b} />
+              ) : cli ? (
+                <CliBlockView block={b} />
+              ) : (
+                <BlockView block={b} />
+              )}
             </Fragment>
           ))
         )}
@@ -196,3 +202,103 @@ function Welcome({ onOpenSettings, hasApiKey }: { onOpenSettings: () => void; ha
     </div>
   );
 }
+
+function isAskUserQuestionBlock(b: ChatBlock): b is ToolBlock {
+  return (
+    b.kind === 'tool' &&
+    (b.name === 'AskUserQuestion' || b.name === 'ask_user_question')
+  );
+}
+
+/** Transcript card for ask_user_question — questions + chosen answers highlighted. */
+function AskUserQuestionCard({ block }: { block: ToolBlock }) {
+  const input = (block.input ?? {}) as { questions?: VibotAskQuestion[] };
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const answers = parseAskAnswers(block.result);
+  const running = block.status === 'running';
+
+  return (
+    <div className="animate-fade-in rounded-xl border border-accent/20 bg-accent/5 px-3.5 py-3">
+      <div className="mb-2.5 flex items-center gap-2">
+        <HelpCircle className="h-3.5 w-3.5 text-accent" />
+        <span className="text-[12px] font-medium text-slate-300">Ask user</span>
+        {running && <span className="text-[11px] text-slate-500">waiting…</span>}
+      </div>
+      {questions.length === 0 && !answers && block.result ? (
+        <p className="text-[13px] text-slate-400">{block.result}</p>
+      ) : (
+        <div className="space-y-3">
+          {questions.map((q, i) => {
+            const chosen = answers?.[q.question];
+            const chosenSet = new Set(
+              chosen == null ? [] : Array.isArray(chosen) ? chosen : [chosen],
+            );
+            return (
+              <div key={i}>
+                <div className="flex flex-wrap items-center gap-2">
+                  {q.header && (
+                    <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] font-medium text-slate-300">
+                      {q.header}
+                    </span>
+                  )}
+                  <span className="text-[13px] text-slate-200">{q.question}</span>
+                </div>
+                <div className="mt-1.5 space-y-1">
+                  {q.options.map((opt) => {
+                    const sel = chosenSet.has(opt.label);
+                    return (
+                      <div
+                        key={opt.label}
+                        className={cn(
+                          'flex items-start gap-2 rounded-lg border px-2.5 py-1.5',
+                          sel ? 'border-accent/50 bg-accent/10' : 'border-transparent text-slate-500',
+                        )}
+                      >
+                        {sel && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />}
+                        <span className="min-w-0">
+                          <span className={cn('block text-[12.5px]', sel ? 'font-medium text-slate-200' : 'text-slate-500')}>
+                            {opt.label}
+                          </span>
+                          {opt.description && sel && (
+                            <span className="mt-0.5 block text-[11.5px] text-slate-500">{opt.description}</span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {/* Free-text / Other answers that aren't in the option list */}
+                  {[...chosenSet]
+                    .filter((label) => !q.options.some((o) => o.label === label))
+                    .map((label) => (
+                      <div
+                        key={label}
+                        className="flex items-start gap-2 rounded-lg border border-accent/50 bg-accent/10 px-2.5 py-1.5"
+                      >
+                        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
+                        <span className="text-[12.5px] font-medium text-slate-200">{label}</span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            );
+          })}
+          {!answers && block.result && !running && (
+            <p className="text-[12.5px] text-slate-500">{block.result}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parseAskAnswers(result: string | undefined): Record<string, string | string[]> | null {
+  if (!result) return null;
+  try {
+    const j = JSON.parse(result) as { answers?: Record<string, string | string[]> };
+    if (j && typeof j === 'object' && j.answers && typeof j.answers === 'object') return j.answers;
+  } catch {
+    /* plain-text timeout / dismiss messages */
+  }
+  return null;
+}
+

@@ -27,8 +27,20 @@ const clientMessageSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('permission'), sessionId: z.string(), requestId: z.string(), decision: decisionSchema }),
   z.object({ t: z.literal('vibot_subscribe'), convId: z.string(), lastSeq: z.number() }),
   z.object({ t: z.literal('vibot_unsubscribe'), convId: z.string() }),
-  z.object({ t: z.literal('vibot_send'), convId: z.string(), clientMsgId: z.string(), text: z.string() }),
+  z.object({
+    t: z.literal('vibot_send'),
+    convId: z.string(),
+    clientMsgId: z.string(),
+    text: z.string(),
+    images: z.array(z.string()).max(4).optional(),
+  }),
   z.object({ t: z.literal('vibot_abort'), convId: z.string() }),
+  z.object({
+    t: z.literal('vibot_answer'),
+    convId: z.string(),
+    callId: z.string(),
+    answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])),
+  }),
   z.object({ t: z.literal('ping') }),
 ]);
 
@@ -123,11 +135,15 @@ export function attachWsServer(server: Server): void {
           break;
         case 'vibot_send':
           if (!conn.isAdmin()) conn.send({ t: 'error', message: 'vibot is admin-only' });
-          else vibotHub.send(conn, msg.convId, msg.clientMsgId, msg.text);
+          else vibotHub.send(conn, msg.convId, msg.clientMsgId, msg.text, msg.images);
           break;
         case 'vibot_abort':
           if (!conn.isAdmin()) conn.send({ t: 'error', message: 'vibot is admin-only' });
           else vibotHub.abort(msg.convId);
+          break;
+        case 'vibot_answer':
+          if (!conn.isAdmin()) conn.send({ t: 'error', message: 'vibot is admin-only' });
+          else vibotHub.answer(msg.convId, msg.callId, msg.answers);
           break;
         case 'ping':
           conn.send({ t: 'pong' });

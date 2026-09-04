@@ -8,6 +8,7 @@ import { Check, Copy } from '../lib/icons';
 import 'katex/dist/katex.min.css';
 import { useStore } from '../store/store';
 import { looksLikeFilePath } from '../lib/paths';
+import { preprocessMath } from '../lib/mathPreprocess';
 
 /** Copy text to the clipboard, with an execCommand fallback for non-secure
  *  contexts (HTTP) where navigator.clipboard is unavailable. */
@@ -92,6 +93,9 @@ function FilePathCode({ text }: { text: string }) {
 
 const MARKDOWN_COMPONENTS: Components = {
   pre: CodeBlock,
+  // Keep GFM tables/task-lists/autolinks; show ~~strikethrough~~ literally —
+  // remark-gfm has no per-feature toggle, so restore the tilde markers at render.
+  del: ({ children }) => <>~~{children}~~</>,
   code({ className, children }) {
     // Fenced code blocks carry `language-*` / `hljs` classes (added by
     // rehype-highlight) and stay plain <code> inside CodeBlock. Untyped inline
@@ -188,6 +192,7 @@ function remarkFilePaths() {
  * the whole message (important while a formula is mid-stream).
  */
 export const Markdown = memo(function Markdown({ children }: { children: string }) {
+  const source = preprocessMath(children);
   return (
     <div className="prose-vibe">
       <ReactMarkdown
@@ -198,7 +203,7 @@ export const Markdown = memo(function Markdown({ children }: { children: string 
         ]}
         components={MARKDOWN_COMPONENTS}
       >
-        {children}
+        {source}
       </ReactMarkdown>
     </div>
   );

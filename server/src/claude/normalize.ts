@@ -17,28 +17,68 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Context tokens for a turn from API-reported usage, so the number matches
- *  what the model actually saw (local tokenizers only approximate it). Handles
- *  Anthropic-style input/cache/output splits (snake_case, and Cursor's
- *  camelCase variant where inputTokens EXCLUDES cache reads), Codex's
- *  cached_input_tokens, and OpenAI-style prompt/completion pairs. Returns
- *  undefined when no usage. */
+/** Context tokens for one model request from provider-reported usage.
+ *
+ * Providers often expose the same counters under several aliases at once. In
+ * particular, CodeBuddy emits both snake_case and camelCase input totals, while
+ * Codex reports `cached_input_tokens` as a subset of `input_tokens`. Adding all
+ * known fields therefore double-counts the prompt. Prefer an explicit provider
+ * total, then select exactly one usage family. Anthropic's
+ * `cache_{read,creation}_input_tokens` remain additive because its
+ * `input_tokens` excludes those cache buckets; OpenAI's `cached_input_tokens`
+ * is deliberately not additive. Returns undefined when no usage is present. */
 export function usageContextTokens(usage: any): number | undefined {
   if (!usage || typeof usage !== 'object') return undefined;
-  const split =
-    num(usage.input_tokens)
-    + num(usage.cache_creation_input_tokens)
-    + num(usage.cache_read_input_tokens)
-    + num(usage.cached_input_tokens)
-    + num(usage.output_tokens)
-    + num(usage.cacheReadTokens)
-    + num(usage.cacheWriteTokens)
-    + num(usage.outputTokens)
-    + num(usage.inputTokens);
-  if (split > 0) return split;
-  // OpenAI-compatible: prompt_tokens already includes cached tokens.
+
+  // Provider totals already account for cache and reasoning sub-buckets. They
+  // also disambiguate hybrid objects that expose two naming conventions.
+  for (const key of ['total_tokens', 'totalTokens']) {
+    const total = num(usage[key]);
+    if (total > 0) return total;
+  }
+
+  // OpenAI-compatible prompt_tokens already includes cached prompt tokens.
   const flat = num(usage.prompt_tokens) + num(usage.completion_tokens);
-  return flat > 0 ? flat : undefined;
+  if (flat > 0) return flat;
+
+  const hasSnake = [
+    'input_tokens',
+    'output_tokens',
+    'cache_creation_input_tokens',
+    'cache_read_input_tokens',
+    'cached_input_tokens',
+  ].some((key) => usage[key] != null);
+  if (hasSnake) {
+    const split =
+      num(usage.input_tokens)
+      + num(usage.cache_creation_input_tokens)
+      + num(usage.cache_read_input_tokens)
+      + num(usage.output_tokens);
+    if (split > 0) return split;
+  }
+
+  const hasCamel = [
+    'inputTokens',
+    'outputTokens',
+    'cacheReadTokens',
+    'cacheCreationTokens',
+    'cacheWriteTokens',
+  ].some((key) => usage[key] != null);
+  if (hasCamel) {
+    // Cursor's inputTokens excludes its cache buckets. cacheCreationTokens and
+    // cacheWriteTokens are aliases, so select one rather than summing both.
+    const cacheCreation = usage.cacheCreationTokens != null
+      ? num(usage.cacheCreationTokens)
+      : num(usage.cacheWriteTokens);
+    const split =
+      num(usage.inputTokens)
+      + num(usage.cacheReadTokens)
+      + cacheCreation
+      + num(usage.outputTokens);
+    if (split > 0) return split;
+  }
+
+  return undefined;
 }
 
 /** Claude Code ≥2.1 reports each model's context window on the result event's

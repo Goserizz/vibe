@@ -5,5 +5,5 @@
     "types": ["node"],
     "moduleResolution": "Bundler"
   },
-  "include": ["src/**/*.ts", "../shared/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "../shared/**/*.ts"]
 }

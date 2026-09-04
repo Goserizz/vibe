@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { log } from '../log.js';
 import type { AgentKind, EffortLevel, PermissionMode, SessionPreset } from '../../../shared/protocol.js';
 
-const AGENTS: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
+const AGENTS: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin'];
 const PERMISSIONS: PermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'nothink', 'enabled', 'disabled'];
 

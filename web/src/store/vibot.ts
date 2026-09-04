@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   ClientMessage,
   ServerEvent,
+  VibotAskRequest,
   VibotConfigClient,
   VibotConvMeta,
   VibotMemory,
@@ -75,6 +76,21 @@ function sendVibotFrame(msg: VibotClientMessage): void {
   enqueueVibot(msg);
 }
 
+function removeAsk(
+  asks: Record<string, VibotAskRequest[]>,
+  convId: string,
+  callId: string,
+): Record<string, VibotAskRequest[]> {
+  const list = asks[convId];
+  if (!list?.length) return asks;
+  const next = list.filter((a) => a.callId !== callId);
+  if (next.length === list.length) return asks;
+  const out = { ...asks };
+  if (next.length) out[convId] = next;
+  else delete out[convId];
+  return out;
+}
+
 /**
  * Separate store for the Vibot assistant interface. It never touches the coding
  * `sessions`/`views` in `store.ts`: Vibot conversations live in their own
@@ -87,6 +103,8 @@ interface VibotState {
   convs: VibotConvMeta[];
   activeConvId: string | null;
   views: Record<string, SessionView>;
+  /** Pending ask-user dialogs keyed by conversation. */
+  asks: Record<string, VibotAskRequest[]>;
   config: VibotConfigClient | null;
   memories: VibotMemory[];
   toast: string | null;
@@ -102,8 +120,9 @@ interface VibotState {
   renameConversation: (id: string, title: string) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
   unlinkSession: (convId: string, sessionId: string) => Promise<boolean>;
-  sendMessage: (text: string) => void;
+  sendMessage: (text: string, images?: string[]) => void;
   abort: () => void;
+  answerAsk: (convId: string, callId: string, answers: Record<string, string | string[]>) => void;
   setToast: (msg: string | null) => void;
 }
 
@@ -116,6 +135,7 @@ export const useVibotStore = create<VibotState>((set, get) => ({
   convs: [],
   activeConvId: null,
   views: {},
+  asks: {},
   config: null,
   memories: [],
   toast: null,
@@ -133,6 +153,8 @@ export const useVibotStore = create<VibotState>((set, get) => ({
   handleBatch(events) {
     const state = get();
     const views = { ...state.views };
+    let asks = state.asks;
+    let asksDirty = false;
     let convs = state.convs;
     let convsDirty = false;
     const setRunning: Record<string, boolean> = {};
@@ -145,10 +167,33 @@ export const useVibotStore = create<VibotState>((set, get) => ({
           views[msg.convId] = reduceView(view, [{ seq: msg.seq, ev: msg.ev }]);
           break;
         }
-        case 'vibot_subscribed':
+        case 'vibot_subscribed': {
           setRunning[msg.convId] = msg.running;
           if (msg.reset) resetIds.push(msg.convId);
+          // Replace pending asks for this conv with the server's authoritative list.
+          const pending = msg.pendingAsks ?? [];
+          if (pending.length) {
+            asks = { ...asks, [msg.convId]: pending };
+          } else if (asks[msg.convId]) {
+            const next = { ...asks };
+            delete next[msg.convId];
+            asks = next;
+          }
+          asksDirty = true;
           break;
+        }
+        case 'vibot_ask': {
+          const list = asks[msg.convId] ?? [];
+          if (list.some((a) => a.callId === msg.request.callId)) break;
+          asks = { ...asks, [msg.convId]: [...list, msg.request] };
+          asksDirty = true;
+          break;
+        }
+        case 'vibot_ask_resolved': {
+          asks = removeAsk(asks, msg.convId, msg.callId);
+          asksDirty = true;
+          break;
+        }
         case 'vibot_conv_meta': {
           const others = convs.filter((c) => c.id !== msg.conv.id);
           convs = sortConvs([msg.conv, ...others]);
@@ -158,6 +203,12 @@ export const useVibotStore = create<VibotState>((set, get) => ({
         case 'vibot_conv_removed':
           convs = convs.filter((c) => c.id !== msg.convId);
           convsDirty = true;
+          if (asks[msg.convId]) {
+            const next = { ...asks };
+            delete next[msg.convId];
+            asks = next;
+            asksDirty = true;
+          }
           break;
         case 'vibot_conv_list':
           convs = sortConvs(msg.convs);
@@ -174,7 +225,11 @@ export const useVibotStore = create<VibotState>((set, get) => ({
         const v = views[id] ?? emptyView();
         views[id] = { ...v, running: setRunning[id] };
       }
-      return { views, convs: convsDirty ? convs : s.convs };
+      return {
+        views,
+        convs: convsDirty ? convs : s.convs,
+        asks: asksDirty ? asks : s.asks,
+      };
     });
 
     for (const id of resetIds) void reloadAndResubscribe(id);
@@ -269,8 +324,10 @@ export const useVibotStore = create<VibotState>((set, get) => ({
       const convs = s.convs.filter((c) => c.id !== id);
       const views = { ...s.views };
       delete views[id];
+      const asks = { ...s.asks };
+      delete asks[id];
       const activeConvId = s.activeConvId === id ? (convs[0]?.id ?? null) : s.activeConvId;
-      return { convs, views, activeConvId };
+      return { convs, views, asks, activeConvId };
     });
     const next = get().activeConvId;
     if (next) void get().openConversation(next);
@@ -289,27 +346,51 @@ export const useVibotStore = create<VibotState>((set, get) => ({
     }
   },
 
-  sendMessage(text) {
+  sendMessage(text, images) {
     const trimmed = text.trim();
+    const imgs = images?.length ? images : undefined;
     const id = get().activeConvId;
-    if (!trimmed || !id) return;
+    if ((!trimmed && !imgs?.length) || !id) return;
     const clientMsgId = uid();
     // Optimistic: show the user's message + running state immediately.
     set((s) => {
       const view = s.views[id] ?? emptyView();
       const seq = view.lastSeq;
       const next = reduceView(view, [
-        { seq, ev: { k: 'block', block: { id: clientMsgId, kind: 'user', text: trimmed, ts: Date.now() } } },
+        {
+          seq,
+          ev: {
+            k: 'block',
+            block: {
+              id: clientMsgId,
+              kind: 'user',
+              text: trimmed,
+              ...(imgs ? { images: imgs } : {}),
+              ts: Date.now(),
+            },
+          },
+        },
         { seq, ev: { k: 'run_state', running: true } },
       ]);
       return { views: { ...s.views, [id]: next } };
     });
-    sendVibotFrame({ t: 'vibot_send', convId: id, clientMsgId, text: trimmed });
+    sendVibotFrame({
+      t: 'vibot_send',
+      convId: id,
+      clientMsgId,
+      text: trimmed,
+      ...(imgs ? { images: imgs } : {}),
+    });
   },
 
   abort() {
     const id = get().activeConvId;
     if (id) sendVibotFrame({ t: 'vibot_abort', convId: id });
+  },
+
+  answerAsk(convId, callId, answers) {
+    set((s) => ({ asks: removeAsk(s.asks, convId, callId) }));
+    sendVibotFrame({ t: 'vibot_answer', convId, callId, answers });
   },
 
   setToast(msg) {

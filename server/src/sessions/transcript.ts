@@ -65,7 +65,12 @@ function toMs(ts?: string): number {
  * Works for both local files and content fetched from a remote host over SSH.
  */
 export function parseTranscriptBlocks(content: string): { blocks: ChatBlock[]; cwd?: string } {
-  const lines = content.split('\n');
+  return parseTranscriptBlockLines(content.split('\n'));
+}
+
+/** Line-oriented variant for windowed readers that already split the file —
+ *  note blocks are not 1:1 with lines (tool results fold into their tool). */
+export function parseTranscriptBlockLines(lines: string[]): { blocks: ChatBlock[]; cwd?: string } {
   const blocks: ChatBlock[] = [];
   const toolById = new Map<string, ToolBlock>();
   let cwd: string | undefined;

@@ -23,6 +23,9 @@ const SKILL_DIR: Record<AgentKind, string> = {
   grok: '~/.grok/skills',
   // ZCode reads user skills from the shared agents dir (`zcode skills list`).
   zcode: '~/.agents/skills',
+  codebuddy: '~/.codebuddy/skills',
+  opencode: '~/.config/opencode/skills',
+  devin: '~/.config/devin/skills',
 };
 
 /** Add/edit form for a personal skill. `def` undefined = create.

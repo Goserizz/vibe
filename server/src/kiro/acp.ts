@@ -105,6 +105,10 @@ const ACP_KIND_NAME: Record<string, string> = {
   switch_mode: 'SwitchMode',
 };
 
+/** Matches any plan-exit spelling — `ExitPlanMode`, `exit_plan_mode`, or a
+ *  prose title like "Exit plan mode" — for the permission request rewrite. */
+const PLAN_EXIT_TOOL_RE = /exit[\s_-]*plan[\s_-]*mode/i;
+
 function toolNameFromUpdate(update: any): string | null {
   const title = typeof update?.title === 'string' ? update.title.trim() : '';
   if (title && /^[A-Za-z][A-Za-z0-9_]*$/.test(title)) return title;
@@ -401,11 +405,15 @@ export class KiroAcpClient {
       title: toolCall.title,
       description: content || undefined,
     };
+    // Kiro's plan gate can arrive as the planner mode id instead of a tool
+    // name; both normalize to Claude's `ExitPlanMode` so the web/Telegram
+    // plan-review UIs trigger.
+    const isPlanExit = PLAN_EXIT_TOOL_RE.test(toolName) || toolName === 'kiro_planner';
     const request: PermissionRequest = {
       requestId: crypto.randomUUID(),
-      toolName,
+      toolName: isPlanExit ? 'ExitPlanMode' : toolName,
       input,
-      plan: /ExitPlanMode|kiro_planner/i.test(toolName) && content ? content : undefined,
+      plan: isPlanExit && content ? content : undefined,
       ts: Date.now(),
     };
     const decision = await this.cb.requestPermission(request);

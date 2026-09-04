@@ -813,7 +813,9 @@ export async function sendPermissionPrompt(
     await sendAskUserPrompt(api, chatId, sessionId, request);
     return;
   }
-  if (request.toolName === 'ExitPlanMode') {
+  // A non-empty `plan` marks a plan-review request even if the tool name
+  // arrived in a non-canonical spelling the server didn't rewrite.
+  if (request.toolName === 'ExitPlanMode' || (typeof request.plan === 'string' && request.plan.trim())) {
     await sendExitPlanPrompt(api, chatId, request);
     return;
   }

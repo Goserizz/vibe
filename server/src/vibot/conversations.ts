@@ -191,8 +191,15 @@ class ConvStore {
     // Title from the first user message if it's still the default.
     if ((conv.title === 'New chat' || !conv.title) && conv.messages.length) {
       const firstUser = conv.messages.find((m) => m.role === 'user');
-      if (firstUser && typeof firstUser.content === 'string') {
-        conv.title = firstUser.content.replace(/\s+/g, ' ').trim().slice(0, 60) || conv.title;
+      if (firstUser) {
+        const raw =
+          typeof firstUser.content === 'string'
+            ? firstUser.content
+            : Array.isArray(firstUser.content)
+              ? firstUser.content.filter((p) => p.type === 'text').map((p) => p.text).join(' ')
+              : '';
+        const title = raw.replace(/\s+/g, ' ').trim().slice(0, 60);
+        if (title) conv.title = title;
       }
     }
     this.persist(conv);

@@ -26,9 +26,16 @@ export function isTransientError(err: unknown): boolean {
  *  (SSH MaxStartups throttling, network drops) that a backoff retry clears.
  *  "RetriableError … http/2 stream closed" is cursor-agent's wrapper for the
  *  backend gRPC stream being cancelled (network jitter / proxies cutting long
- *  connections), often mid-turn after content already streamed. */
+ *  connections), often mid-turn after content already streamed. "exited
+ *  mid-turn" with ssh_dispatch_run_fatal "message authentication code
+ *  incorrect" is SSH link corruption (bad packets) dropping the transport
+ *  mid-turn — safe to retry because zcode session state persists on the
+ *  remote and the retry resumes it. "transport stalled" is the zcode setup
+ *  timeout: the SSH link is alive but a setup reply never arrived — the
+ *  retry re-dials a fresh connection and resumes cleanly (nothing streamed
+ *  yet). */
 export function mentionsTransient(text: string): boolean {
-  return /529|overloaded|internal error|app-server closed|kex_exchange_identification|http\/2 stream closed|RetriableError|访问量过大|过载/i.test(text);
+  return /529|overloaded|internal error|app-server closed|kex_exchange_identification|http\/2 stream closed|RetriableError|exited mid-turn|message authentication code incorrect|ssh_dispatch_run_fatal|transport stalled|访问量过大|过载/i.test(text);
 }
 
 /** Backoff (ms) for attempt N (0-based): base * 2^N + small jitter. */

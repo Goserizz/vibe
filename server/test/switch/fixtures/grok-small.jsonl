@@ -1,0 +1,3 @@
+{"id": "gk_user_2", "kind": "user", "text": "你好你好", "ts": 0}
+{"id": "gk_think_5", "kind": "thinking", "text": "The user said \"你好\" which means \"Hello\" in Chinese. This is a simple greeting. I should respond in Chinese since they greeted me in Chinese.\n", "streaming": false, "ts": 0}
+{"id": "gk_assistant_6", "kind": "assistant", "text": "你好。需要我帮你做什么？可以是写代码、查问题、改项目，或其他事情。", "streaming": false, "ts": 0}

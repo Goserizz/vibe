@@ -6,12 +6,12 @@ import type { DiscoveredSession } from '../sessions/discovery.js';
 import { withZcodeAppServer } from './appServer.js';
 
 /**
- * ZCode keeps sessions in ~/.zcode/cli/db/db.sqlite — unreadable from Vibe's
- * Node 20 runtime (no node:sqlite). Discovery therefore spawns a short-lived
- * `zcode app-server` and calls `session/list`, cached stale-while-revalidate so
- * the HTTP session list never blocks on the spawn. Each successful pass also
- * rewrites a sidecar index (~/.vibe/zcode-index.json) that the synchronous
- * hub adoption path can peek at.
+ * ZCode keeps sessions in ~/.zcode/cli/db/db.sqlite. Discovery intentionally
+ * asks a short-lived `zcode app-server` for `session/list` instead of coupling
+ * session enumeration to a particular schema revision. Results are cached
+ * stale-while-revalidate so the HTTP session list never blocks on the spawn;
+ * each successful pass also rewrites a sidecar index (~/.vibe/zcode-index.json)
+ * that the synchronous hub adoption path can peek at.
  */
 
 const SESSION_RE = /^sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

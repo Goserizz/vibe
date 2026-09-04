@@ -20,6 +20,22 @@ function sanitize(q: string): string {
   return q.replace(/[\x1e\x1f\r\n]+/g, ' ').trim();
 }
 
+/** Split a sanitized query into whitespace-separated terms (case-insensitively
+ *  deduped). Terms are ANDed: a conversation matches only if every term appears
+ *  somewhere in its message text. */
+function tokenize(query: string): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const t of sanitize(query).split(/\s+/)) {
+    if (!t) continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    terms.push(t);
+  }
+  return terms;
+}
+
 /** Build a ±SNIPPET_PAD window around the first match (newlines/tabs → space). */
 function snippetAround(text: string, idx: number, matchLen: number): string {
   const clean = text.replace(/[\r\n\t]+/g, ' ');
@@ -32,23 +48,44 @@ function snippetAround(text: string, idx: number, matchLen: number): string {
 }
 
 /**
- * Case-insensitively match message-text blocks (user/assistant/thinking) and
- * return up to MAX_HITS_PER_SESSION snippets. Shared by the local and remote
- * paths so both behave identically — and so tool-I/O-only matches (which parse
- * to no message-text block) never produce a hit.
+ * Case-insensitively match message-text blocks (user/assistant/thinking) against
+ * every term (AND semantics: each term must appear somewhere in the session's
+ * message text, possibly in different blocks) and return up to
+ * MAX_HITS_PER_SESSION snippets, taken from the blocks covering the most
+ * distinct terms. Shared by the local and remote paths so both behave
+ * identically — and so tool-I/O-only matches (which parse to no message-text
+ * block) never produce a hit.
  */
-function findHits(blocks: ChatBlock[], query: string): SearchHit[] {
-  const q = query.toLowerCase();
-  const hits: SearchHit[] = [];
+function findHits(blocks: ChatBlock[], terms: string[]): SearchHit[] {
+  const qs = terms.map((t) => t.toLowerCase());
+  // Blocks containing at least one term, with the number of distinct terms each
+  // block covers.
+  const candidates: { hit: SearchHit; count: number }[] = [];
+  const covered = new Set<string>();
   for (const b of blocks) {
     if (b.kind !== 'user' && b.kind !== 'assistant' && b.kind !== 'thinking') continue;
     if (!b.text) continue;
-    const idx = b.text.toLowerCase().indexOf(q);
-    if (idx < 0) continue;
-    hits.push({ kind: b.kind, snippet: snippetAround(b.text, idx, q.length) });
-    if (hits.length >= MAX_HITS_PER_SESSION) break;
+    const lower = b.text.toLowerCase();
+    let idx = -1;
+    let len = 0;
+    let count = 0;
+    for (const q of qs) {
+      const at = lower.indexOf(q);
+      if (at < 0) continue;
+      covered.add(q);
+      count++;
+      if (idx < 0 || at < idx) {
+        idx = at;
+        len = q.length;
+      }
+    }
+    if (count === 0) continue;
+    candidates.push({ hit: { kind: b.kind, snippet: snippetAround(b.text, idx, len) }, count });
   }
-  return hits;
+  if (covered.size < qs.length) return []; // some term missing → AND fails
+  // Stable sort: blocks covering more terms snippet first, ties keep order.
+  candidates.sort((a, b) => b.count - a.count);
+  return candidates.slice(0, MAX_HITS_PER_SESSION).map((c) => c.hit);
 }
 
 interface Resolved {
@@ -157,8 +194,8 @@ function resolveRemote(host: RemoteHost, rh: RemoteSearchHit, meta: DiscoveredSe
  *  Remote hosts are limited to the ones `account` owns; the local scan is
  *  admin-only (the local machine is admin-only). */
 export async function searchConversations(query: string, limit = 50, account: string = ADMIN_ACCOUNT): Promise<SearchResult[]> {
-  const q = sanitize(query);
-  if (!q) return [];
+  const terms = tokenize(query);
+  if (terms.length === 0) return [];
 
   // Index stored sessions by their Claude id for local identity resolution.
   const byClaude = new Map<string, StoredSession>();
@@ -177,7 +214,7 @@ export async function searchConversations(query: string, limit = 50, account: st
       for (const ref of refs) {
         const doc = getLocalDoc(ref);
         if (!doc) continue;
-        const hits = findHits(doc.blocks, q);
+        const hits = findHits(doc.blocks, terms);
         if (hits.length === 0) continue;
         const resolved = resolveLocal(ref.id, doc, byClaude);
         if (!resolved) continue;
@@ -194,8 +231,8 @@ export async function searchConversations(query: string, limit = 50, account: st
   await Promise.all(
     hostRegistry.listFor(account).map(async (host) => {
       try {
-        for (const rh of await searchRemoteHost(host, q)) {
-          const hits = findHits(parseTranscriptBlocks(rh.matches).blocks, q);
+        for (const rh of await searchRemoteHost(host, terms)) {
+          const hits = findHits(parseTranscriptBlocks(rh.matches).blocks, terms);
           if (hits.length === 0) continue; // matched only tool I/O
           const meta = parseSessionMeta(rh.head.split('\n'), rh.claudeSessionId, {
             createdFallback: rh.mtime,

@@ -9,6 +9,9 @@ import { resolveKimiExecutable } from './kimi/resolve.js';
 import { resolveKiroExecutable } from './kiro/resolve.js';
 import { resolveGrokExecutable } from './grok/resolve.js';
 import { resolveZcodeExecutable } from './zcode/resolve.js';
+import { resolveCodebuddyExecutable } from './codebuddy/resolve.js';
+import { resolveOpencodeExecutable } from './opencode/resolve.js';
+import { resolveDevinExecutable } from './devin/resolve.js';
 
 function resolveHome(): string {
   const custom = process.env.VIBE_HOME;
@@ -27,6 +30,16 @@ const GROK_HOME = process.env.GROK_HOME
 const ZCODE_HOME = process.env.ZCODE_HOME
   ? path.resolve(process.env.ZCODE_HOME)
   : path.join(os.homedir(), '.zcode');
+/** Devin stores data under an XDG data dir, not a `~/.*` dotfolder. Its
+ *  credentials and session database both live here. */
+const DEVIN_HOME = process.env.DEVIN_HOME
+  ? path.resolve(process.env.DEVIN_HOME)
+  : path.join(os.homedir(), '.local', 'share', 'devin');
+/** opencode stores its session library under an XDG data dir. The CLI offers
+ *  no home override, so `OPENCODE_HOME` is Vibe's own escape hatch (tests). */
+const OPENCODE_HOME = process.env.OPENCODE_HOME
+  ? path.resolve(process.env.OPENCODE_HOME)
+  : path.join(os.homedir(), '.local', 'share', 'opencode');
 
 /**
  * Single-user access token. Reuses an existing token if present, otherwise
@@ -92,6 +105,12 @@ function loadTelegramAllowlist(): number[] {
 export const config = {
   home: VIBE_HOME,
   sessionsFile: path.join(VIBE_HOME, 'sessions.json'),
+  /** Durable monitor definitions, observations, incidents, leases, and runs. */
+  monitorsDb: path.join(VIBE_HOME, 'monitors.sqlite'),
+  /** Public Streamable-HTTP MCP endpoint used by agents running over SSH.
+   * Local agents always use the loopback endpoint. Empty means the built-in
+   * monitor tools are omitted from remote sessions (the UI/API still work). */
+  monitorMcpUrl: process.env.VIBE_MONITOR_MCP_URL?.trim() || '',
   hostsFile: path.join(VIBE_HOME, 'hosts.json'),
   /** MCP server registry + per-scope enable lists (global, local, per host). */
   mcpFile: path.join(VIBE_HOME, 'mcp.json'),
@@ -129,6 +148,9 @@ export const config = {
   claudeProjectsDir: path.join(os.homedir(), '.claude', 'projects'),
   /** Where Cursor CLI stores per-workspace chats (~/.cursor/chats/<md5(cwd)>/<chatId>). */
   cursorChatsDir: path.join(os.homedir(), '.cursor', 'chats'),
+  /** Where Cursor's ACP transport resolves resumable sessions. The on-disk
+   *  database format matches `cursorChatsDir`, but ACP only scans this root. */
+  cursorAcpSessionsDir: path.join(os.homedir(), '.cursor', 'acp-sessions'),
   /** Where Vibe persists transcripts for Cursor sessions it drives. */
   cursorTranscriptsDir: path.join(VIBE_HOME, 'cursor-transcripts'),
   /** Where the Codex CLI stores rollout transcripts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). */
@@ -159,10 +181,42 @@ export const config = {
   zcodeConfigFile: path.join(ZCODE_HOME, 'cli', 'config.json'),
   /** Where Vibe persists normalized transcripts for ZCode sessions it drives. */
   zcodeTranscriptsDir: path.join(VIBE_HOME, 'zcode-transcripts'),
-  /** Sidecar index for sync session adoption (ZCode keeps sessions in SQLite,
-   *  which Vibe's Node 20 runtime cannot read — the async discovery pass rewrites
-   *  this so the synchronous hub resolve path has something to peek). */
+  /** Sidecar index for sync session adoption. The async app-server discovery pass
+   *  rewrites it so the synchronous hub resolve path does not need to open and
+   *  schema-couple itself to ZCode's live SQLite database. */
   zcodeIndexFile: path.join(VIBE_HOME, 'zcode-index.json'),
+  /** CodeBuddy data root — fixed at ~/.codebuddy (the CLI offers no override). */
+  codebuddyHome: path.join(os.homedir(), '.codebuddy'),
+  /** CodeBuddy per-project transcripts (~/.codebuddy/projects — Claude layout). */
+  codebuddyProjectsDir: path.join(os.homedir(), '.codebuddy', 'projects'),
+  /** Where Vibe persists normalized transcripts for CodeBuddy sessions it drives. */
+  codebuddyTranscriptsDir: path.join(VIBE_HOME, 'codebuddy-transcripts'),
+  /** Vibe-managed CodeBuddy credentials (CODEBUDDY_API_KEY / _AUTH_TOKEN). */
+  codebuddyAuthEnvFile: path.join(os.homedir(), '.codebuddy', 'vibe-auth.env'),
+  /** Per-session MCP config files handed to the CodeBuddy CLI (`--mcp-config`). */
+  codebuddyMcpDir: path.join(VIBE_HOME, 'codebuddy-mcp'),
+  /** Devin data root — an XDG data dir (override with DEVIN_HOME). */
+  devinHome: DEVIN_HOME,
+  /** Devin's session database. SQLite in WAL mode, so the real data may sit in
+   *  the `-wal` sidecar until a checkpoint; readers must copy both together. */
+  devinSessionsDb: path.join(DEVIN_HOME, 'cli', 'sessions.db'),
+  /** Devin credentials written by `devin auth login` (read-only for Vibe). */
+  devinCredentialsFile: path.join(DEVIN_HOME, 'credentials.toml'),
+  /** Devin user config (~/.config/devin/config.json — not under the data dir). */
+  devinConfigFile: path.join(os.homedir(), '.config', 'devin', 'config.json'),
+  /** Where Vibe persists transcripts for Devin sessions it drives. */
+  devinTranscriptsDir: path.join(VIBE_HOME, 'devin-transcripts'),
+  /** opencode data root — an XDG data dir (override with OPENCODE_HOME). */
+  opencodeHome: OPENCODE_HOME,
+  /** opencode's session library. SQLite in WAL mode, so the real data may sit
+   *  in the `-wal` sidecar until a checkpoint; readers must open the live path
+   *  (not a lone copy) so the engine applies the WAL for them. */
+  opencodeDb: path.join(OPENCODE_HOME, 'opencode.db'),
+  /** Where Vibe persists transcripts for opencode sessions it drives. */
+  opencodeTranscriptsDir: path.join(VIBE_HOME, 'opencode-transcripts'),
+  /** Sidecar blobs for tool results too large to keep inline in a transcript
+   *  line (~/.vibe/blobs/<session>/<block>.txt — see sessions/blobs.ts). */
+  blobsDir: path.join(VIBE_HOME, 'blobs'),
   /** Base dir for auto-created (ephemeral) session working directories. A fresh
    *  subfolder is made under here when a New session skips picking a cwd. */
   workdirsBase: path.join(VIBE_HOME, 'workdirs'),
@@ -185,6 +239,15 @@ export const config = {
   /** Default model for new ZCode sessions (`auto` lets ZCode pick; otherwise
    *  `providerID/modelID` as written in ~/.zcode/cli/config.json). */
   defaultZcodeModel: process.env.VIBE_DEFAULT_ZCODE_MODEL || 'auto',
+  /** Default model for new CodeBuddy sessions (`auto` lets CodeBuddy pick). */
+  defaultCodebuddyModel: process.env.VIBE_DEFAULT_CODEBUDDY_MODEL || 'auto',
+  /** Default model for new opencode sessions (`provider/model`; `auto` lets
+   *  opencode pick from its own config). */
+  defaultOpencodeModel: process.env.VIBE_DEFAULT_OPENCODE_MODEL || 'auto',
+  /** Default model *family* for new Devin sessions. `auto` lets Devin pick;
+   *  otherwise a family uid (e.g. `claude-opus-5`), with the effort level chosen
+   *  separately and assembled into a variant uid at turn time. */
+  defaultDevinModel: process.env.VIBE_DEFAULT_DEVIN_MODEL || 'auto',
   /** Which engine new sessions use by default. */
   defaultAgent:
     process.env.VIBE_DEFAULT_AGENT === 'cursor'
@@ -199,7 +262,13 @@ export const config = {
             ? 'grok'
             : process.env.VIBE_DEFAULT_AGENT === 'zcode'
               ? 'zcode'
-              : 'claude',
+              : process.env.VIBE_DEFAULT_AGENT === 'codebuddy'
+                ? 'codebuddy'
+                : process.env.VIBE_DEFAULT_AGENT === 'opencode'
+                  ? 'opencode'
+                  : process.env.VIBE_DEFAULT_AGENT === 'devin'
+                    ? 'devin'
+                    : 'claude',
   /** Path to the user's real claude binary (preferred over the SDK's bundled one). */
   claudeExecutable: resolveClaudeExecutable(),
   /** Path to the user's cursor-agent binary (the Cursor CLI). */
@@ -214,5 +283,11 @@ export const config = {
   grokExecutable: resolveGrokExecutable(),
   /** Path to the user's ZCode CLI binary (`zcode`). */
   zcodeExecutable: resolveZcodeExecutable(),
+  /** Path to the user's CodeBuddy CLI binary (`codebuddy`, aka `cbc`). */
+  codebuddyExecutable: resolveCodebuddyExecutable(),
+  /** Path to the user's opencode CLI binary (`opencode`). */
+  opencodeExecutable: resolveOpencodeExecutable(),
+  /** Path to the user's Devin CLI binary (`devin`). */
+  devinExecutable: resolveDevinExecutable(),
   serverVersion: '0.1.0',
 } as const;

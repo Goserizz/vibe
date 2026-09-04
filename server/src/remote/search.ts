@@ -19,44 +19,53 @@ export interface RemoteSearchHit {
 }
 
 /**
- * Build the remote bundle command. The query is single-quoted via `shQuote` so
- * the remote shell treats `$Q` literally and `grep -F` matches it as a fixed
- * string (regex metacharacters in the query are inert). Used directly with
- * `sshExec` — like `BUNDLE_CMD`, it relies only on POSIX utilities (`ls`,
- * `grep`, `stat`, `head`, `basename`, `printf`) that exist without sourcing the
- * login shell.
+ * Build the remote bundle command. Each term gets its own `Q<n>` variable,
+ * single-quoted via `shQuote`, so the remote shell treats them literally and
+ * `grep -F` matches them as fixed strings (regex metacharacters in the query
+ * are inert). Used directly with `sshExec` — like `BUNDLE_CMD`, it relies only
+ * on POSIX utilities (`ls`, `grep`, `stat`, `head`, `basename`, `printf`) that
+ * exist without sourcing the login shell.
+ *
+ * The greps take one `-e <term>` per term (OR): the prefilter only nominates
+ * files that might satisfy the AND of all terms — the caller's findHits does
+ * the precise per-term filtering on the pulled-back lines, so one SSH
+ * round-trip still suffices.
  *
  * Each matching file emits three RS-separated segments: marker(id\x1fmtime),
  * the file head, and the matching lines. Splitting on RS yields records in
  * groups of three (the leading "" + per-group marker/head/matches).
  */
-function bundleCmd(query: string): string {
+function bundleCmd(terms: string[]): string {
+  const pats = terms.map((_, i) => `-e "$Q${i}"`).join(' ');
   return [
-    `Q=${shQuote(query)}`,
+    ...terms.map((t, i) => `Q${i}=${shQuote(t)}`),
     'cd ~/.claude/projects 2>/dev/null || exit 0',
     // `./*/*.jsonl` (not `*/*.jsonl`) so project dirs starting with "-" aren't
     // read as `ls` flags. Most-recent first, bounded so a huge history stays
     // responsive.
     'ls -1t ./*/*.jsonl 2>/dev/null | head -200 | while IFS= read -r f; do',
-    '  if grep -iqF -- "$Q" "$f" 2>/dev/null; then',
+    `  if grep -iqF ${pats} -- "$f" 2>/dev/null; then`,
     '    id=$(basename "$f" .jsonl)',
     '    m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)',
     `    printf '${RS}%s${FS}%s${RS}\\n' "$id" "$m"`,
     '    head -n 40 "$f"',
     `    printf '${RS}\\n'`,
-    '    grep -iF -- "$Q" "$f" 2>/dev/null | head -n 15 | head -c 65536',
+    `    grep -iF ${pats} -- "$f" 2>/dev/null | head -n 15 | head -c 65536`,
     '  fi',
     'done',
   ].join('\n');
 }
 
 /**
- * Find conversations on a remote host whose message text contains the query.
- * One SSH round-trip: `grep` filters files on the remote side (cheap), so only
- * matching files contribute any content to the transfer.
+ * Find conversations on a remote host whose message text contains every term
+ * (the AND is enforced by the caller's findHits; here grep only narrows the
+ * transfer to files containing at least one term). One SSH round-trip: `grep`
+ * filters files on the remote side (cheap), so only matching files contribute
+ * any content to the transfer.
  */
-export async function searchRemoteHost(host: RemoteHost, query: string): Promise<RemoteSearchHit[]> {
-  const res = await sshExec(host.ssh, loginShellCommand(bundleCmd(query)), { timeoutMs: 20_000 });
+export async function searchRemoteHost(host: RemoteHost, terms: string[]): Promise<RemoteSearchHit[]> {
+  if (terms.length === 0) return [];
+  const res = await sshExec(host.ssh, loginShellCommand(bundleCmd(terms)), { timeoutMs: 20_000 });
   if (res.code !== 0) {
     log.debug(`remote search failed for ${host.name}`, res.stderr.trim().slice(0, 120));
     return [];

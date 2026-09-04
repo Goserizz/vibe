@@ -3,7 +3,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { config } from '../config.js';
+import { externalizeResults } from '../sessions/blobs.js';
 import { log } from '../log.js';
+import { openSqliteReadonly } from '../switch/sqlite.js';
 import type { ChatBlock, LiveEvent, ToolBlock } from '../../../shared/protocol.js';
 
 // ---------------------------------------------------------------------------
@@ -45,7 +47,8 @@ export function appendCursorBlocks(sessionId: string, blocks: ChatBlock[]): void
   if (!blocks.length) return;
   try {
     fs.mkdirSync(config.cursorTranscriptsDir, { recursive: true });
-    fs.appendFileSync(transcriptFile(sessionId), blocks.map((b) => JSON.stringify(b)).join('\n') + '\n');
+    const persisted = externalizeResults(sessionId, blocks);
+    fs.appendFileSync(transcriptFile(sessionId), persisted.map((b) => JSON.stringify(b)).join('\n') + '\n');
   } catch (err) {
     log.warn('failed to persist cursor transcript', err);
   }
@@ -128,7 +131,8 @@ export class CursorTranscriptBuilder {
 // with `latestRootBlobId` + `name`. `blobs(id, data)` is a content-addressed
 // DAG: message blobs are raw JSON (`{role,content,...}`); index nodes are
 // protobuf whose field 1 holds 32-byte child hashes in conversation order. We
-// read via the system `sqlite3` (hex-encoded) to avoid a native dependency.
+// read via the system `sqlite3` (hex-encoded) so this best-effort discovery path
+// stays usable independently of the optional native-addon load result.
 // ---------------------------------------------------------------------------
 
 /** Read a LEB128 varint; returns [value, nextIndex] or null if truncated. */
@@ -212,6 +216,36 @@ export function parseCursorStoreDump(metaDump: string, blobsDump: string): { blo
 
 /** Load all blobs (id -> bytes) and the latest root id from a store.db. */
 function loadStore(dbPath: string): { blobs: Map<string, Buffer>; rootId?: string } {
+  // `better-sqlite3` is already an optional runtime dependency of the switch
+  // subsystem. Prefer it here: many production hosts (including the one that
+  // exposed the ACP-resume bug) do not have the `sqlite3` executable at all.
+  const db = openSqliteReadonly(dbPath);
+  if (db) {
+    try {
+      let rootId: string | undefined;
+      const metaRows = db.prepare('select value from meta').all() as { value: string }[];
+      for (const row of metaRows) {
+        try {
+          const obj = JSON.parse(Buffer.from(row.value, 'hex').toString('utf8')) as { latestRootBlobId?: unknown };
+          if (typeof obj.latestRootBlobId === 'string') {
+            rootId = obj.latestRootBlobId;
+            break;
+          }
+        } catch {
+          /* not the metadata row */
+        }
+      }
+      const blobs = new Map<string, Buffer>();
+      const rows = db.prepare('select id, data from blobs').all() as { id: string; data: Buffer }[];
+      for (const row of rows) blobs.set(row.id, Buffer.from(row.data));
+      return { blobs, rootId };
+    } catch (err) {
+      log.debug('cursor native sqlite read failed; trying sqlite3 CLI', err);
+    } finally {
+      db.close();
+    }
+  }
+
   let metaDump = '';
   let blobsDump = '';
   try {
@@ -321,7 +355,11 @@ function messagesToBlocks(msgs: any[]): ChatBlock[] {
         const tb = toolById.get(tid);
         if (tb) {
           tb.result = typeof part.result === 'string' ? part.result : resultToText(part.result);
-          tb.status = 'done';
+          const failed = m?.providerOptions?.cursor?.highLevelToolCallResult?.isError === true
+            || part.isError === true
+            || (part.result && typeof part.result === 'object' && 'error' in part.result);
+          tb.status = failed ? 'error' : 'done';
+          if (failed) tb.isError = true;
         }
       }
       // redacted-reasoning: encrypted, no readable text — skipped
@@ -337,7 +375,11 @@ export function cursorStoreBlocks(store: { blobs: Map<string, Buffer>; rootId?: 
 }
 
 /** Best-effort read of an external Cursor chat transcript by cwd + chat id. */
-export function readCursorStoreTranscript(cwd: string, chatId: string): ChatBlock[] {
+export function readCursorStoreTranscript(
+  cwd: string,
+  chatId: string,
+  chatsDir: string = config.cursorChatsDir,
+): ChatBlock[] {
   // Cursor hashes the resolved path; try both the literal cwd and its realpath.
   const hashes = new Set<string>();
   hashes.add(crypto.createHash('md5').update(cwd).digest('hex'));
@@ -347,7 +389,7 @@ export function readCursorStoreTranscript(cwd: string, chatId: string): ChatBloc
     /* path gone */
   }
   for (const hash of hashes) {
-    const dbPath = path.join(config.cursorChatsDir, hash, chatId, 'store.db');
+    const dbPath = path.join(chatsDir, hash, chatId, 'store.db');
     if (!fs.existsSync(dbPath)) continue;
     try {
       return cursorStoreBlocks(loadStore(dbPath));

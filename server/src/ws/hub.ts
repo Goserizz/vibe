@@ -1,11 +1,16 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { WebSocket } from 'ws';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { startRun, type RunHandle } from '../claude/runner.js';
 import { isContentEvent } from '../claude/retry.js';
 import { startCursorRun } from '../cursor/runner.js';
-import { resolveCursorSessionSync } from '../cursor/discovery.js';
+import {
+  ensureCursorAcpSessionFromChat,
+  recoverCursorChatId,
+  resolveCursorSessionSync,
+} from '../cursor/discovery.js';
 import {
   CursorTranscriptBuilder,
   appendCursorBlocks,
@@ -16,8 +21,8 @@ import { startCodexRun } from '../codex/runner.js';
 import { resolveCodexSessionSync } from '../codex/discovery.js';
 import {
   appendCodexBlocks,
-  readCodexRolloutTranscript,
   readCodexTranscript,
+  readCodexRolloutTranscript,
 } from '../codex/transcript.js';
 import { startKimiRun } from '../kimi/runner.js';
 import { resolveKimiSessionSync } from '../kimi/discovery.js';
@@ -47,15 +52,41 @@ import {
   readZcodeNativeTranscript,
   readZcodeTranscript,
 } from '../zcode/transcript.js';
-import { readTranscriptBlocks } from '../sessions/transcript.js';
-import { resolveClaudeSessionSync } from '../sessions/discovery.js';
+import { startCodebuddyRun } from '../codebuddy/runner.js';
+import { resolveCodebuddySessionSync } from '../codebuddy/discovery.js';
+import {
+  appendCodebuddyBlocks,
+  readCodebuddyTranscript,
+  readCodebuddyNativeTranscript,
+  repairLegacyCodebuddyThinkingCarry,
+} from '../codebuddy/transcript.js';
+import { startOpencodeRun } from '../opencode/runner.js';
+import { resolveOpencodeSessionSync } from '../opencode/discovery.js';
+import {
+  appendOpencodeBlocks,
+  readOpencodeNativeTranscript,
+  readOpencodeTranscript,
+} from '../opencode/transcript.js';
+import { startDevinRun } from '../devin/runner.js';
+import { resolveDevinSessionSync } from '../devin/discovery.js';
+import {
+  appendDevinBlocks,
+  readDevinNativeTranscript,
+  readDevinTranscript,
+} from '../devin/transcript.js';
+import { readTranscriptBlocks, findTranscriptFile, parseTranscriptBlockLines } from '../sessions/transcript.js';
+import { readBlocksWindow, readLinesWindow, readLineAt, truncateForTransfer, type WindowOpts } from '../sessions/window.js';
+import { readBlobText } from '../sessions/blobs.js';
+import { isClaudeSessionId, resolveClaudeSessionSync } from '../sessions/discovery.js';
 import { sessionVisible, metaVisible } from '../sessions/visibility.js';
 import { readRemoteAgentTranscript, readRemoteTranscript } from '../remote/discovery.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { mcpRegistry } from '../mcp/registry.js';
+import { isMonitorManagementTool, monitorMcpDefinitionFor } from '../monitoring/mcp.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
-import { ADMIN_ACCOUNT } from '../../../shared/protocol.js';
+import { defaultSwitchPaths } from '../switch/paths.js';
+import { ADMIN_ACCOUNT, settleInterruptedTool } from '../../../shared/protocol.js';
 import type {
   AgentKind,
   AssistantBlock,
@@ -69,6 +100,7 @@ import type {
   PermissionRequest,
   ServerEvent,
   SessionMeta,
+  SnapshotPage,
   ToolBlock,
   ThinkingBlock,
 } from '../../../shared/protocol.js';
@@ -169,10 +201,112 @@ interface LoggedEvent {
 
 type MetaListener = () => void;
 
+interface TurnPresentation {
+  /** User turns render their original prompt. Monitor turns render only a
+   * trusted system notice while the full incident envelope goes to the model. */
+  kind: 'user' | 'monitor';
+  notice?: string;
+}
+
+const OWN_TRANSCRIPT_AGENTS: AgentKind[] = [
+  'cursor',
+  'codex',
+  'kimi',
+  'kiro',
+  'grok',
+  'zcode',
+  'codebuddy',
+  'opencode',
+  'devin',
+];
+
 /**
  * Per-session live state: a seq-tagged event log for lossless replay, the set
  * of subscribed connections, the active run, and pending permission prompts.
  */
+/** Vibe-normalized transcript dir per agent. Claude is native-only (null). */
+function ownTranscriptsDir(agent: AgentKind): string | null {
+  switch (agent) {
+    case 'cursor': return config.cursorTranscriptsDir;
+    case 'codex': return config.codexTranscriptsDir;
+    case 'kimi': return config.kimiTranscriptsDir;
+    case 'kiro': return config.kiroTranscriptsDir;
+    case 'grok': return config.grokTranscriptsDir;
+    case 'zcode': return config.zcodeTranscriptsDir;
+    case 'codebuddy': return config.codebuddyTranscriptsDir;
+    case 'opencode': return config.opencodeTranscriptsDir;
+    case 'devin': return config.devinTranscriptsDir;
+    default: return null;
+  }
+}
+
+/** Newest page of the Vibe-persisted transcript for a session, results
+ *  truncated for transfer. Null when there is no parseable transcript — the
+ *  caller falls back to the agent's native store, like the old
+ *  `own.length ? own : native` readers did. */
+function ownTranscriptPage(
+  sessionId: string,
+  agent: AgentKind,
+  page: WindowOpts,
+): ({ blocks: ChatBlock[] } & SnapshotPage) | null {
+  const dir = ownTranscriptsDir(agent);
+  if (!dir) return null;
+  const file = path.join(dir, `${encodeURIComponent(sessionId)}.jsonl`);
+  const win = readBlocksWindow(file, page);
+  if (!win || win.blocks.length === 0) return null;
+  return {
+    blocks: truncateForTransfer(win.blocks, win.offsets),
+    hasMore: win.hasMore,
+    cursor: win.hasMore ? String(win.startByte) : undefined,
+  };
+}
+
+/**
+ * Read the complete Vibe-owned transcript for agent switching.
+ *
+ * This is deliberately separate from {@link ownTranscriptPage}: the UI needs
+ * bounded pages, while a native-session rebuild must never silently discard
+ * everything before the newest page. CodeBuddy goes through its production
+ * reader so legacy assistant-side thinking wrappers are normalized before a
+ * later adapter sees them.
+ */
+function ownTranscriptFull(sessionId: string, agent: AgentKind): ChatBlock[] {
+  switch (agent) {
+    case 'cursor': return readCursorTranscript(sessionId);
+    case 'codex': return readCodexTranscript(sessionId);
+    case 'kimi': return readKimiTranscript(sessionId);
+    case 'kiro': return readKiroTranscript(sessionId);
+    case 'grok': return readGrokTranscript(sessionId);
+    case 'zcode': return readZcodeTranscript(sessionId);
+    case 'codebuddy': return readCodebuddyTranscript(sessionId);
+    case 'opencode': return readOpencodeTranscript(sessionId);
+    case 'devin': return readDevinTranscript(sessionId);
+    default: return [];
+  }
+}
+
+/** Newest page of a native Claude transcript, folded into blocks. Blocks are
+ *  not 1:1 with lines (tool results fold into their tool block), so truncated
+ *  results carry no `line:` ref here — the full text stays reachable on the
+ *  native side for anything that consumes the transcript directly. */
+function claudeTranscriptPage(
+  claudeSessionId: string | undefined,
+  page: WindowOpts,
+): ({ blocks: ChatBlock[] } & SnapshotPage) | null {
+  if (!claudeSessionId) return null;
+  const file = findTranscriptFile(claudeSessionId);
+  if (!file) return null;
+  const win = readLinesWindow(file, page);
+  if (!win || win.lines.length === 0) return null;
+  const { blocks } = parseTranscriptBlockLines(win.lines);
+  if (!blocks.length) return null;
+  return {
+    blocks: truncateForTransfer(blocks),
+    hasMore: win.hasMore,
+    cursor: win.hasMore ? String(win.startByte) : undefined,
+  };
+}
+
 class SessionRuntime {
   seq = 0;
   running = false;
@@ -211,6 +345,15 @@ class SessionRuntime {
    *  the readers (no dedup) so a block is never written twice. */
   private persistedBlockIds = new Set<string>();
   private lastIncrementalPersist = 0;
+  /** A replaced runtime must never emit events or write its native id back. */
+  private retired = false;
+  /** Set when an event since the last flush could have produced persistable
+   *  blocks — gates the trailing-flush timer below. */
+  private maybePersistable = false;
+  /** Fires the flush a throttled emit skipped, so a turn whose last events all
+   *  land inside the 3s window still persists while the run sits open on a
+   *  persistent background task (no further emits, no finishTurn). */
+  private persistTimer?: NodeJS.Timeout;
 
   constructor(
     readonly sessionId: string,
@@ -228,8 +371,13 @@ class SessionRuntime {
     this.sshTarget = init.sshTarget;
     this.proxy = init.proxy;
     // Headless CLI agents self-persist through the shared LiveEvent→blocks accumulator.
-    if (this.agent === 'cursor' || this.agent === 'codex' || this.agent === 'kimi' || this.agent === 'kiro' || this.agent === 'grok' || this.agent === 'zcode') {
+    if (this.agent === 'cursor' || this.agent === 'codex' || this.agent === 'kimi' || this.agent === 'kiro' || this.agent === 'grok' || this.agent === 'zcode' || this.agent === 'codebuddy' || this.agent === 'opencode' || this.agent === 'devin') {
       this.transcript = new CursorTranscriptBuilder();
+    }
+    // Devin's history lives in its SQLite store; seed it once on adoption so
+    // snapshots show the conversation it already had.
+    if (this.agent === 'devin' && init.claudeSessionId && readDevinTranscript(this.sessionId).length === 0) {
+      appendDevinBlocks(this.sessionId, readDevinNativeTranscript(init.claudeSessionId));
     }
     // Preserve the existing history before a native Kimi/Kiro session is adopted:
     // subsequent snapshots prefer Vibe's normalized transcript.
@@ -242,17 +390,21 @@ class SessionRuntime {
     if (this.agent === 'grok' && init.claudeSessionId && readGrokTranscript(this.sessionId).length === 0) {
       appendGrokBlocks(this.sessionId, readGrokNativeTranscript(init.claudeSessionId));
     }
+    if (this.agent === 'opencode' && init.claudeSessionId && readOpencodeTranscript(this.sessionId).length === 0) {
+      appendOpencodeBlocks(this.sessionId, readOpencodeNativeTranscript(init.claudeSessionId));
+    }
     // ZCode history lives in its SQLite store and is only reachable by spawning
     // an app-server — seed asynchronously, snapshots race ahead with [] and the
     // first subscribe after adoption picks the transcript up.
     if (this.agent === 'zcode' && init.claudeSessionId && readZcodeTranscript(this.sessionId).length === 0) {
-      void readZcodeNativeTranscript(init.claudeSessionId).then((blocks) => {
+      void readZcodeNativeTranscript(init.claudeSessionId, init.cwd).then((blocks) => {
         if (blocks.length) appendZcodeBlocks(this.sessionId, blocks);
       });
     }
   }
 
   private emit(ev: LiveEvent): void {
+    if (this.retired) return;
     // Engine content with no user message since the last turn ended = a
     // background-task wake — mark it before the content renders. Result/error
     // blocks close a turn and re-arm the detector for the next one.
@@ -273,6 +425,7 @@ class SessionRuntime {
     this.foldFinalized(ev);
     // Crash window: keep the persisted transcript within a few seconds of the
     // live stream while a turn runs.
+    if (ev.k === 'block' || ev.k === 'block_end' || ev.k === 'tool_result') this.maybePersistable = true;
     this.persistTranscript();
     if (this.logBuf.length > LOG_CAP) this.logBuf.splice(0, this.logBuf.length - LOG_CAP);
     const frame: ServerEvent = { t: 'event', sessionId: this.sessionId, seq: this.seq, ev };
@@ -395,6 +548,14 @@ class SessionRuntime {
     return true;
   }
 
+  /** A thinking block with no text carries nothing — CodeBuddy's engine can
+   *  cancel a generation right after its content_block_start, and a force
+   *  flush at end of turn would otherwise write the empty shell down as a
+   *  permanent "Thinking…" row. */
+  private static isGhostThinking(b: ChatBlock): boolean {
+    return b.kind === 'thinking' && !(b.text ?? '');
+  }
+
   /** Append not-yet-persisted blocks to the Vibe JSONL. Throttled to ~3s while
    *  a run is live so a service restart mid-turn loses at most a few seconds of
    *  streaming instead of the whole turn; finishTurn force-flushes the rest. */
@@ -402,11 +563,24 @@ class SessionRuntime {
     if (!this.transcript) return;
     if (!force) {
       if (!this.run) return;
-      if (Date.now() - this.lastIncrementalPersist < 3_000) return;
+      if (Date.now() - this.lastIncrementalPersist < 3_000) {
+        // The remaining delay may never be paid for by another event (e.g. the
+        // turn ended onto a persistent background task that holds the child
+        // open) — schedule the flush so the tail isn't lost until the run ends.
+        this.scheduleTrailingPersist();
+        return;
+      }
+    }
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
     }
     this.lastIncrementalPersist = Date.now();
+    this.maybePersistable = false;
     const pending = this.transcript.blocks.filter(
-      (b) => !this.persistedBlockIds.has(b.id) && (force || SessionRuntime.blockIsPersistable(b)),
+      (b) => !this.persistedBlockIds.has(b.id)
+        && !SessionRuntime.isGhostThinking(b)
+        && (force || SessionRuntime.blockIsPersistable(b)),
     );
     if (!pending.length) return;
     for (const b of pending) this.persistedBlockIds.add(b.id);
@@ -415,7 +589,20 @@ class SessionRuntime {
     else if (this.agent === 'kiro') appendKiroBlocks(this.sessionId, pending);
     else if (this.agent === 'grok') appendGrokBlocks(this.sessionId, pending);
     else if (this.agent === 'zcode') appendZcodeBlocks(this.sessionId, pending);
+    else if (this.agent === 'codebuddy') appendCodebuddyBlocks(this.sessionId, pending);
+    else if (this.agent === 'opencode') appendOpencodeBlocks(this.sessionId, pending);
+    else if (this.agent === 'devin') appendDevinBlocks(this.sessionId, pending);
     else appendCursorBlocks(this.sessionId, pending);
+  }
+
+  private scheduleTrailingPersist(): void {
+    if (this.persistTimer || !this.maybePersistable || !this.run) return;
+    const wait = Math.max(0, 3_000 - (Date.now() - this.lastIncrementalPersist));
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.persistTranscript();
+    }, wait);
+    this.persistTimer.unref?.();
   }
 
   /** `running` means a foreground model turn is producing a reply. The agent
@@ -516,23 +703,69 @@ class SessionRuntime {
     return { claudeSessionId: this.claudeSessionId ?? storeClaudeSessionId, seq: this.seq };
   }
 
-  startTurn(text: string, clientMsgId: string): boolean {
-    if (this.running) return false;
+  /** Why the most recent startTurn() refused — callers can tell a genuinely
+   *  busy turn apart from a stale run handle whose transport already died. */
+  turnRejectReason: 'busy' | 'transport-dead' = 'busy';
+
+  startTurn(text: string, clientMsgId: string, presentation: TurnPresentation = { kind: 'user' }): boolean {
+    if (this.running) {
+      this.turnRejectReason = 'busy';
+      return false;
+    }
     this.wakeNoticePending = false;
+    // 用户气泡里显示的是原始消息；发给 agent 的可能还要拼上切换时暂存的上下文。
+    const userText = text;
+    const originBlock = (): ChatBlock => presentation.kind === 'monitor'
+      ? {
+          id: clientMsgId,
+          kind: 'system',
+          text: presentation.notice?.trim() || '监控事件唤醒 agent 处理',
+          ts: Date.now(),
+        }
+      : { id: clientMsgId, kind: 'user', text: userText, ts: Date.now() };
+
+    // Pick up the latest model/permission/cwd (header changes write to the store).
+    const stored = sessionStore.get(this.sessionId);
+
+    // 切换 agent 时若目标方向无法构造原生会话（fidelity=partial），历史会暂存在
+    // `switchPrimer` 里，等本会话第一次发消息时作为上下文前缀注入 —— 注入后立即
+    // 清空，所以只会注入一次。
+    const primer = stored?.switchPrimer;
+    if (primer) {
+      sessionStore.update(this.sessionId, { switchPrimer: undefined });
+      // 立刻落盘：否则进程在这 250ms debounce 窗口内重启会把同一份历史再注入一次。
+      sessionStore.flush();
+      // 历史放在用户消息之前，模型先读背景再读当前指令。
+      text = `${primer}\n\n${text}`;
+      this.emit({
+        k: 'block',
+        block: {
+          id: `sw_${crypto.randomUUID()}`,
+          kind: 'system',
+          text: `已把原会话的完整历史作为上下文注入本轮（本次 ${this.agent} 原生会话写入失败或运行时依赖不可用，已降级为部分保真切换）。`,
+          ts: Date.now(),
+        },
+      });
+    }
 
     // Claude SDK, Kimi ACP, and Codex App Server remain connected while native
     // tasks run. Steer a new user message through that connection instead of
     // rejecting it or starting a competing process for the same session.
     if (this.run) {
-      if (!this.run.sendMessage?.(text)) return false;
+      if (!this.run.sendMessage?.(text)) {
+        // The transport backing this run is gone (it died while servicing
+        // background tasks). The service loop will clear `this.run` on its
+        // next 2.5s pass; report the real cause instead of "busy" so the
+        // user knows a resend will start a fresh run.
+        this.turnRejectReason = 'transport-dead';
+        return false;
+      }
       this.runUserTurns += 1;
       this.setForegroundRunning(true);
-      this.emit({ k: 'block', block: { id: clientMsgId, kind: 'user', text, ts: Date.now() } });
+      this.emit({ k: 'block', block: originBlock() });
       return true;
     }
 
-    // Pick up the latest model/permission/cwd (header changes write to the store).
-    const stored = sessionStore.get(this.sessionId);
     const cwd = stored?.cwd ?? this.cwd;
     const model = stored?.model ?? this.model;
     const permissionMode = stored?.permissionMode ?? this.permissionMode;
@@ -546,9 +779,10 @@ class SessionRuntime {
     const where = this.sshTarget ? `host=${this.host}` : 'local';
     log.debug(`turn start session=${this.sessionId} agent=${this.agent} ${where} resume=${this.claudeSessionId ?? 'new'} model=${model} cwd=${cwd}`);
     this.setForegroundRunning(true);
-    this.emit({ k: 'block', block: { id: clientMsgId, kind: 'user', text, ts: Date.now() } });
+    this.emit({ k: 'block', block: originBlock() });
 
     const runOpts = {
+      // `text` 在这里可能已经拼上了切换时注入的历史上下文（partial 方向）。
       prompt: text,
       cwd,
       model,
@@ -559,10 +793,24 @@ class SessionRuntime {
     };
     // Resolve MCP servers fresh per turn from the registry, scoped to this
     // session's host (or 'local'). Editing MCP config applies to the next turn.
-    const mcpServers: McpServerDef[] = mcpRegistry.resolveForScope(this.host ?? 'local');
+    const monitorMcp = monitorMcpDefinitionFor({
+      owner: stored?.owner
+        ?? (this.host ? hostRegistry.get(this.host)?.owner : ADMIN_ACCOUNT)
+        ?? ADMIN_ACCOUNT,
+      sessionId: this.sessionId,
+      host: this.host,
+    });
+    // Built-ins are separate from the user-toggleable registry. Filter a user
+    // definition with the reserved name so it cannot shadow the scoped tool.
+    const mcpServers: McpServerDef[] = [
+      ...mcpRegistry.resolveForScope(this.host ?? 'local').filter((server) => server.name !== 'vibe-monitor'),
+      ...(monitorMcp ? [monitorMcp] : []),
+    ];
+    const builtInMcpServers: McpServerDef[] = monitorMcp ? [monitorMcp] : [];
     const cb = {
       onEvent: (ev: LiveEvent) => this.emit(ev),
       onClaudeSessionId: (id: string) => {
+        if (this.retired) return;
         if (!id || id === this.claudeSessionId) return;
         this.claudeSessionId = id;
         // Link the underlying CLI session id to this Vibe session the moment the
@@ -661,7 +909,53 @@ class SessionRuntime {
           effort,
           resume: this.claudeSessionId,
           vibeSessionId: this.sessionId,
-          // ZCode consumes MCP from ~/.zcode/cli/config.json, not per-session.
+          mcpServers: builtInMcpServers,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
+        },
+        cb,
+      );
+    } else if (this.agent === 'codebuddy') {
+      this.run = startCodebuddyRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          effort,
+          resume: this.claudeSessionId,
+          allowedTools: [...this.allowedTools],
+          // MCP servers resolve where the CLI runs: stdio commands spawn on
+          // the session's host, http/sse dial from there.
+          mcpServers,
+          vibeSessionId: this.sessionId,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
+        },
+        cb,
+      );
+    } else if (this.agent === 'opencode') {
+      this.run = startOpencodeRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          effort,
+          resume: this.claudeSessionId,
+          mcpServers: builtInMcpServers,
+          remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
+        },
+        cb,
+      );
+    } else if (this.agent === 'devin') {
+      this.run = startDevinRun(
+        {
+          prompt: text,
+          cwd,
+          model,
+          permissionMode,
+          effort,
+          resume: this.claudeSessionId,
+          mcpServers: builtInMcpServers,
           remote: this.sshTarget ? { sshTarget: this.sshTarget, cwd, proxy: this.proxy } : undefined,
         },
         cb,
@@ -677,7 +971,18 @@ class SessionRuntime {
     return true;
   }
 
+  appendSystemNotice(text: string): void {
+    this.emit({
+      k: 'block',
+      block: { id: `sys_${crypto.randomUUID()}`, kind: 'system', text, ts: Date.now() },
+    });
+    // A notice can arrive while no engine run exists; persist it immediately
+    // instead of waiting for a future user turn.
+    this.persistTranscript(true);
+  }
+
   private finishTurn(run: RunHandle): void {
+    if (this.retired) return;
     if (this.run !== run) return;
     this.run = undefined;
     this.setForegroundRunning(false);
@@ -700,6 +1005,18 @@ class SessionRuntime {
     // Headless CLI sessions self-persist: force-flush anything the throttled
     // incremental persistence hasn't written yet (including blocks that never
     // reached a "final" state, e.g. text still streaming when the run ended).
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
+    // A tool still `running` when the run ended lost its result mid-transport
+    // (SSH drop, abort). Close it through emit() so live subscribers see the
+    // final state and the force flush below persists it — otherwise history
+    // renders an eternal "Running…" row stranded after the result block.
+    for (const b of this.transcript?.blocks ?? []) {
+      const settled = settleInterruptedTool(b);
+      if (settled !== b) this.emit({ k: 'block', block: settled });
+    }
     this.persistTranscript(true);
     if (this.agent === 'zcode') invalidateZcodeSessionsCache();
 
@@ -730,6 +1047,10 @@ class SessionRuntime {
   }
 
   private requestPermission(request: PermissionRequest): Promise<PermissionDecision> {
+    // The user explicitly grants the reserved built-in MCP full Monitor
+    // management authority. Exact server-qualified names only: an unrelated
+    // user MCP exposing a similarly named tool must not inherit this grant.
+    if (isMonitorManagementTool(request.toolName)) return Promise.resolve({ allow: true, remember: true });
     return new Promise<PermissionDecision>((resolve) => {
       this.pending.set(request.requestId, { request, resolve });
       const frame: ServerEvent = { t: 'permission_request', sessionId: this.sessionId, request };
@@ -766,6 +1087,20 @@ class SessionRuntime {
     this.run?.abort();
   }
 
+  /** Permanently detach this runtime after an agent/model switch. */
+  retire(): void {
+    this.retired = true;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
+    for (const [, pending] of this.pending) pending.resolve({ allow: false });
+    this.pending.clear();
+    this.run?.abort();
+    this.run = undefined;
+    this.subscribers.clear();
+  }
+
   async stopTask(taskId: string): Promise<boolean> {
     const task = this.tasks.get(taskId);
     if (!task || !task.canStop || !this.run?.stopTask) return false;
@@ -790,6 +1125,8 @@ class SessionRuntime {
 export class Hub {
   private runtimes = new Map<string, SessionRuntime>();
   private conns = new Set<Conn>();
+  /** Serializes agent switches and prevents a message racing the SQLite build. */
+  private switchingSessions = new Set<string>();
   /** Resolved remote-session info (populated by the API on list/open) so the
    *  synchronous hub can build remote runtimes without an SSH round-trip. */
   private remoteCache = new Map<string, RemoteSessionInfo>();
@@ -842,9 +1179,54 @@ export class Hub {
 
     // Local session.
     if (stored) {
+      let nativeId = stored.claudeSessionId;
+      if (stored.agent === 'cursor' && nativeId) {
+        const cursorPaths = defaultSwitchPaths();
+        // A switched Cursor session historically lived only under
+        // ~/.cursor/chats. ACP does not search that tree: if its first resume
+        // failed it created a fresh UUID and the callback replaced our mapping.
+        // Recover both malformed source IDs and those valid-but-empty fallback
+        // UUIDs. Legacy recovery outside the time window is accepted only when
+        // the native chat's user turns exactly match the Vibe transcript prefix.
+        const hasMatchingChat = isClaudeSessionId(nativeId)
+          && recoverCursorChatId({
+            vibeSessionId: stored.id,
+            cwd: stored.cwd,
+            title: stored.title,
+            updatedAt: stored.updatedAt,
+          }, cursorPaths.cursorChatsDir) === nativeId;
+        const recovered = (!isClaudeSessionId(nativeId) || !hasMatchingChat)
+          ? recoverCursorChatId({
+              vibeSessionId: stored.id,
+              cwd: stored.cwd,
+              title: stored.title,
+              updatedAt: stored.updatedAt,
+              userTexts: readCursorTranscript(stored.id)
+                .filter((block) => block.kind === 'user')
+                .map((block) => block.text),
+            }, cursorPaths.cursorChatsDir)
+          : null;
+        if (recovered && recovered !== nativeId) {
+          log.warn(`recovered stale Cursor native id session=${stored.id} ${nativeId} -> ${recovered}`);
+          nativeId = recovered;
+          sessionStore.update(stored.id, { claudeSessionId: recovered });
+          sessionStore.flush();
+        }
+        if (isClaudeSessionId(nativeId)) {
+          ensureCursorAcpSessionFromChat(
+            nativeId,
+            stored.cwd,
+            cursorPaths.cursorChatsDir,
+            cursorPaths.cursorAcpSessionsDir,
+          );
+        }
+      }
+      if (stored.agent === 'codebuddy' && nativeId) {
+        repairLegacyCodebuddyThinkingCarry(stored.id, nativeId);
+      }
       return {
         cwd: stored.cwd, model: stored.model, permissionMode: stored.permissionMode,
-        effort: stored.effort ?? defaultEffort, title: stored.title, claudeSessionId: stored.claudeSessionId,
+        effort: stored.effort ?? defaultEffort, title: stored.title, claudeSessionId: nativeId,
         agent: stored.agent ?? 'claude',
       };
     }
@@ -856,6 +1238,7 @@ export class Hub {
     // …or from ~/.cursor/chats (Cursor).
     const cursorInfo = resolveCursorSessionSync(sessionId);
     if (cursorInfo) {
+      ensureCursorAcpSessionFromChat(sessionId, cursorInfo.cwd);
       return { cwd: cursorInfo.cwd, model: cursorInfo.model, permissionMode: 'default', effort: defaultEffort, title: cursorInfo.title, claudeSessionId: sessionId, agent: 'cursor' };
     }
     // …or from ~/.codex/sessions (Codex).
@@ -883,6 +1266,21 @@ export class Hub {
     if (zcodeInfo) {
       return { cwd: zcodeInfo.cwd, model: zcodeInfo.model, permissionMode: 'default', effort: defaultEffort, title: zcodeInfo.title, claudeSessionId: sessionId, agent: 'zcode' };
     }
+    // …or from ~/.codebuddy/projects (CodeBuddy).
+    const codebuddyInfo = resolveCodebuddySessionSync(sessionId);
+    if (codebuddyInfo) {
+      return { cwd: codebuddyInfo.cwd, model: codebuddyInfo.model, permissionMode: 'default', effort: defaultEffort, title: codebuddyInfo.title, claudeSessionId: sessionId, agent: 'codebuddy' };
+    }
+    // …or from opencode's SQLite session store.
+    const opencodeInfo = resolveOpencodeSessionSync(sessionId);
+    if (opencodeInfo) {
+      return { cwd: opencodeInfo.cwd, model: opencodeInfo.model, permissionMode: 'default', effort: defaultEffort, title: opencodeInfo.title, claudeSessionId: sessionId, agent: 'opencode' };
+    }
+    // …or from Devin's SQLite session store.
+    const devinInfo = resolveDevinSessionSync(sessionId);
+    if (devinInfo) {
+      return { cwd: devinInfo.cwd, model: devinInfo.model, permissionMode: 'default', effort: defaultEffort, title: devinInfo.title, claudeSessionId: sessionId, agent: 'devin' };
+    }
     return undefined;
   }
 
@@ -891,6 +1289,39 @@ export class Hub {
   locate(sessionId: string): { cwd: string; sshTarget?: string } | undefined {
     const init = this.resolveInit(sessionId);
     return init ? { cwd: init.cwd, sshTarget: init.sshTarget } : undefined;
+  }
+
+  /** Make a discovered session durable before attaching long-lived automation
+   * to it. A Monitor must remain resumable after the discovery cache and the
+   * whole Vibe process are gone. */
+  adoptForMonitor(sessionId: string, owner: string): {
+    sessionId: string;
+    host?: string;
+    cwd: string;
+  } | undefined {
+    if (!sessionVisible(owner, sessionId)) return undefined;
+    const existing = sessionStore.get(sessionId);
+    if (existing) return { sessionId, host: existing.host, cwd: existing.cwd };
+    const rt = this.runtimeFor(sessionId);
+    if (!rt) return undefined;
+    sessionStore.adopt({
+      id: sessionId,
+      claudeSessionId: rt.claudeSessionId ?? parseSessionId(sessionId).claudeSessionId,
+      cwd: rt.cwd,
+      title: rt.title,
+      model: rt.model,
+      permissionMode: rt.permissionMode,
+      effort: rt.effort,
+      agent: rt.agent,
+      host: rt.host,
+      owner,
+    });
+    // The monitor row is committed synchronously immediately after this call;
+    // flush its target mapping first so a crash cannot leave a durable monitor
+    // pointing at an ephemeral discovery-cache entry.
+    sessionStore.flush();
+    this.broadcastMeta(sessionId);
+    return { sessionId, host: rt.host, cwd: rt.cwd };
   }
 
   addConn(conn: Conn): void {
@@ -940,6 +1371,10 @@ export class Hub {
       conn.send({ t: 'error', message: 'session not found', sessionId });
       return;
     }
+    if (this.switchingSessions.has(sessionId)) {
+      conn.send({ t: 'error', message: 'session is switching agent — try again when it finishes', sessionId });
+      return;
+    }
     const rt = this.runtimeFor(sessionId);
     if (!rt) {
       conn.send({ t: 'error', message: 'session not found', sessionId });
@@ -958,19 +1393,101 @@ export class Hub {
         effort: rt.effort,
         agent: rt.agent,
         host: rt.host,
+        owner: conn.account,
       });
     }
     rt.subscribers.add(conn);
     conn.subscriptions.add(sessionId);
     const started = rt.startTurn(text, clientMsgId);
     if (!started) {
-      conn.send({ t: 'error', message: 'a turn is already running', sessionId });
+      conn.send({
+        t: 'error',
+        message:
+          rt.turnRejectReason === 'transport-dead'
+            ? 'agent connection lost — resend to start a new run'
+            : 'a turn is already running',
+        sessionId,
+      });
       return;
     }
     // Sending a message counts as activity — refresh updatedAt now so the
     // sidebar reorders immediately instead of waiting for turn end.
     sessionStore.update(sessionId, {});
     this.broadcastMeta(sessionId);
+  }
+
+  /** Start a model turn caused by a durable Monitor. The incident envelope is
+   * sent to the engine, while chat history receives a concise system notice
+   * rather than a fake user message. Busy/switching sessions are not dropped —
+   * the monitor worker keeps the event queued and retries later. */
+  triggerMonitorTurn(input: {
+    owner: string;
+    sessionId: string;
+    eventId: string;
+    notice: string;
+    prompt: string;
+  }): 'started' | 'busy' | 'switching' | 'not-found' {
+    if (!sessionVisible(input.owner, input.sessionId)) return 'not-found';
+    if (this.switchingSessions.has(input.sessionId)) return 'switching';
+    const rt = this.runtimeFor(input.sessionId);
+    if (!rt) return 'not-found';
+    if (rt.running) return 'busy';
+
+    // A monitor may target a discovered native session that has not yet been
+    // adopted through the browser. Adopt it before the unattended turn so its
+    // updated native id and transcript remain durable.
+    if (!sessionStore.get(input.sessionId)) {
+      sessionStore.adopt({
+        id: input.sessionId,
+        claudeSessionId: rt.claudeSessionId ?? parseSessionId(input.sessionId).claudeSessionId,
+        cwd: rt.cwd,
+        title: rt.title,
+        model: rt.model,
+        permissionMode: rt.permissionMode,
+        effort: rt.effort,
+        agent: rt.agent,
+        host: rt.host,
+        owner: input.owner,
+      });
+    }
+    const started = rt.startTurn(
+      input.prompt,
+      `monitor_${input.eventId}_${crypto.randomUUID()}`,
+      { kind: 'monitor', notice: input.notice },
+    );
+    if (!started) return 'busy';
+    sessionStore.update(input.sessionId, {});
+    this.broadcastMeta(input.sessionId);
+    return 'started';
+  }
+
+  /** Persist a monitor lifecycle notice without starting a model turn. */
+  appendMonitorNotice(
+    owner: string,
+    monitorId: string,
+    sessionId: string,
+    level: 'alert' | 'recovery' | 'escalated',
+    text: string,
+  ): boolean {
+    if (!sessionVisible(owner, sessionId)) return false;
+    const rt = this.runtimeFor(sessionId);
+    if (rt) {
+      rt.appendSystemNotice(text);
+      if (sessionStore.get(sessionId)) sessionStore.update(sessionId, {});
+      this.broadcastMeta(sessionId);
+    }
+    for (const conn of this.conns) {
+      if (conn.account === owner) conn.send({ t: 'monitor_notice', monitorId, sessionId, level, text });
+    }
+    return Boolean(rt);
+  }
+
+  /** Monitor state is fetched through REST; this lightweight invalidation frame
+   * lets an open panel refresh without polling aggressively. */
+  broadcastMonitorChanged(owner: string, monitorId: string): void {
+    for (const conn of this.conns) {
+      if (conn.account === owner) conn.send({ t: 'monitor_changed', monitorId });
+    }
   }
 
   /** Abort a running turn. Returns false when the account can't see the
@@ -1005,9 +1522,15 @@ export class Hub {
     return true;
   }
 
-  /** Conversation history + the seq to subscribe from. Reads the transcript
-   *  locally, or over SSH for remote sessions. */
-  async snapshot(sessionId: string): Promise<{ blocks: ChatBlock[]; seq: number }> {
+  /** Conversation history + the seq to subscribe from (see Hub.snapshot).
+   *  Paged: without a cursor it returns the newest window (default 200 blocks
+   *  or ~2MB of raw transcript); `endByte` walks older pages. Tool results
+   *  travel as bounded previews — the unabridged text comes from
+   *  Hub.blockResult on demand. */
+  async snapshot(
+    sessionId: string,
+    page: WindowOpts = {},
+  ): Promise<{ blocks: ChatBlock[]; seq: number } & SnapshotPage> {
     const stored = sessionStore.get(sessionId);
     const rt = this.runtimes.get(sessionId);
     const { host, claudeSessionId: rawId } = parseSessionId(sessionId);
@@ -1033,50 +1556,143 @@ export class Hub {
       return await readLocal();
     };
 
-    if (agent === 'cursor') {
-      // Vibe-persisted transcript is authoritative for sessions we drove.
-      const own = readCursorTranscript(sessionId);
-      if (own.length) return { blocks: own, seq: plan.seq };
-      // No Vibe transcript yet: best-effort parse the agent's own store
-      // (locally, or over SSH for a remote host).
-      return { blocks: await native(() => (cwd ? readCursorStoreTranscript(cwd, sid) : [])), seq: plan.seq };
+    // Vibe-driven sessions (everything but Claude) have a normalized transcript
+    // under ~/.vibe — page it straight off disk, no full-file read.
+    if (agent !== 'claude') {
+      const own = ownTranscriptPage(sessionId, agent, page);
+      if (own) return { blocks: own.blocks, seq: plan.seq, hasMore: own.hasMore, cursor: own.cursor };
+    } else if (!host) {
+      // Claude keeps its history in the native ~/.claude transcript; page the
+      // raw lines and fold them into blocks (blocks ≠ lines, so no line refs).
+      const own = claudeTranscriptPage(sid, page);
+      if (own) return { blocks: own.blocks, seq: plan.seq, hasMore: own.hasMore, cursor: own.cursor };
     }
 
-    if (agent === 'codex') {
-      const own = readCodexTranscript(sessionId);
-      if (own.length) return { blocks: own, seq: plan.seq };
-      return { blocks: await native(() => readCodexRolloutTranscript(cwd, sid)), seq: plan.seq };
+    const readLocal = (): ChatBlock[] | Promise<ChatBlock[]> => {
+      switch (agent) {
+        case 'cursor': return cwd ? readCursorStoreTranscript(cwd, sid) : [];
+        case 'codex': return readCodexRolloutTranscript(cwd, sid);
+        case 'kimi': return readKimiWireTranscript(sid);
+        case 'kiro': return readKiroNativeTranscript(sid);
+        case 'grok': return readGrokNativeTranscript(sid);
+        case 'zcode': return readZcodeNativeTranscript(sid, cwd);
+        case 'codebuddy': return readCodebuddyNativeTranscript(sid);
+        case 'opencode': return readOpencodeNativeTranscript(sid);
+        case 'devin': return readDevinNativeTranscript(sid);
+        default: return sid ? readTranscriptBlocks(sid).blocks : [];
+      }
+    };
+    const blocks =
+      host && agent === 'claude'
+        ? remoteHost && sid
+          ? await readRemoteTranscript(remoteHost, sid)
+          : []
+        : await native(readLocal);
+    return { blocks: truncateForTransfer(blocks), seq: plan.seq, hasMore: false };
+  }
+
+  /**
+   * Capture the complete, untruncated history used to rebuild another agent's
+   * native session. This must not call {@link snapshot}: that method is a UI
+   * transport API and intentionally returns only the newest bounded page.
+   *
+   * The switch route reserves the session with beginAgentSwitch() before
+   * calling this method, so no turn can race the disk snapshot. Keeping this
+   * method public also lets recovery tooling verify the exact source count.
+   */
+  async switchSnapshot(sessionId: string): Promise<{ blocks: ChatBlock[]; seq: number }> {
+    const stored = sessionStore.get(sessionId);
+    const rt = this.runtimes.get(sessionId);
+    if (rt?.hasLiveRun() || rt?.hasActiveBackgroundTasks()) {
+      throw new Error('cannot capture switch history while the session is running');
     }
 
-    if (agent === 'kimi') {
-      const own = readKimiTranscript(sessionId);
+    const { host, claudeSessionId: rawId } = parseSessionId(sessionId);
+    const plan = rt
+      ? rt.snapshotPlan(stored?.claudeSessionId)
+      : { claudeSessionId: stored?.claudeSessionId ?? rawId, seq: 0 };
+    const sid = plan.claudeSessionId ?? rawId;
+    const fallback = !rt && !stored ? this.resolveInit(sessionId) : undefined;
+    const agent: AgentKind = rt?.agent ?? stored?.agent ?? fallback?.agent ?? 'claude';
+    const cwd = stored?.cwd ?? rt?.cwd ?? fallback?.cwd ?? '';
+
+    // Vibe's normalized log is authoritative for every non-Claude agent and
+    // lives on the Vibe server even when the native CLI is reached over SSH.
+    if (agent !== 'claude') {
+      const own = ownTranscriptFull(sessionId, agent);
       if (own.length) return { blocks: own, seq: plan.seq };
-      return { blocks: await native(() => readKimiWireTranscript(sid)), seq: plan.seq };
     }
 
-    if (agent === 'kiro') {
-      const own = readKiroTranscript(sessionId);
-      if (own.length) return { blocks: own, seq: plan.seq };
-      return { blocks: await native(() => readKiroNativeTranscript(sid)), seq: plan.seq };
-    }
-
-    if (agent === 'grok') {
-      const own = readGrokTranscript(sessionId);
-      if (own.length) return { blocks: own, seq: plan.seq };
-      return { blocks: await native(() => readGrokNativeTranscript(sid)), seq: plan.seq };
-    }
-
-    if (agent === 'zcode') {
-      const own = readZcodeTranscript(sessionId);
-      if (own.length) return { blocks: own, seq: plan.seq };
-      return { blocks: await native(() => readZcodeNativeTranscript(sid)), seq: plan.seq };
-    }
-
+    if (!sid) return { blocks: [], seq: plan.seq };
     if (host) {
-      const blocks = remoteHost && sid ? await readRemoteTranscript(remoteHost, sid) : [];
+      const remoteHost = hostRegistry.get(host);
+      if (!remoteHost) return { blocks: [], seq: plan.seq };
+      const blocks = agent === 'claude'
+        ? await readRemoteTranscript(remoteHost, sid)
+        : await readRemoteAgentTranscript(remoteHost, agent, sid, cwd);
       return { blocks, seq: plan.seq };
     }
-    return { blocks: sid ? readTranscriptBlocks(sid).blocks : [], seq: plan.seq };
+
+    const blocks = await ((): Promise<ChatBlock[]> | ChatBlock[] => {
+      switch (agent) {
+        case 'cursor': return cwd ? readCursorStoreTranscript(cwd, sid) : [];
+        case 'codex': return readCodexRolloutTranscript(cwd, sid);
+        case 'kimi': return readKimiWireTranscript(sid);
+        case 'kiro': return readKiroNativeTranscript(sid);
+        case 'grok': return readGrokNativeTranscript(sid);
+        case 'zcode': return readZcodeNativeTranscript(sid, cwd);
+        case 'codebuddy': return readCodebuddyNativeTranscript(sid);
+        case 'opencode': return readOpencodeNativeTranscript(sid);
+        case 'devin': return readDevinNativeTranscript(sid);
+        default: return readTranscriptBlocks(sid).blocks;
+      }
+    })();
+    return { blocks, seq: plan.seq };
+  }
+
+  /** Full text of one (truncated) tool result — from a persisted blob sidecar
+   *  (`blob:`) or by seeking the block's line in the local normalized
+   *  transcript (`line:<offset>`). Null when the ref can't be resolved. */
+  blockResult(sessionId: string, blockId: string, ref: string): { blockId: string; size: number; text: string } | null {
+    if (ref.startsWith('blob:')) {
+      const text = readBlobText(ref);
+      return text == null ? null : { blockId, size: text.length, text };
+    }
+    if (/^line:\d+$/.test(ref)) {
+      const offset = Number(ref.slice('line:'.length));
+      const stored = sessionStore.get(sessionId);
+      const rt = this.runtimes.get(sessionId);
+      const agent: AgentKind = rt?.agent ?? stored?.agent ?? 'claude';
+      // A pre-fix agent switch could copy a `line:` ref into the target
+      // transcript even though the byte offset still points at the old agent's
+      // file. Old normalized transcripts are intentionally retained, so probe
+      // the current agent first and then the other agent-owned logs.
+      const candidates = [agent, ...OWN_TRANSCRIPT_AGENTS.filter((candidate) => candidate !== agent)];
+      for (const candidate of candidates) {
+        const dir = ownTranscriptsDir(candidate);
+        if (!dir) continue;
+        const file = path.join(dir, `${encodeURIComponent(sessionId)}.jsonl`);
+        const hit = readLineAt(file, offset);
+        if (!hit) continue;
+        try {
+          const block = JSON.parse(hit.line) as ChatBlock;
+          if (
+            block.kind !== 'tool'
+            || block.id !== blockId
+            || typeof block.result !== 'string'
+            || block.resultTruncated === true
+            || (typeof block.resultSize === 'number' && block.result.length < block.resultSize)
+          ) {
+            continue;
+          }
+          return { blockId, size: block.result.length, text: block.result };
+        } catch {
+          // Try the next retained agent transcript.
+        }
+      }
+      return null;
+    }
+    return null;
   }
 
   isRunning(sessionId: string): boolean {
@@ -1085,6 +1701,40 @@ export class Hub {
 
   hasActiveBackgroundTasks(sessionId: string): boolean {
     return this.runtimes.get(sessionId)?.hasActiveBackgroundTasks() ?? false;
+  }
+
+  /**
+   * Reserve an idle session for an agent switch. While reserved, new messages
+   * are rejected so a turn cannot start between transcript capture and rebind.
+   */
+  beginAgentSwitch(sessionId: string): boolean {
+    if (this.switchingSessions.has(sessionId)) return false;
+    const rt = this.runtimes.get(sessionId);
+    if (rt?.hasLiveRun() || rt?.hasActiveBackgroundTasks()) return false;
+    this.switchingSessions.add(sessionId);
+    return true;
+  }
+
+  /**
+   * Replace a cached runtime with one resolved from the freshly updated store.
+   * Subscribers and the monotonic event sequence survive the handoff, while
+   * the immutable agent/native-session fields come from the new runtime.
+   */
+  rebindAfterAgentSwitch(sessionId: string): void {
+    const init = this.resolveInit(sessionId);
+    if (!init) throw new Error('switched session could not be resolved');
+    const previous = this.runtimes.get(sessionId);
+    const next = new SessionRuntime(sessionId, init, () => this.broadcastMeta(sessionId));
+    if (previous) {
+      next.seq = previous.seq;
+      for (const conn of previous.subscribers) next.subscribers.add(conn);
+      previous.retire();
+    }
+    this.runtimes.set(sessionId, next);
+  }
+
+  endAgentSwitch(sessionId: string): void {
+    this.switchingSessions.delete(sessionId);
   }
 
   /** Broadcast updated session metadata — only to connections whose account

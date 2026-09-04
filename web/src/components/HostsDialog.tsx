@@ -21,7 +21,7 @@ import { useStore } from '../store/store';
 import { api, ApiError } from '../lib/api';
 import { cn } from '../lib/format';
 import { McpEnableList } from './McpControls';
-import { AgentLoginControls, LOGIN_AGENTS } from './AgentSignIn';
+import { AgentLoginControls, CodebuddyLoginControls, LOGIN_AGENTS } from './AgentSignIn';
 
 const AGENT_LABELS: Record<AgentKind, string> = {
   claude: 'Claude',
@@ -31,9 +31,12 @@ const AGENT_LABELS: Record<AgentKind, string> = {
   kiro: 'Kiro',
   grok: 'Grok',
   zcode: 'ZCode',
+  codebuddy: 'CodeBuddy',
+  opencode: 'opencode',
+  devin: 'Devin',
 };
 
-const AGENT_ORDER: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
+const AGENT_ORDER: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin'];
 
 /** Seed per-agent proxy local-state from a host's stored overrides (trimmed). */
 function agentProxyState(m?: Partial<Record<AgentKind, string>>): Record<AgentKind, string> {
@@ -541,6 +544,9 @@ function HostRow({
               <AgentLoginControls key={a} agent={a} host={local ? undefined : host.name} />
             ),
           )}
+          {agents?.codebuddy?.installed !== false && (
+            <CodebuddyLoginControls host={local ? undefined : host.name} />
+          )}
         </div>
       )}
 
@@ -609,6 +615,9 @@ function StatusDot({ status }: { status?: HostStatus | 'checking' }) {
     status.agents?.kiro.installed ||
     status.agents?.grok.installed ||
     status.agents?.zcode.installed ||
+    status.agents?.codebuddy.installed ||
+    status.agents?.opencode.installed ||
+    status.agents?.devin.installed ||
     status.claude;
   if (anyAgent) return <Check className="h-4 w-4 shrink-0 text-emerald-400" />;
   return <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />;

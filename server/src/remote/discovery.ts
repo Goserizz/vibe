@@ -8,6 +8,9 @@ import { listRemoteKimiSessions, readRemoteKimiTranscript } from '../kimi/remote
 import { listRemoteKiroSessions, readRemoteKiroTranscript } from '../kiro/remote.js';
 import { listRemoteGrokSessions, readRemoteGrokTranscript } from '../grok/remote.js';
 import { listRemoteZcodeSessions, readRemoteZcodeTranscript } from '../zcode/remote.js';
+import { listRemoteDevinSessions, readRemoteDevinTranscript } from '../devin/remote.js';
+import { listRemoteOpencodeSessions, readRemoteOpencodeTranscript } from '../opencode/remote.js';
+import { listRemoteCodebuddySessions, readRemoteCodebuddyTranscript } from '../codebuddy/remote.js';
 import { listRemoteCursorSessions, readRemoteCursorTranscript } from '../cursor/remote.js';
 import type { AgentKind, ChatBlock, RemoteHost } from '../../../shared/protocol.js';
 import { loginShellCommand, sshExec } from './ssh.js';
@@ -122,6 +125,9 @@ export async function listRemoteAgentSessions(host: RemoteHost): Promise<RemoteD
     safely('kiro', () => listRemoteKiroSessions(host)),
     safely('grok', () => listRemoteGrokSessions(host)),
     safely('zcode', () => listRemoteZcodeSessions(host)),
+    safely('codebuddy', () => listRemoteCodebuddySessions(host)),
+    safely('opencode', () => listRemoteOpencodeSessions(host)),
+    safely('devin', () => listRemoteDevinSessions(host)),
   ]);
   const found = groups.flat();
 
@@ -203,6 +209,12 @@ export async function readRemoteAgentTranscript(
         return await readRemoteGrokTranscript(host, sessionId);
       case 'zcode':
         return await readRemoteZcodeTranscript(host, sessionId);
+      case 'codebuddy':
+        return await readRemoteCodebuddyTranscript(host, sessionId);
+      case 'opencode':
+        return await readRemoteOpencodeTranscript(host, sessionId);
+      case 'devin':
+        return await readRemoteDevinTranscript(host, sessionId);
       case 'cursor':
         return await readRemoteCursorTranscript(host, sessionId, cwd);
       default:

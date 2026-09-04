@@ -33,7 +33,7 @@ import { Markdown } from './Markdown';
 import { beijingClock, cn, formatTokens } from '../lib/format';
 import { stripAttachments } from '../lib/attachments';
 
-export const BlockView = memo(function BlockView({ block }: { block: ChatBlock }) {
+export const BlockView = memo(function BlockView({ block, sessionId }: { block: ChatBlock; sessionId?: string }) {
   switch (block.kind) {
     case 'user':
       return <UserView block={block} />;
@@ -42,7 +42,7 @@ export const BlockView = memo(function BlockView({ block }: { block: ChatBlock }
     case 'thinking':
       return <ThinkingView block={block} />;
     case 'tool':
-      return <ToolView block={block} />;
+      return <ToolView block={block} sessionId={sessionId} />;
     case 'result':
       return <ResultView block={block} />;
     case 'error':
@@ -60,9 +60,22 @@ function UserView({ block }: { block: UserBlock }) {
   // message was attachments-only, keep the bubble from going empty.
   const { text, files } = stripAttachments(block.text);
   const display = text.trim() || (files.length ? `📎 ${files.length} file${files.length > 1 ? 's' : ''} attached` : '');
+  const images = block.images?.length ? block.images : undefined;
   return (
     <div className="flex justify-end animate-fade-in">
-      <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent/15 px-4 py-2.5 text-[14.5px] leading-relaxed text-slate-100">
+      <div className="max-w-[85%] space-y-2 whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent/15 px-4 py-2.5 text-[14.5px] leading-relaxed text-slate-100">
+        {images && (
+          <div className="flex flex-wrap gap-1.5">
+            {images.map((src, i) => (
+              <img
+                key={`${block.id}-img-${i}`}
+                src={src}
+                alt=""
+                className="max-h-40 max-w-full rounded-lg border border-white/10 object-contain"
+              />
+            ))}
+          </div>
+        )}
         {display}
       </div>
     </div>
@@ -160,7 +173,7 @@ const TOOL_KIND_ALIASES: Record<string, ToolKind> = {
   websearch: 'websearch', searchweb: 'websearch',
   todowrite: 'todo', todo: 'todo', updatetodo: 'todo', todolist: 'todo', tasklist: 'todo',
   task: 'task', subagent: 'task',
-  exitplanmode: 'plan',
+  exitplanmode: 'plan', createplan: 'plan', enterplanmode: 'plan',
   readlints: 'lints', getdiagnostics: 'lints', diagnostics: 'lints',
   generateimage: 'image', image: 'image',
   switchmode: 'mode',
@@ -289,6 +302,15 @@ function pathsDetail(i: Record<string, any>): string | undefined {
   return undefined;
 }
 
+/** Codex edit blocks carry `{changes:[{path,kind}]}` instead of one path field. */
+function changesDetail(i: Record<string, any>): string | undefined {
+  if (!Array.isArray(i.changes)) return undefined;
+  const paths = i.changes.map((c: any) => (typeof c?.path === 'string' ? c.path : '')).filter(Boolean);
+  if (paths.length === 1) return paths[0];
+  if (paths.length > 1) return `${paths.length} files`;
+  return undefined;
+}
+
 /** Best-effort one-line detail for unknown / sparsely-mapped tools. */
 function fallbackDetail(i: Record<string, any>): string | undefined {
   return (
@@ -321,13 +343,13 @@ export function toolMeta(name: string, input: unknown): ToolMeta {
         detail: firstOf(i, ['shell_id', 'shellId', 'pattern', 'command', 'cmd']),
       };
     case 'read':
-      return { icon: FileText, label: 'Read', detail: path };
+      return { icon: FileText, label: 'Read', detail: path || changesDetail(i) };
     case 'write':
-      return { icon: FilePen, label: 'Write', detail: path };
+      return { icon: FilePen, label: 'Write', detail: path || changesDetail(i) };
     case 'edit':
-      return { icon: FilePen, label: name.toLowerCase().includes('notebook') ? 'Notebook' : 'Edit', detail: path };
+      return { icon: FilePen, label: name.toLowerCase().includes('notebook') ? 'Notebook' : 'Edit', detail: path || changesDetail(i) };
     case 'delete':
-      return { icon: Trash2, label: 'Delete', detail: path };
+      return { icon: Trash2, label: 'Delete', detail: path || changesDetail(i) };
     case 'move': {
       const from = firstOf(i, ['from', 'source', 'old_path', 'oldPath', 'path']);
       const to = firstOf(i, ['to', 'dest', 'destination', 'new_path', 'newPath']);
@@ -409,7 +431,15 @@ export function toolMeta(name: string, input: unknown): ToolMeta {
   }
 }
 
-function ToolView({ block }: { block: ToolBlock }) {
+/** Plan tools carry the full plan markdown in `input.plan` (Cursor CreatePlan,
+ *  Claude ≥2.1 ExitPlanMode, ZCode/CodeBuddy) — render it instead of a JSON
+ *  dump of the whole input. */
+function planTextOf(input: unknown): string {
+  const plan = input && typeof input === 'object' ? (input as Record<string, unknown>).plan : undefined;
+  return typeof plan === 'string' ? plan.trim() : '';
+}
+
+function ToolView({ block }: { block: ToolBlock; sessionId?: string }) {
   const kind = toolKind(block.name);
   const fileChanges =
     kind === 'edit'
@@ -417,6 +447,7 @@ function ToolView({ block }: { block: ToolBlock }) {
       : kind === 'write'
         ? writeChangeLines(block.result ?? '', block.input)
         : [];
+  const planText = kind === 'plan' ? planTextOf(block.input) : '';
   const [manual, setManual] = useState<boolean | null>(null);
   const open = manual ?? fileChanges.length > 0;
   const meta = toolMeta(block.name, block.input);
@@ -442,6 +473,13 @@ function ToolView({ block }: { block: ToolBlock }) {
         <div className="space-y-2 border-t border-white/5 px-3 py-2.5">
           {fileChanges.length > 0 ? (
             <CompactEditDiff changes={fileChanges} className="max-h-80 text-[12px] leading-relaxed" />
+          ) : planText ? (
+            <>
+              <div className="max-h-80 overflow-y-auto rounded-lg bg-ink-950 p-2.5 text-[13px] leading-relaxed text-slate-300">
+                <Markdown>{planText}</Markdown>
+              </div>
+              <ToolResultBody block={block} />
+            </>
           ) : (
             <>
               <pre className="overflow-x-auto rounded-lg bg-ink-950 p-2.5 font-mono text-[12px] leading-relaxed text-slate-400">
@@ -618,12 +656,14 @@ function ErrorView({ block }: { block: ErrorBlock }) {
 /** Muted engine notice as a dashed divider — e.g. a background task woke the agent. */
 function SystemView({ block }: { block: SystemBlock }) {
   return (
-    <div className="flex animate-fade-in items-center gap-3 px-3 py-1.5">
+    <div className="flex min-w-0 animate-fade-in items-center gap-3 px-3 py-1.5">
       <span className="min-w-8 flex-1 border-t border-dashed border-white/10" />
-      <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-slate-500">
-        <RefreshCw className="h-3 w-3" />
-        {block.text}
-        <span>· {beijingClock(block.ts)}</span>
+      <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-500">
+        <RefreshCw className="h-3 w-3 shrink-0" />
+        <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">
+          {block.text}
+          <span> · {beijingClock(block.ts)}</span>
+        </span>
       </span>
       <span className="min-w-8 flex-1 border-t border-dashed border-white/10" />
     </div>

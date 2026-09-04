@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
-import { Plus, Trash2, Check, X, Pencil, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users } from '../lib/icons';
+import { Plus, Trash2, Check, X, Pencil, ArrowLeftRight, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users, Monitor } from '../lib/icons';
 import { SessionStatusIcon } from './SessionStatusIcon';
 import type { SearchResult, SessionMeta } from '@shared/protocol';
 import { useStore } from '../store/store';
@@ -9,8 +9,10 @@ import { HostsDialog } from './HostsDialog';
 import { AccountsDialog } from './AccountsDialog';
 import { SettingsDialog } from './SettingsDialog';
 import { Menu } from './Menu';
+import { SwitchAgentDialog } from './SwitchAgentDialog';
 import { agentLabel, basename, cn, modelLabel, relativeTime } from '../lib/format';
 import { Glass } from './LiquidGlass';
+import { MonitorDialog } from './MonitorDialog';
 
 interface SidebarProps {
   open: boolean;
@@ -30,6 +32,8 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
   const [hostsOpen, setHostsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
+  const [monitorsOpen, setMonitorsOpen] = useState(false);
+  const [monitorSessionId, setMonitorSessionId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const account = useStore((s) => s.account);
   const isAdmin = useStore((s) => s.isAdmin);
@@ -51,6 +55,10 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
   const handleMenuSelect = (value: string) => {
     if (value === 'servers') setHostsOpen(true);
     else if (value === 'accounts') setAccountsOpen(true);
+    else if (value === 'monitors') {
+      setMonitorSessionId(null);
+      setMonitorsOpen(true);
+    }
     else if (value === 'settings') setSettingsOpen(true);
     else if (value === 'signout') signOut();
   };
@@ -105,7 +113,16 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
             ) : (
               <ul className="space-y-0.5">
                 {sessions.map((s) => (
-                  <SessionItem key={s.id} session={s} active={s.id === activeId} onClose={onClose} />
+                  <SessionItem
+                    key={s.id}
+                    session={s}
+                    active={s.id === activeId}
+                    onClose={onClose}
+                    onCreateMonitor={() => {
+                      setMonitorSessionId(s.id);
+                      setMonitorsOpen(true);
+                    }}
+                  />
                 ))}
               </ul>
             )}
@@ -235,6 +252,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
                 align="right"
                 triggerLabel="Menu"
                 items={[
+                  { value: 'monitors', label: 'Monitoring', icon: <Monitor className="h-4 w-4" /> },
                   { value: 'servers', label: 'Servers', icon: <Server className="h-4 w-4" /> },
                   ...(isAdmin
                     ? [{ value: 'accounts', label: 'Accounts', icon: <Users className="h-4 w-4" /> }]
@@ -264,6 +282,15 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
       {hostsOpen && <HostsDialog onClose={() => setHostsOpen(false)} />}
       {accountsOpen && <AccountsDialog onClose={() => setAccountsOpen(false)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {monitorsOpen && (
+        <MonitorDialog
+          initialSessionId={monitorSessionId ?? undefined}
+          onClose={() => {
+            setMonitorsOpen(false);
+            setMonitorSessionId(null);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -374,7 +401,17 @@ function SearchResults({
   );
 }
 
-function SessionItem({ session, active, onClose }: { session: SessionMeta; active: boolean; onClose: () => void }) {
+function SessionItem({
+  session,
+  active,
+  onClose,
+  onCreateMonitor,
+}: {
+  session: SessionMeta;
+  active: boolean;
+  onClose: () => void;
+  onCreateMonitor: () => void;
+}) {
   const openSession = useStore((s) => s.openSession);
   const renameSession = useStore((s) => s.renameSession);
   const deleteSession = useStore((s) => s.deleteSession);
@@ -386,12 +423,16 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
   const kiroModels = useStore((s) => s.kiroModels);
   const grokModels = useStore((s) => s.grokModels);
   const zcodeModels = useStore((s) => s.zcodeModels);
+  const codebuddyModels = useStore((s) => s.codebuddyModels);
+  const devinModels = useStore((s) => s.devinModels);
+  const opencodeModels = useStore((s) => s.opencodeModels);
   const cli = useStore((s) => s.viewMode) === 'cli';
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [title, setTitle] = useState(session.title);
   const agent = session.agent ?? 'claude';
-  const model = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels);
+  const model = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels);
   const tagText = `${agentLabel(agent)} · ${model}`;
 
   const commitRename = () => {
@@ -403,6 +444,14 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
 
   return (
     <li>
+      {switching && (
+        <SwitchAgentDialog
+          sessionId={session.id}
+          currentAgent={agent}
+          currentModel={session.model}
+          onClose={() => setSwitching(false)}
+        />
+      )}
       <div
         className={cn(
           'group relative flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 transition',
@@ -507,6 +556,12 @@ function SessionItem({ session, active, onClose }: { session: SessionMeta; activ
                 <>
                   <button onClick={() => setEditing(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-slate-200" title="Rename">
                     <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => setSwitching(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-accent-soft" title="切换 Agent / 模型">
+                    <ArrowLeftRight className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={onCreateMonitor} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-accent-soft" title="创建监控">
+                    <Monitor className="h-3.5 w-3.5" />
                   </button>
                   <button onClick={() => setConfirming(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-rose-400" title="Delete">
                     <Trash2 className="h-3.5 w-3.5" />

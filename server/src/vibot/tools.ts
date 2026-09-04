@@ -16,7 +16,7 @@ import { createDelegateWatcher, teardownDelegateSession } from './delegate.js';
 import { vibotHub } from './hub.js';
 import { runCommand } from './runCommand.js';
 import type { LlmToolDef } from './llm.js';
-import type { AgentKind, ChatBlock, EffortLevel, PermissionMode } from '../../../shared/protocol.js';
+import type { AgentKind, ChatBlock, EffortLevel, PermissionMode, VibotAskQuestion } from '../../../shared/protocol.js';
 import crypto from 'node:crypto';
 
 /** Cap on any single tool result returned to the model (keeps context bounded). */
@@ -26,7 +26,7 @@ function clip(s: string): string {
   return s.length > MAX_RESULT ? `${s.slice(0, MAX_RESULT)}\n…(truncated)` : s;
 }
 
-const agents: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
+const agents: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin'];
 function isAgent(v: unknown): v is AgentKind {
   return typeof v === 'string' && (agents as string[]).includes(v);
 }
@@ -46,7 +46,7 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
         type: 'object',
         properties: {
           host: { type: 'string', description: 'Filter to a host name (e.g. the local machine name or a remote host).' },
-          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'], description: 'Filter to one agent.' },
+          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy'], description: 'Filter to one agent.' },
           limit: { type: 'integer', description: 'Max rows to return.', default: 40 },
         },
       },
@@ -98,6 +98,49 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
   {
     type: 'function',
     function: {
+      name: 'ask_user_question',
+      description:
+        'Ask the user 1–4 clarifying questions rendered as an interactive dialog with clickable options. The turn blocks until the user answers or 10 minutes elapse. Use whenever requirements are ambiguous instead of guessing.',
+      parameters: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            description: '1–4 clarifying questions to show the user.',
+            minItems: 1,
+            maxItems: 4,
+            items: {
+              type: 'object',
+              properties: {
+                question: { type: 'string', description: 'The question text.' },
+                header: { type: 'string', description: 'Short chip/label shown above the question.' },
+                options: {
+                  type: 'array',
+                  description: '2–4 clickable options.',
+                  minItems: 2,
+                  maxItems: 4,
+                  items: {
+                    type: 'object',
+                    properties: {
+                      label: { type: 'string', description: 'Option label.' },
+                      description: { type: 'string', description: 'Optional longer explanation.' },
+                    },
+                    required: ['label'],
+                  },
+                },
+                multiSelect: { type: 'boolean', description: 'Allow selecting multiple options.' },
+              },
+              required: ['question', 'options'],
+            },
+          },
+        },
+        required: ['questions'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_session',
       description:
         'Create a new CODING conversation to accomplish a task, and (by default) immediately start it by sending the prompt to the chosen coding agent. You DELEGATE coding — you never write code yourself. Choose agent/model/host/cwd, pass a clear prompt, and tell the user which session you started. Returns the new session id, title, agent, host, and whether the first turn was started. By default (manage:"auto") you also WATCH the session: you auto-approve its permission prompts and plan approvals and report a tally back here; set manage:"none" only if the user wants to approve things themselves.',
@@ -105,7 +148,7 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
         type: 'object',
         properties: {
           prompt: { type: 'string', description: 'The coding task to hand to the agent. Be specific and complete.' },
-          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'], description: 'Which coding agent. Defaults to claude.' },
+          agent: { type: 'string', enum: ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy'], description: 'Which coding agent. Defaults to claude.' },
           cwd: { type: 'string', description: 'Working directory for the session. Omit to auto-create a throwaway folder.' },
           host: { type: 'string', description: 'Remote host name to run on. Omit for the local machine.' },
           model: { type: 'string', description: 'Model for the agent (e.g. "opus", "auto"). Omit for the agent default.' },
@@ -311,7 +354,13 @@ function createCodingSession(input: {
               ? config.defaultGrokModel
               : agent === 'zcode'
                 ? config.defaultZcodeModel
-                : config.defaultModel);
+                : agent === 'codebuddy'
+                  ? config.defaultCodebuddyModel
+                  : agent === 'opencode'
+                    ? config.defaultOpencodeModel
+                    : agent === 'devin'
+                      ? config.defaultDevinModel
+                      : config.defaultModel);
 
   // autoApprove 'all' (or the safe-mode watcher) both want the agent to run
   // autonomously. 'all' skips prompts entirely (bypass); 'safe' keeps prompts so
@@ -489,6 +538,7 @@ function configSummary(): string {
         kiro: Boolean(config.kiroExecutable),
         grok: Boolean(config.grokExecutable),
         zcode: Boolean(config.zcodeExecutable),
+        codebuddy: Boolean(config.codebuddyExecutable),
       },
       hosts: hostRegistry.list().map((h) => ({ name: h.name, ssh: h.ssh, proxy: h.proxy })),
       // Vibot's own settings (non-secret projection — no key, no baseUrl creds).
@@ -511,6 +561,45 @@ function configSummary(): string {
  *  so the delegate watcher knows where to report). */
 export interface ToolCtx {
   convId?: string;
+  /** OpenAI-style tool_call id — used as the ask-user callId. */
+  toolCallId?: string;
+}
+
+const ASK_TIMEOUT_MSG =
+  'The user did not answer within 10 minutes — proceed with your best judgment and state your assumptions.';
+const ASK_DISMISS_MSG =
+  'The user dismissed the question — proceed with your best judgment and state your assumptions.';
+
+/** Validate / clamp ask_user_question input into 1–4 questions with 2–4 options each. */
+function parseAskQuestions(raw: unknown): VibotAskQuestion[] | string {
+  if (!Array.isArray(raw) || raw.length === 0) return 'questions must be a non-empty array';
+  const slice = raw.slice(0, 4);
+  const out: VibotAskQuestion[] = [];
+  for (const item of slice) {
+    if (!item || typeof item !== 'object') return 'each question must be an object';
+    const q = item as Record<string, unknown>;
+    const question = typeof q.question === 'string' ? q.question.trim() : '';
+    if (!question) return 'each question needs a non-empty question string';
+    if (!Array.isArray(q.options)) return `question "${question}" needs an options array`;
+    const options: VibotAskQuestion['options'] = [];
+    for (const o of q.options.slice(0, 4)) {
+      if (!o || typeof o !== 'object') continue;
+      const opt = o as Record<string, unknown>;
+      const label = typeof opt.label === 'string' ? opt.label.trim() : '';
+      if (!label) continue;
+      const description =
+        typeof opt.description === 'string' && opt.description.trim() ? opt.description.trim() : undefined;
+      options.push(description ? { label, description } : { label });
+    }
+    if (options.length < 2) return `question "${question}" needs 2–4 options with non-empty labels`;
+    out.push({
+      question,
+      header: typeof q.header === 'string' && q.header.trim() ? q.header.trim() : undefined,
+      options,
+      multiSelect: q.multiSelect === true ? true : undefined,
+    });
+  }
+  return out;
 }
 
 /** Dispatch one tool call, returning the string result for the model. */
@@ -585,6 +674,16 @@ export async function dispatchTool(name: string, args: Record<string, any>, ctx:
             remote: hostRegistry.list().map((h) => ({ name: h.name, ssh: h.ssh, proxy: h.proxy })),
           }),
         );
+      case 'ask_user_question': {
+        if (!ctx.convId) return 'Error: ask_user_question requires a conversation context.';
+        const parsed = parseAskQuestions(args.questions);
+        if (typeof parsed === 'string') return `Error: ${parsed}`;
+        const callId = ctx.toolCallId?.trim() || crypto.randomUUID();
+        const outcome = await vibotHub.askUser(ctx.convId, callId, parsed);
+        if (outcome.type === 'answered') return JSON.stringify({ answers: outcome.answers });
+        if (outcome.type === 'timeout') return ASK_TIMEOUT_MSG;
+        return ASK_DISMISS_MSG;
+      }
       case 'create_session': {
         const result = createCodingSession({
           prompt: String(args.prompt ?? ''),

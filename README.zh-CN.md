@@ -4,7 +4,7 @@
 
 [English](README.md) · **简体中文**
 
-**优雅、低延迟的 Web 界面,在任意机器上驱动 Claude Code、Codex、Cursor、Kimi、Kiro、Grok 和 ZCode。**
+**优雅、低延迟的 Web 界面,在任意机器上驱动 Claude Code、Codex、Cursor、Kimi、Kiro、Grok、ZCode 和 opencode。**
 
 在你代码所在的机器上运行它,用任意浏览器(笔记本、手机、平板)打开启动时打印的链接,
 即可远程 vibe coding —— 流畅的流式输出 + 简洁的界面。
@@ -40,7 +40,7 @@
 
 ## 简介
 
-Vibe 在你的机器上运行一个小型服务器,连接 Claude Code、Codex、Cursor、Kimi Code、Kiro、Grok 或 ZCode,
+Vibe 在你的机器上运行一个小型服务器,连接 Claude Code、Codex、Cursor、Kimi Code、Kiro、Grok、ZCode 或 opencode,
 把各 agent 的输出归一化为同一套结构化对话,再通过单条 WebSocket 推送给 React Web 客户端。
 Claude 使用官方 [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
 Codex 使用长驻 App Server,Cursor、Kimi、Kiro 与 Grok 使用各自的结构化 CLI / ACP 通道,ZCode 走其 ZCode Protocol app-server。
@@ -67,7 +67,7 @@ Codex 使用长驻 App Server,Cursor、Kimi、Kiro 与 Grok 使用各自的结�
   Grok 通过 ACP 支持 Ask / Plan / Auto / Always-approve;ZCode 支持 Ask / Plan / Edit / Yolo
   (模型来自 `~/.zcode/cli/config.json`)
 - 🗂 **会话管理** —— 在任意目录创建、恢复、重命名、删除;可读取各 agent 的本地历史
-- 🖥️ **自动接管你的 CLI 会话** —— 终端中由 `claude`、`codex`、`cursor-agent`、`kimi`、`kiro-cli`、`grok` 或 `zcode` 创建的对话可自动出现;
+- 🖥️ **自动接管你的 CLI 会话** —— 终端中由 `claude`、`codex`、`cursor-agent`、`kimi`、`kiro-cli`、`grok`、`zcode` 或 `opencode` 创建的对话可自动出现;
   打开即可阅读完整历史并继续对话,并沿用该会话当时使用的模型
 - 🌐 **通过 SSH 管理远程主机** —— 添加可通过 SSH 访问的机器,它们上面由 Claude、Codex、Cursor、
   Kimi、Kiro、Grok 各自 CLI 创建的会话都会出现在同一侧栏(ZCode 支持本地发现;各自标注主机名与 agent);像本地会话一样
@@ -87,9 +87,9 @@ Codex 使用长驻 App Server,Cursor、Kimi、Kiro 与 Grok 使用各自的结�
 ## 环境要求
 
 - **Node.js 20+**
-- 至少安装并认证一个受支持的 agent CLI: `claude`、`codex`、`cursor-agent`、`kimi`、`kiro-cli`、`grok` 或 `zcode`(ZCode 桌面版内提取的 CLI,需 Node ≥ 22.5 并在 `~/.zcode/cli/config.json` 配置好 provider 与模型)。
+- 至少安装并认证一个受支持的 agent CLI: `claude`、`codex`、`cursor-agent`、`kimi`、`kiro-cli`、`grok`、`zcode`(ZCode 桌面版内提取的 CLI,需 Node ≥ 22.5 并在 `~/.zcode/cli/config.json` 配置好 provider 与模型)或 `opencode`。
   Vibe 会从 `PATH` 和常见安装位置自动检测,包括 Kimi 原生安装路径 `~/.kimi-code/bin/kimi`、
-  Kiro 默认路径 `~/.local/bin/kiro-cli`、Grok 默认路径 `~/.local/bin/grok`,以及 ZCode 常见路径 `/usr/local/bin/zcode`。
+  Kiro 默认路径 `~/.local/bin/kiro-cli`、Grok 默认路径 `~/.local/bin/grok`、ZCode 常见路径 `/usr/local/bin/zcode`,以及 opencode 默认路径 `~/.opencode/bin/opencode`。
 
 ## 快速开始
 
@@ -151,7 +151,8 @@ Vibe 采用**直连**模式 —— 浏览器直接连接服务器。在同一局
 | `VIBE_DEFAULT_KIRO_MODEL` | `auto` | Kiro 新会话的默认模型;`auto` 由 Kiro 自行选择 |
 | `VIBE_DEFAULT_GROK_MODEL` | `auto` | Grok 新会话的默认模型;`auto` 由 Grok 自行选择 |
 | `VIBE_DEFAULT_ZCODE_MODEL` | `auto` | ZCode 新会话的默认模型(`providerID/modelID`);`auto` 由 ZCode 自行选择 |
-| `VIBE_DEFAULT_AGENT` | `claude` | 默认 agent(`claude`/`cursor`/`codex`/`kimi`/`kiro`/`grok`/`zcode`) |
+| `VIBE_DEFAULT_OPENCODE_MODEL` | `auto` | opencode 新会话的默认模型(`provider/model`);`auto` 由 opencode 自行选择 |
+| `VIBE_DEFAULT_AGENT` | `claude` | 默认 agent(`claude`/`cursor`/`codex`/`kimi`/`kiro`/`grok`/`zcode`/`opencode`) |
 | `CLAUDE_CLI_PATH` | 自动检测 | `claude` 可执行文件的显式路径 |
 | `CURSOR_CLI_PATH` | 自动检测 | `cursor-agent` 可执行文件的显式路径 |
 | `CODEX_CLI_PATH` | 自动检测 | `codex` 可执行文件的显式路径 |
@@ -159,9 +160,11 @@ Vibe 采用**直连**模式 —— 浏览器直接连接服务器。在同一局
 | `KIRO_CLI_PATH` | 自动检测 | `kiro-cli` 可执行文件的显式路径 |
 | `GROK_CLI_PATH` | 自动检测 | `grok` 可执行文件的显式路径 |
 | `ZCODE_CLI_PATH` | 自动检测 | `zcode` 可执行文件的显式路径 |
+| `OPENCODE_CLI_PATH` | 自动检测 | `opencode` 可执行文件的显式路径(`~/.opencode/bin/opencode` 会被检测到) |
 | `VIBE_LOCAL_NAME` | 机器主机名 | 本机显示的名称 |
 | `VIBE_SSH_HOSTS` | – | 预置远程主机,例如 `prod=user@1.2.3.4,gpu=mygpu-alias` |
 | `VIBE_SSH` | `ssh` | 使用的 SSH 命令(可覆盖以自定义参数) |
+| `VIBE_MONITOR_MCP_URL` | – | 远程 agent 创建监控草稿时访问的完整 HTTPS `/api/internal/monitor-mcp` 地址;本地 agent 自动使用回环地址 |
 | `VIBE_TELEGRAM_BOT_TOKEN` | – | Telegram bot token(从 [@BotFather](https://t.me/BotFather) 获取)。设置后 Vibe 会与 Web UI 一并启动 bot。未设置时回退读取 `~/.vibe/telegram-bot-token` |
 | `VIBE_TELEGRAM_ALLOWLIST` | – | 允许使用 bot 的 Telegram 用户 id(逗号分隔)。为空则任何能私聊 bot 的人都可以用 |
 
@@ -227,6 +230,14 @@ npm run serve
 - 本地会话使用本地登录 shell,远程会话则用 `ssh -tt` 进入该主机;
 - 会加载主机的完整环境(因此 nvm 等版本管理器、你的别名等都可用);
 - 拖动面板左边缘可调节宽度(宽度会被记住)。
+
+## 任务监控
+
+从侧栏菜单打开 **Monitoring**，可以创建持久化的命令或 HTTP 健康检查。监控可在
+异常时通知指定会话或唤醒该会话当前的 agent；异常未恢复时按冷却时间再次唤醒，
+并且只有探针重新成功后才关闭事件。agent 可通过内置 `vibe-monitor` MCP 直接
+创建、修改、启动、停止、列出监控并立即检查。配置和事件历史在服务重启后仍会保留。详见
+[任务监控说明](docs/task-monitoring.md)。
 
 ## 工作原理
 

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
+import { externalizeResults } from '../sessions/blobs.js';
 import { log } from '../log.js';
 import type { ChatBlock } from '../../../shared/protocol.js';
 
@@ -32,7 +33,8 @@ export function appendKiroBlocks(sessionId: string, blocks: ChatBlock[]): void {
   if (!blocks.length) return;
   try {
     fs.mkdirSync(config.kiroTranscriptsDir, { recursive: true });
-    fs.appendFileSync(transcriptFile(sessionId), `${blocks.map((block) => JSON.stringify(block)).join('\n')}\n`);
+    const persisted = externalizeResults(sessionId, blocks);
+    fs.appendFileSync(transcriptFile(sessionId), `${persisted.map((block) => JSON.stringify(block)).join('\n')}\n`);
   } catch (error) {
     log.warn('failed to persist kiro transcript', error);
   }

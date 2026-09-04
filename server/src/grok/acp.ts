@@ -126,6 +126,10 @@ const ACP_KIND_NAME: Record<string, string> = {
   switch_mode: 'SwitchMode',
 };
 
+/** Matches any plan-exit spelling — `ExitPlanMode`, `exit_plan_mode`, or a
+ *  prose title like "Exit plan mode" — for the permission request rewrite. */
+const PLAN_EXIT_TOOL_RE = /exit[\s_-]*plan[\s_-]*mode/i;
+
 function toolNameFromUpdate(update: any): string | null {
   const title = typeof update?.title === 'string' ? update.title.trim() : '';
   if (title && /^[A-Za-z][A-Za-z0-9_]*$/.test(title)) return title;
@@ -425,11 +429,15 @@ export class GrokAcpClient {
       title: toolCall.title,
       description: content || undefined,
     };
+    // Grok names the tool `exit_plan_mode` (snake) but titles it `ExitPlanMode`
+    // over ACP; normalize any spelling to Claude's `ExitPlanMode` so the
+    // web/Telegram plan-review UIs trigger.
+    const isPlanExit = PLAN_EXIT_TOOL_RE.test(toolName);
     const request: PermissionRequest = {
       requestId: crypto.randomUUID(),
-      toolName,
+      toolName: isPlanExit ? 'ExitPlanMode' : toolName,
       input,
-      plan: /ExitPlanMode|plan/i.test(toolName) && content ? content : undefined,
+      plan: isPlanExit && content ? content : undefined,
       ts: Date.now(),
     };
     const decision = await this.cb.requestPermission(request);

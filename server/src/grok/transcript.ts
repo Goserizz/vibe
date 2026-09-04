@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
+import { externalizeResults } from '../sessions/blobs.js';
 import { log } from '../log.js';
 import { findGrokSessionDir } from './discovery.js';
 import type { ChatBlock, ToolBlock } from '../../../shared/protocol.js';
@@ -33,7 +34,8 @@ export function appendGrokBlocks(sessionId: string, blocks: ChatBlock[]): void {
   if (!blocks.length) return;
   try {
     fs.mkdirSync(config.grokTranscriptsDir, { recursive: true });
-    fs.appendFileSync(transcriptFile(sessionId), `${blocks.map((block) => JSON.stringify(block)).join('\n')}\n`);
+    const persisted = externalizeResults(sessionId, blocks);
+    fs.appendFileSync(transcriptFile(sessionId), `${persisted.map((block) => JSON.stringify(block)).join('\n')}\n`);
   } catch (error) {
     log.warn('failed to persist grok transcript', error);
   }
@@ -78,6 +80,9 @@ export function grokNativeBlocks(raw: string): ChatBlock[] {
   let assistant: { id: string; text: string; ts: number } | null = null;
   let thinking: { id: string; text: string; ts: number } | null = null;
   let user: { id: string; text: string; ts: number } | null = null;
+  let assistantChunkKey = '';
+  let thinkingChunkKey = '';
+  let userChunkKey = '';
   let lineNo = 0;
 
   const flushAssistant = () => {
@@ -87,6 +92,7 @@ export function grokNativeBlocks(raw: string): ChatBlock[] {
     }
     blocks.push({ id: assistant.id, kind: 'assistant', text: assistant.text, streaming: false, ts: assistant.ts });
     assistant = null;
+    assistantChunkKey = '';
   };
   const flushThinking = () => {
     if (!thinking?.text) {
@@ -95,6 +101,7 @@ export function grokNativeBlocks(raw: string): ChatBlock[] {
     }
     blocks.push({ id: thinking.id, kind: 'thinking', text: thinking.text, streaming: false, ts: thinking.ts });
     thinking = null;
+    thinkingChunkKey = '';
   };
   const flushUser = () => {
     if (!user?.text) {
@@ -103,6 +110,7 @@ export function grokNativeBlocks(raw: string): ChatBlock[] {
     }
     blocks.push({ id: user.id, kind: 'user', text: user.text, ts: user.ts });
     user = null;
+    userChunkKey = '';
   };
 
   for (const line of raw.split('\n')) {
@@ -118,14 +126,21 @@ export function grokNativeBlocks(raw: string): ChatBlock[] {
     if (!update) continue;
     const kind = update.sessionUpdate;
     const ts = Number(update.ts ?? record.ts ?? 0) || 0;
+    const paramsMeta = record?.params?._meta ?? {};
+    const updateMeta = update?._meta ?? {};
 
     if (kind === 'user_message_chunk') {
       flushAssistant();
       flushThinking();
       const text = textOfContent(update.content);
       if (!text) continue;
+      const nextKey = updateMeta.promptIndex === undefined
+        ? ''
+        : `prompt-index:${String(updateMeta.promptIndex)}`;
+      if (user && nextKey && userChunkKey && nextKey !== userChunkKey) flushUser();
       if (!user) user = { id: `gk_user_${lineNo}`, text, ts };
       else user.text += text;
+      if (nextKey) userChunkKey = nextKey;
       continue;
     }
     if (kind === 'agent_message_chunk') {
@@ -133,8 +148,12 @@ export function grokNativeBlocks(raw: string): ChatBlock[] {
       flushThinking();
       const text = textOfContent(update.content);
       if (!text) continue;
+      const rawKey = paramsMeta.promptId ?? updateMeta.promptId;
+      const nextKey = rawKey === undefined ? '' : `prompt-id:${String(rawKey)}`;
+      if (assistant && nextKey && assistantChunkKey && nextKey !== assistantChunkKey) flushAssistant();
       if (!assistant) assistant = { id: `gk_assistant_${lineNo}`, text, ts };
       else assistant.text += text;
+      if (nextKey) assistantChunkKey = nextKey;
       continue;
     }
     if (kind === 'agent_thought_chunk') {
@@ -142,8 +161,12 @@ export function grokNativeBlocks(raw: string): ChatBlock[] {
       flushAssistant();
       const text = textOfContent(update.content);
       if (!text) continue;
+      const rawKey = paramsMeta.promptId ?? updateMeta.promptId;
+      const nextKey = rawKey === undefined ? '' : `prompt-id:${String(rawKey)}`;
+      if (thinking && nextKey && thinkingChunkKey && nextKey !== thinkingChunkKey) flushThinking();
       if (!thinking) thinking = { id: `gk_think_${lineNo}`, text, ts };
       else thinking.text += text;
+      if (nextKey) thinkingChunkKey = nextKey;
       continue;
     }
     if (kind === 'tool_call' || kind === 'tool_call_update') {

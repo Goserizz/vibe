@@ -1,0 +1,11 @@
+{"id":"c-u-1","kind":"user","text":"Add a bounded retry setting to the sample worker and run its tests.","ts":1701000000000}
+{"id":"c-a-1","kind":"assistant","text":"I’ll inspect the worker configuration before editing it.","streaming":false,"ts":1701000000100}
+{"id":"c-tool-1","kind":"tool","toolUseId":"c-tool-1","name":"Read","input":{"file_path":"/workspace/sample-worker/src/config.ts"},"status":"done","result":"export const retryLimit = 2;\nexport const retryDelayMs = 500;","isError":false,"ts":1701000000200}
+{"id":"c-a-2","kind":"assistant","text":"The retry limit is currently two. I’ll raise it to three without changing the delay.","streaming":false,"ts":1701000000300}
+{"id":"c-tool-2","kind":"tool","toolUseId":"c-tool-2","name":"Edit","input":{"file_path":"/workspace/sample-worker/src/config.ts","old_string":"retryLimit = 2","new_string":"retryLimit = 3"},"status":"done","result":"Updated /workspace/sample-worker/src/config.ts","isError":false,"ts":1701000000400}
+{"id":"c-tool-3","kind":"tool","toolUseId":"c-tool-3","name":"Bash","input":{"command":"npm test","description":"Run worker tests"},"status":"done","result":"12 tests passed","isError":false,"ts":1701000000500}
+{"id":"c-a-3","kind":"assistant","text":"The retry limit is now three and all 12 tests pass.","streaming":false,"ts":1701000000600}
+{"id":"c-r-1","kind":"result","durationMs":980,"isError":false,"subtype":"success","contextUsed":4096,"contextWindow":200000,"ts":1701000000700}
+{"id":"c-u-2","kind":"user","text":"Show me the resulting value.","ts":1701000010000}
+{"id":"c-a-4","kind":"assistant","text":"The resulting retry limit is `3`.","streaming":false,"ts":1701000010100}
+{"id":"c-r-2","kind":"result","durationMs":180,"isError":false,"subtype":"success","contextUsed":4200,"contextWindow":200000,"ts":1701000010200}

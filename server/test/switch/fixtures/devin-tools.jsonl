@@ -1,0 +1,8 @@
+{"id": "dvf_user_1", "kind": "user", "text": "看一下 README.md，然后告诉我这个项目是干什么的。", "ts": 1785464109340}
+{"id": "dvf_assistant_1", "kind": "assistant", "text": "我先读一下 README。", "streaming": false, "ts": 1785464112340}
+{"id": "toolu_dvf_read_1", "kind": "tool", "toolUseId": "toolu_dvf_read_1", "name": "read", "input": {"file_path": "/tmp/proj/README.md"}, "status": "done", "result": "<file-view path=\"/tmp/proj/README.md\" start_line=\"1\" end_line=\"3\" total_lines=\"3\">\n  1|# Vibe\n  2|A web UI for driving agent CLIs.\n  3|</file-view>", "ts": 1785464113540}
+{"id": "dvf_assistant_2", "kind": "assistant", "text": "这是一个叫 Vibe 的项目：一个用来驱动命令行 agent 的 Web 界面。", "streaming": false, "ts": 1785464118340}
+{"id": "dvf_user_2", "kind": "user", "text": "它支持哪些 agent？", "ts": 1785464139340}
+{"id": "dvf_assistant_3", "kind": "assistant", "text": "", "streaming": false, "ts": 1785464142340}
+{"id": "toolu_dvf_grep_1", "kind": "tool", "toolUseId": "toolu_dvf_grep_1", "name": "search", "input": {"pattern": "AgentKind", "path": "/tmp/proj/shared"}, "status": "done", "result": "shared/protocol.ts:37:export type AgentKind = ...", "ts": 1785464143840}
+{"id": "dvf_assistant_4", "kind": "assistant", "text": "从类型定义看，支持 Claude、Cursor、Codex、Kimi、Kiro、Grok、ZCode、CodeBuddy 和 Devin。", "streaming": false, "ts": 1785464149340}

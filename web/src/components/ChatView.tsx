@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen } from '../lib/icons';
-import type { EffortLevel, PermissionMode } from '@shared/protocol';
+import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen, ArrowLeftRight } from '../lib/icons';
+import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { api } from '../lib/api';
 import { useStore } from '../store/store';
 import { MessageList } from './MessageList';
@@ -8,8 +8,10 @@ import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
 import { latestTodos, TodoPane } from './TodoPane';
 import { BackgroundTasksPane } from './BackgroundTasksPane';
+import { MonitorPane, useSessionMonitors, type SessionMonitorState } from './MonitorPane';
 import { TaskRail } from './TaskRail';
 import { Menu } from './Menu';
+import { SwitchAgentDialog } from './SwitchAgentDialog';
 import { Logo } from './Logo';
 import {
   agentLabel,
@@ -48,6 +50,7 @@ export function ChatView({
   const activeId = useStore((s) => s.activeId);
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
   const viewMode = useStore((s) => s.viewMode);
+  const monitorState = useSessionMonitors(activeId);
   // The composer stack floats over the message list, so the list needs bottom
   // padding equal to its height. It grows and shrinks (task pane expanded,
   // attachments, permission prompts), so measure instead of guessing.
@@ -89,27 +92,29 @@ export function ChatView({
               <div className="lg:hidden">
                 <BackgroundTasksPane sessionId={activeId} />
                 <TodoPane sessionId={activeId} />
+                <MonitorPane sessionId={activeId} state={monitorState} />
               </div>
               <Composer sessionId={activeId} />
             </div>
           </div>
         </section>
-        {!rightTab && <ChatTaskRail sessionId={activeId} />}
+        {!rightTab && <ChatTaskRail sessionId={activeId} monitorState={monitorState} />}
       </div>
     </main>
   );
 }
 
-/** Only mounts TaskRail when this session has todos or background tasks. */
-function ChatTaskRail({ sessionId }: { sessionId: string }) {
+/** Only mounts TaskRail when this session has todos, background tasks, or monitors. */
+function ChatTaskRail({ sessionId, monitorState }: { sessionId: string; monitorState: SessionMonitorState }) {
   const blocks = useStore((s) => s.views[sessionId]?.blocks);
   const backgroundTasks = useStore((s) => s.tasks[sessionId]);
   const hasTodos = useMemo(() => Boolean(latestTodos(blocks)?.length), [blocks]);
-  if (!hasTodos && !backgroundTasks?.length) return null;
+  if (!hasTodos && !backgroundTasks?.length && !monitorState.monitors.length) return null;
   return (
     <TaskRail aria-label="Session tasks">
       <BackgroundTasksPane sessionId={sessionId} layout="rail" />
       <TodoPane sessionId={sessionId} layout="rail" />
+      <MonitorPane sessionId={sessionId} state={monitorState} layout="rail" />
     </TaskRail>
   );
 }
@@ -209,7 +214,13 @@ function Header({
                         ? 'bg-amber-500/15 text-amber-300'
                         : session.agent === 'zcode'
                           ? 'bg-rose-500/15 text-rose-300'
-                          : 'bg-ink-700 text-slate-300',
+                          : session.agent === 'codebuddy'
+                            ? 'bg-cyan-500/15 text-cyan-300'
+                            : session.agent === 'opencode'
+                              ? 'bg-teal-500/15 text-teal-300'
+                              : session.agent === 'devin'
+                                ? 'bg-indigo-500/15 text-indigo-300'
+                                : 'bg-ink-700 text-slate-300',
             )}
           >
             {agentLabel(session.agent)}
@@ -223,6 +234,7 @@ function Header({
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5 pl-10 md:justify-end md:pl-0">
+      <SwitchAgentControl sessionId={session.id} agent={session.agent} model={session.model} />
       <ModelControl align={align} />
       {session.agent !== 'cursor' && session.agent !== 'kimi' && <EffortControl align={align} />}
       <PermissionControl align={align} />
@@ -243,6 +255,24 @@ function Header({
   );
 }
 
+/** 「切换 Agent / 模型」入口：把当前会话换成另一个 agent，历史无损保留。 */
+function SwitchAgentControl({ sessionId, agent, model }: { sessionId: string; agent: AgentKind; model: string }) {
+  const cli = useStore((s) => s.viewMode) === 'cli';
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      {open && (
+        <SwitchAgentDialog sessionId={sessionId} currentAgent={agent} currentModel={model} onClose={() => setOpen(false)} />
+      )}
+      <button type="button" onClick={() => setOpen(true)} aria-label="切换 Agent" title="切换 Agent / 模型">
+        <ControlChip title={`当前 ${agent} · 点击切换 Agent / 模型`}>
+          {cli ? agent : <ArrowLeftRight className="h-4 w-4 text-slate-400" />}
+        </ControlChip>
+      </button>
+    </>
+  );
+}
+
 function ModelControl({ align }: { align: 'left' | 'right' }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
   const cli = useStore((s) => s.viewMode) === 'cli';
@@ -252,14 +282,20 @@ function ModelControl({ align }: { align: 'left' | 'right' }) {
   const kiroModels = useStore((s) => s.kiroModels);
   const grokModels = useStore((s) => s.grokModels);
   const zcodeModels = useStore((s) => s.zcodeModels);
+  const codebuddyModels = useStore((s) => s.codebuddyModels);
+  const devinModels = useStore((s) => s.devinModels);
+  const opencodeModels = useStore((s) => s.opencodeModels);
   const loadCursorModels = useStore((s) => s.loadCursorModels);
   const loadCodexModels = useStore((s) => s.loadCodexModels);
   const loadKimiCapabilities = useStore((s) => s.loadKimiCapabilities);
   const loadKiroModels = useStore((s) => s.loadKiroModels);
   const loadGrokModels = useStore((s) => s.loadGrokModels);
   const loadZcodeModels = useStore((s) => s.loadZcodeModels);
+  const loadCodebuddyModels = useStore((s) => s.loadCodebuddyModels);
+  const loadDevinModels = useStore((s) => s.loadDevinModels);
+  const loadOpencodeModels = useStore((s) => s.loadOpencodeModels);
   const usePicker = session.agent !== 'claude';
-  const label = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels);
+  const label = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels);
 
   useEffect(() => {
     const h = session.host || undefined;
@@ -269,7 +305,10 @@ function ModelControl({ align }: { align: 'left' | 'right' }) {
     else if (session.agent === 'kiro') void loadKiroModels(h);
     else if (session.agent === 'grok') void loadGrokModels(h);
     else if (session.agent === 'zcode') void loadZcodeModels(h);
-  }, [session.agent, session.host, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels]);
+    else if (session.agent === 'codebuddy') void loadCodebuddyModels(h);
+    else if (session.agent === 'devin') void loadDevinModels(h);
+    else if (session.agent === 'opencode') void loadOpencodeModels(h);
+  }, [session.agent, session.host, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels, loadCodebuddyModels, loadDevinModels, loadOpencodeModels]);
 
   return (
     <Menu
@@ -277,7 +316,7 @@ function ModelControl({ align }: { align: 'left' | 'right' }) {
       triggerLabel={`Model: ${label}`}
       searchable={usePicker}
       allowCustom={usePicker}
-      items={modelsForAgent(session.agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
+      items={modelsForAgent(session.agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
       onSelect={(value) => void patchSession(session.id, { model: value })}
       trigger={
         <ControlChip title={`Model: ${label}`}>
@@ -293,7 +332,9 @@ function EffortControl({ align }: { align: 'left' | 'right' }) {
   const cli = useStore((s) => s.viewMode) === 'cli';
   const codexModels = useStore((s) => s.codexModels);
   const zcodeModels = useStore((s) => s.zcodeModels);
-  const models = session.agent === 'zcode' ? zcodeModels : codexModels;
+  const devinModels = useStore((s) => s.devinModels);
+  const models =
+    session.agent === 'zcode' ? zcodeModels : session.agent === 'devin' ? devinModels : codexModels;
   const modelOpt = models.find((m) => m.value === session.model) ?? null;
   const levels = effortLevelsForAgent(session.agent, modelOpt);
   const label = effortLabel(session.effort, session.agent);

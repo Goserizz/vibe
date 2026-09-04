@@ -5,15 +5,20 @@ import path from 'node:path';
 import { log } from '../log.js';
 import { resolveCodexExecutable } from '../codex/resolve.js';
 import { resolveCursorExecutable } from '../cursor/resolve.js';
+import { resolveDevinExecutable } from '../devin/resolve.js';
+import { config } from '../config.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import {
   sshExec,
   sshStreamArgv,
+  sshTerminalArgv,
   loginShellCommand,
   streamRemoteCommand,
   proxyEnvPrefix,
   cleanRemoteStderr,
 } from '../remote/ssh.js';
+import { spawnPtyProcess } from '../terminal/pty.js';
+import type { IPty } from 'node-pty';
 import type { AgentLoginAccount, AgentLoginStatus, LoginAgent } from '../../../shared/protocol.js';
 
 /**
@@ -76,12 +81,49 @@ function scanOutput(text: string): ScanResult {
 
 interface ActiveFlow {
   status: AgentLoginStatus;
-  child: ChildProcess;
+  /** Pipe-based child (cursor/codex flows). Absent for PTY flows. */
+  child?: ChildProcess;
+  /** PTY-based process for flows that need pasted input (Devin). Its stdin
+   *  must be a TTY — the CLI refuses to read a code from a plain pipe. */
+  pty?: IPty;
   /** Strip-ANSI'd output, trimmed to the last OUTPUT_TAIL chars. */
   output: string;
   timer: NodeJS.Timeout;
   settled: boolean;
 }
+
+/**
+ * Per-agent login command shape.
+ *
+ * `input: 'code'` marks a flow that needs the user to paste something back into
+ * the CLI. Devin's only pipe-friendly login is
+ * `devin auth login --force-manual-token-flow`, which prints a link and then
+ * blocks reading the auth code from stdin — its browser flow prints nothing
+ * usable without a TTY, and credential injection does not work for it (its
+ * env-var override is ignored), so driving the CLI's own flow is the only way.
+ *
+ * Keyed on `Exclude<LoginAgent, 'codebuddy'>` so adding a login agent is a
+ * compile error here rather than silently falling into another agent's branch.
+ */
+interface LoginSpec {
+  localArgs: string[];
+  remoteInner: string;
+  input: 'none' | 'code';
+}
+
+const LOGIN_SPECS: Record<Exclude<LoginAgent, 'codebuddy'>, LoginSpec> = {
+  cursor: { localArgs: ['login'], remoteInner: 'cursor-agent login', input: 'none' },
+  codex: { localArgs: ['login', '--device-auth'], remoteInner: 'codex login --device-auth', input: 'none' },
+  devin: {
+    localArgs: ['auth', 'login', '--force-manual-token-flow'],
+    remoteInner: 'devin auth login --force-manual-token-flow',
+    input: 'code',
+  },
+};
+
+/** CLIs that report "you are already signed in" and exit 0 without doing
+ *  anything. Trusting the exit code would toast a success for a no-op. */
+const ALREADY_LOGGED_IN_RE = /already logged in|re-authenticate/i;
 
 class AgentLoginManager {
   private flows = new Map<string, ActiveFlow>();
@@ -105,6 +147,26 @@ class AgentLoginManager {
     }
   }
 
+  /** Deliver user input to a flow that is waiting for it (Devin's pasted auth
+   *  code). Returns null when no such flow is live, so the route can 409. */
+  submit(agent: LoginAgent, hostName: string, text: string): AgentLoginStatus | null {
+    const host = hostName.trim();
+    const flow = this.flows.get(`${agent}@${host}`);
+    if (!flow || flow.settled) return null;
+    // PTY flow: submit with CR, which is what the Enter key sends through a
+    // terminal. One write so a concurrent submit can't interleave; the tty
+    // buffers it until the CLI reads. Not killing the line discipline: a wrong
+    // code must be re-enterable without restarting the flow.
+    if (flow.pty) {
+      flow.pty.write(`${text.trim()}\r`);
+      return flow.status;
+    }
+    const stdin = flow.child?.stdin;
+    if (!stdin || stdin.destroyed) return null;
+    stdin.write(`${text.trim()}\n`);
+    return flow.status;
+  }
+
   /** Spawn the CLI's login command and return its initial (starting) status.
    *  Replaces any flow already running for the same agent + host. */
   start(agent: LoginAgent, hostName: string): AgentLoginStatus {
@@ -114,53 +176,70 @@ class AgentLoginManager {
 
     let bin: string;
     let args: string[];
+    if (agent === 'codebuddy') {
+      // CodeBuddy has no link login; its credentials route owns sign-in.
+      throw new AgentLoginError('codebuddy sign-in is managed via /agents/codebuddy/credentials');
+    }
+    const spec = LOGIN_SPECS[agent];
+    // Input flows run under a PTY: Devin's manual-token flow refuses to read
+    // the pasted code from a pipe (non-TTY stdin ⇒ immediate "user canceled",
+    // verified against the real CLI). The PTY also covers the remote path —
+    // `ssh -tt` gives the remote CLI a TTY and forwards our writes to it.
+    const needsPty = spec.input === 'code';
     if (!host) {
-      const exe = agent === 'cursor' ? resolveCursorExecutable() : resolveCodexExecutable();
+      const exe =
+        agent === 'cursor'
+          ? resolveCursorExecutable()
+          : agent === 'codex'
+            ? resolveCodexExecutable()
+            : resolveDevinExecutable();
       if (!exe) {
         throw new AgentLoginError(
           agent === 'cursor'
             ? 'cursor-agent CLI not found — install it first (https://cursor.com/downloads)'
-            : 'codex CLI not found — install it first (https://developers.openai.com/codex/cli)',
+            : agent === 'codex'
+              ? 'codex CLI not found — install it first (https://developers.openai.com/codex/cli)'
+              : 'devin CLI not found — install it first (https://app.devin.ai)',
         );
       }
       bin = exe;
-      args = agent === 'cursor' ? ['login'] : ['login', '--device-auth'];
+      args = spec.localArgs;
     } else {
       const hostRec = hostRegistry.get(host);
       if (!hostRec) throw new AgentLoginError(`unknown host "${host}"`);
-      const inner = agent === 'cursor' ? 'cursor-agent login' : 'codex login --device-auth';
       // Env prefix (browser suppression + per-host proxy) sits before the login
       // shell so it reaches the CLI regardless of how stdbuf wraps it.
-      const remoteCmd =
-        `NO_OPEN_BROWSER=1 ` +
-        proxyEnvPrefix(proxyForAgent(hostRec, agent)) +
-        loginShellCommand(streamRemoteCommand(inner));
-      const argv = sshStreamArgv(hostRec.ssh, remoteCmd);
-      bin = argv.bin;
-      args = argv.args;
+      const inner = `NO_OPEN_BROWSER=1 ` + proxyEnvPrefix(proxyForAgent(hostRec, agent)) + spec.remoteInner;
+      if (needsPty) {
+        // -tt forces a remote PTY (what the terminal feature uses); no stdbuf
+        // wrapper — a remote tty is already line-buffered.
+        const argv = sshTerminalArgv(hostRec.ssh, loginShellCommand(inner));
+        bin = argv.bin;
+        args = argv.args;
+      } else {
+        const remoteCmd = loginShellCommand(streamRemoteCommand(inner));
+        const argv = sshStreamArgv(hostRec.ssh, remoteCmd);
+        bin = argv.bin;
+        args = argv.args;
+      }
     }
 
-    const child = spawn(bin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, NO_OPEN_BROWSER: '1' },
-    });
-
     const flow: ActiveFlow = {
-      status: { agent, host, phase: 'starting' },
-      child,
+      status: { agent, host, phase: 'starting', needsInput: spec.input === 'code' },
       output: '',
       settled: false,
       timer: setTimeout(() => {
         flow.status.phase = 'error';
         flow.status.error = 'login timed out — start again';
+        this.kill(flow);
         this.finish(flow);
       }, FLOW_TIMEOUT_MS),
     };
     this.flows.set(key, flow);
 
-    const onChunk = (d: Buffer): void => {
+    const onChunk = (d: Buffer | string): void => {
       if (flow.settled) return;
-      flow.output = (flow.output + stripAnsi(d.toString('utf8'))).slice(-OUTPUT_TAIL);
+      flow.output = (flow.output + stripAnsi(d.toString())).slice(-OUTPUT_TAIL);
       const found = scanOutput(flow.output);
       if (found.url && flow.status.phase === 'starting') {
         flow.status.phase = 'link';
@@ -169,16 +248,19 @@ class AgentLoginManager {
       if (found.code && !flow.status.code) flow.status.code = found.code;
       flow.status.output = flow.output.slice(-2_000).trim() || undefined;
     };
-    child.stdout?.on('data', onChunk);
-    child.stderr?.on('data', onChunk);
-    child.on('error', (err) => {
+    /** Shared pipe/pty exit handling (already-logged-in check first: Devin
+     *  exits 0 having done nothing when a session exists, and trusting the
+     *  exit code alone would toast a success for a no-op). */
+    const onExit = (code: number | null): void => {
       if (flow.settled) return;
-      flow.status.phase = 'error';
-      flow.status.error = `failed to run ${bin}: ${err.message}`;
-      this.finish(flow);
-    });
-    child.on('close', (code) => {
-      if (flow.settled) return;
+      if (code === 0 && flow.output.trim() && ALREADY_LOGGED_IN_RE.test(flow.output)) {
+        flow.status.phase = 'error';
+        flow.status.error =
+          `Already signed in${host ? ` on ${host}` : ''} — sign out there first to switch accounts.`;
+        invalidateAgentLoginAccount(agent, host);
+        this.finish(flow);
+        return;
+      }
       if (code === 0) {
         flow.status.phase = 'success';
         invalidateAgentLoginAccount(agent, host);
@@ -189,7 +271,30 @@ class AgentLoginManager {
           `login exited with code ${code}`;
       }
       this.finish(flow);
-    });
+    };
+
+    if (needsPty) {
+      const proc = spawnPtyProcess(bin, args, { env: { NO_OPEN_BROWSER: '1' } });
+      flow.pty = proc;
+      // A PTY merges stdout+stderr into one stream — exactly what we scrape.
+      proc.onData((d) => onChunk(d));
+      proc.onExit(({ exitCode }) => onExit(exitCode));
+    } else {
+      const child = spawn(bin, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, NO_OPEN_BROWSER: '1' },
+      });
+      flow.child = child;
+      child.stdout?.on('data', onChunk);
+      child.stderr?.on('data', onChunk);
+      child.on('error', (err) => {
+        if (flow.settled) return;
+        flow.status.phase = 'error';
+        flow.status.error = `failed to run ${bin}: ${err.message}`;
+        this.finish(flow);
+      });
+      child.on('close', (code) => onExit(code));
+    }
     return flow.status;
   }
 
@@ -203,9 +308,18 @@ class AgentLoginManager {
 
   private kill(flow: ActiveFlow): void {
     flow.settled = true;
+    if (flow.pty) {
+      try {
+        // SIGHUP is how a terminal session ends; node-pty's kill() defaults to it.
+        flow.pty.kill();
+      } catch {
+        /* already gone */
+      }
+      return;
+    }
     try {
-      flow.child.kill('SIGTERM');
-      setTimeout(() => flow.child.kill('SIGKILL'), 2_000).unref?.();
+      flow.child?.kill('SIGTERM');
+      setTimeout(() => flow.child?.kill('SIGKILL'), 2_000).unref?.();
     } catch {
       /* already gone */
     }
@@ -274,6 +388,55 @@ function codexStatusLocal(exe: string): Promise<AgentLoginAccount> {
   });
 }
 
+/**
+ * Parse `devin auth status`.
+ *
+ * Signed in:  "Logged in (via Devin)." … "Email: someone@example.com"
+ * Signed out: "Not logged in." (+ a credentials path)
+ *
+ * The exit code is deliberately ignored by callers: devin may return non-zero
+ * for reasons unrelated to auth (e.g. a network blip reaching its API).
+ */
+function parseDevinStatus(raw: string): AgentLoginAccount {
+  const text = stripAnsi(raw);
+  if (/not logged in/i.test(text)) return { loggedIn: false };
+  if (/logged in/i.test(text)) {
+    const labelled = text.match(/Email:\s*(\S+@\S+)/i)?.[1];
+    const anyEmail = text.match(/[\w.+-]+@[\w.-]+\.\w+/)?.[0];
+    const account = labelled ?? anyEmail;
+    return account ? { loggedIn: true, account } : { loggedIn: true };
+  }
+  return { loggedIn: false };
+}
+
+/** `devin auth status` on this machine. */
+function devinStatusLocal(exe: string): Promise<AgentLoginAccount> {
+  return new Promise((resolve) => {
+    execFile(exe, ['auth', 'status'], { timeout: 15_000 }, (err, stdout, stderr) => {
+      const combined = `${stdout}\n${stderr}`;
+      if (err && !combined.trim()) resolve({ loggedIn: false });
+      else resolve(parseDevinStatus(combined));
+    });
+  });
+}
+
+/** `devin auth status` on a remote host. `devin` lives in ~/.local/bin, which a
+ *  non-interactive shell may lack, so fall back to that path explicitly. */
+function remoteDevinStatus(hostName: string): Promise<AgentLoginAccount> {
+  const hostRec = hostRegistry.get(hostName);
+  if (!hostRec) return Promise.reject(new AgentLoginError(`unknown host "${hostName}"`));
+  const inner = [
+    'devin_fallback="$HOME/.local/bin/devin"',
+    'if command -v devin >/dev/null 2>&1; then devin_bin="$(command -v devin)"; '
+      + 'elif [ -x "$devin_fallback" ]; then devin_bin="$devin_fallback"; '
+      + 'else echo "devin CLI not found" >&2; exit 127; fi',
+    '"$devin_bin" auth status',
+  ].join('\n');
+  return sshExec(hostRec.ssh, loginShellCommand(inner), { timeoutMs: 20_000 }).then((res) =>
+    parseDevinStatus(`${res.stdout}\n${res.stderr}`),
+  );
+}
+
 function parseCursorAuth(raw: string): AgentLoginAccount {
   try {
     const auth = JSON.parse(raw)?.authInfo;
@@ -293,7 +456,21 @@ export async function agentLoginAccount(agent: LoginAgent, hostName: string): Pr
   if (hit && Date.now() - hit.at < ACCOUNT_TTL_MS) return hit.value;
 
   let value: AgentLoginAccount;
-  if (agent === 'codex') {
+  // A switch rather than if/else: a new LoginAgent that falls through would
+  // silently report another agent's account, which is worse than a loud throw.
+  switch (agent) {
+    case 'codebuddy':
+      // CodeBuddy has no link login / auth file — its sign-in state lives in the
+      // credential-injection module and is served by codebuddyAccount().
+      throw new AgentLoginError('codebuddy sign-in state is managed via /agents/codebuddy/credentials');
+    case 'devin':
+      value = host
+        ? await remoteDevinStatus(host)
+        : config.devinExecutable
+          ? await devinStatusLocal(config.devinExecutable)
+          : { loggedIn: false };
+      break;
+    case 'codex': {
     // ~/.codex/auth.json is what the CLI itself trusts; reading it directly is
     // faster than a subprocess and carries the account email in its id_token
     // JWT (the status command prints only "Logged in using ChatGPT").
@@ -313,31 +490,37 @@ export async function agentLoginAccount(agent: LoginAgent, hostName: string): Pr
           });
           return res.stdout;
         })();
-    const parsed = parseCodexAuthJson(readAuthJson);
-    if (parsed) {
-      value = parsed;
-    } else if (!host) {
-      const exe = resolveCodexExecutable();
-      value = exe ? await codexStatusLocal(exe) : { loggedIn: false };
-    } else {
-      const hostRec = hostRegistry.get(host)!;
-      const res = await sshExec(hostRec.ssh, loginShellCommand('codex login status'), { timeoutMs: 20_000 });
-      value = parseCodexStatus(`${res.stdout}\n${res.stderr}`);
-    }
-  } else {
-    if (!host) {
-      try {
-        value = parseCursorAuth(fs.readFileSync(path.join(os.homedir(), '.cursor', 'cli-config.json'), 'utf8'));
-      } catch {
-        value = { loggedIn: false };
+      const parsed = parseCodexAuthJson(readAuthJson);
+      if (parsed) {
+        value = parsed;
+      } else if (!host) {
+        const exe = resolveCodexExecutable();
+        value = exe ? await codexStatusLocal(exe) : { loggedIn: false };
+      } else {
+        const hostRec = hostRegistry.get(host)!;
+        const res = await sshExec(hostRec.ssh, loginShellCommand('codex login status'), { timeoutMs: 20_000 });
+        value = parseCodexStatus(`${res.stdout}\n${res.stderr}`);
       }
-    } else {
-      const hostRec = hostRegistry.get(host);
-      if (!hostRec) throw new AgentLoginError(`unknown host "${host}"`);
-      const res = await sshExec(hostRec.ssh, loginShellCommand('cat "$HOME/.cursor/cli-config.json" 2>/dev/null'), {
-        timeoutMs: 20_000,
-      });
-      value = parseCursorAuth(res.stdout);
+      break;
+    }
+    case 'cursor': {
+      if (!host) {
+        try {
+          value = parseCursorAuth(fs.readFileSync(path.join(os.homedir(), '.cursor', 'cli-config.json'), 'utf8'));
+        } catch {
+          value = { loggedIn: false };
+        }
+      } else {
+        const hostRec = hostRegistry.get(host);
+        if (!hostRec) throw new AgentLoginError(`unknown host "${host}"`);
+        const res = await sshExec(
+          hostRec.ssh,
+          loginShellCommand('cat "$HOME/.cursor/cli-config.json" 2>/dev/null'),
+          { timeoutMs: 20_000 },
+        );
+        value = parseCursorAuth(res.stdout);
+      }
+      break;
     }
   }
 

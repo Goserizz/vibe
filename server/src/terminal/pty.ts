@@ -53,3 +53,24 @@ export function spawnTerminal(opts: TerminalOptions): IPty {
   const shell = process.env.SHELL || '/bin/bash';
   return pty.spawn(shell, ['-l'], { name: 'xterm-256color', cols: opts.cols, rows: opts.rows, cwd: opts.cwd, env });
 }
+
+/**
+ * Generic PTY spawn for non-shell processes that need a terminal on their
+ * stdin. Used by agent login flows whose CLI refuses to read pasted input from
+ * a pipe (Devin's manual-token flow bails with "user canceled" unless stdin is
+ * a TTY). Wide cols by default so long one-line URLs don't wrap in the stream.
+ */
+export function spawnPtyProcess(
+  bin: string,
+  args: string[],
+  opts: { cols?: number; rows?: number; env?: Record<string, string> } = {},
+): IPty {
+  ensureSpawnHelper();
+  return pty.spawn(bin, args, {
+    name: 'xterm-256color',
+    cols: opts.cols ?? 500,
+    rows: opts.rows ?? 50,
+    cwd: os.homedir(),
+    env: { ...process.env, ...opts.env } as Record<string, string>,
+  });
+}

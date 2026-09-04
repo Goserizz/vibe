@@ -4,7 +4,7 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-**An elegant, low‑latency web UI for driving Claude Code, Codex, Cursor, Kimi, Kiro, Grok, and ZCode agents on any machine.**
+**An elegant, low‑latency web UI for driving Claude Code, Codex, Cursor, Kimi, Kiro, Grok, ZCode, and opencode agents on any machine.**
 
 Run it on the machine where your code lives, open the printed link from any browser
 (laptop, phone, tablet), and vibe‑code remotely with smooth streaming and a clean interface.
@@ -41,10 +41,10 @@ Run it on the machine where your code lives, open the printed link from any brow
 ## Why Vibe
 
 Vibe runs a small server on your machine that talks to Claude Code, Codex, Cursor,
-Kimi Code, Kiro, Grok, or ZCode, normalizes each agent's stream into the same structured conversation
+Kimi Code, Kiro, Grok, ZCode, or opencode, normalizes each agent's stream into the same structured conversation
 model, and sends it to a React web client over a single WebSocket. Claude sessions
 use the official [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk);
-Codex runs through its long-lived App Server, Cursor, Kimi, Kiro, and Grok use their structured CLI / ACP channels, and ZCode runs through its ZCode Protocol app-server,
+Codex runs through its long-lived App Server, Cursor, Kimi, Kiro, and Grok use their structured CLI / ACP channels, ZCode runs through its ZCode Protocol app-server, and opencode drives turns over ACP (`opencode acp`) with token streaming and interactive approvals,
 their structured CLI/ACP transports.
 
 It was built to fix two things that make other remote coding-agent UIs feel clunky:
@@ -67,7 +67,7 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   output, and per-task stop where the engine exposes it; task completion automatically wakes
   the agent for a follow-up reply, while the composer remains available between foreground turns;
   stopping the current reply leaves background tasks and their completion notifications running
-- 🤖 **Multiple agents** — choose Claude, Codex, Cursor, Kimi, Kiro, Grok, or ZCode per session, with agent-specific
+- 🤖 **Multiple agents** — choose Claude, Codex, Cursor, Kimi, Kiro, Grok, ZCode, or opencode per session, with agent-specific
   model, reasoning, and permission controls
 - 🔐 **Permission controls** — Claude supports inline Allow / Always allow / Deny prompts;
   Codex and Cursor use coarse modes; Kimi discovers Default / Plan / Auto / YOLO from its
@@ -76,7 +76,7 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
 - 🗂 **Sessions** — create in any directory, resume, rename, delete; history loaded from
   agent transcript stores and Vibe-managed transcripts where available
 - 🖥️ **Picks up your CLI sessions** — conversations you started in the terminal with
-  `claude`, `codex`, `cursor-agent`, `kimi`, `kiro-cli`, `grok`, or `zcode` appear automatically when their local history is readable;
+  `claude`, `codex`, `cursor-agent`, `kimi`, `kiro-cli`, `grok`, `zcode`, or `opencode` appear automatically when their local history is readable;
   open them to read the full history and keep chatting
 - 🌐 **Remote hosts over SSH** — add machines you reach via SSH and run the selected agent
   on that machine; sessions you started on that host's own CLIs (Claude, Codex, Cursor, Kimi,
@@ -121,6 +121,7 @@ It was built to fix two things that make other remote coding-agent UIs feel clun
   - [Grok Build](https://x.ai/cli) (`grok`)
   - ZCode (`zcode`) — the CLI extracted from the Z.ai desktop release; needs Node ≥ 22.5 and
     `~/.zcode/cli/config.json` with a provider + model configured
+  - [opencode](https://opencode.ai) (`opencode`)
 
 Vibe auto-detects these binaries on `PATH` and common install locations. It uses each
 CLI's existing authentication and config; for Claude that includes MCP servers,
@@ -195,7 +196,8 @@ All optional, via environment variables:
 | `VIBE_DEFAULT_KIRO_MODEL` | `auto` | Default Kiro model; `auto` lets Kiro pick |
 | `VIBE_DEFAULT_GROK_MODEL` | `auto` | Default Grok model; `auto` lets Grok pick |
 | `VIBE_DEFAULT_ZCODE_MODEL` | `auto` | Default ZCode model (`providerID/modelID`); `auto` lets ZCode pick |
-| `VIBE_DEFAULT_AGENT` | `claude` | Default agent (`claude`/`cursor`/`codex`/`kimi`/`kiro`/`grok`/`zcode`) |
+| `VIBE_DEFAULT_OPENCODE_MODEL` | `auto` | Default opencode model (`provider/model`); `auto` lets opencode pick |
+| `VIBE_DEFAULT_AGENT` | `claude` | Default agent (`claude`/`cursor`/`codex`/`kimi`/`kiro`/`grok`/`zcode`/`opencode`) |
 | `CLAUDE_CLI_PATH` | auto‑detected | Explicit path to the `claude` binary |
 | `CURSOR_CLI_PATH` | auto‑detected | Explicit path to the `cursor-agent` binary |
 | `CODEX_CLI_PATH` | auto‑detected | Explicit path to the `codex` binary |
@@ -203,9 +205,11 @@ All optional, via environment variables:
 | `KIRO_CLI_PATH` | auto‑detected | Explicit path to the `kiro-cli` binary (installs under `~/.local/bin/kiro-cli` are detected) |
 | `GROK_CLI_PATH` | auto‑detected | Explicit path to the `grok` binary (installs under `~/.local/bin/grok` are detected) |
 | `ZCODE_CLI_PATH` | auto‑detected | Explicit path to the `zcode` binary (`/usr/local/bin/zcode` is detected) |
+| `OPENCODE_CLI_PATH` | auto‑detected | Explicit path to the `opencode` binary (`~/.opencode/bin/opencode` is detected) |
 | `VIBE_LOCAL_NAME` | machine hostname | Label shown for this (local) machine |
 | `VIBE_SSH_HOSTS` | – | Seed remote hosts, e.g. `prod=user@1.2.3.4,gpu=mygpu-alias` |
 | `VIBE_SSH` | `ssh` | SSH command to use (override for custom options) |
+| `VIBE_MONITOR_MCP_URL` | – | Full HTTPS `/api/internal/monitor-mcp` URL remote agents use to create monitor drafts; local agents use loopback automatically |
 | `VIBE_TELEGRAM_BOT_TOKEN` | – | Telegram bot token from [@BotFather](https://t.me/BotFather). When set, Vibe starts a bot alongside the web UI. If unset, falls back to `~/.vibe/telegram-bot-token` |
 | `VIBE_TELEGRAM_ALLOWLIST` | – | Comma-separated Telegram user ids allowed to use the bot. Empty = anyone who can message the bot |
 
@@ -248,14 +252,15 @@ Active session per chat is remembered in `~/.vibe/telegram.json`.
 ## Remote hosts (SSH)
 
 Open **Hosts** in the sidebar to add a machine by an `~/.ssh/config` alias or `user@host`.
-Vibe can run Claude, Codex, Cursor, Kimi, Kiro, Grok, or ZCode turns on that machine over SSH. Sessions that
+Vibe can run Claude, Codex, Cursor, Kimi, Kiro, Grok, ZCode, or opencode turns on that machine over SSH. Sessions that
 already exist on the host's own CLIs are discovered in the sidebar (tagged with the host name and
 the owning agent), and Vibe-created remote sessions continue with whichever agent you selected
 for that session.
 
 Remote discovery reads each agent's native store over SSH: `~/.claude/projects` (Claude),
 `~/.codex/sessions` (Codex), `$KIMI_CODE_HOME`'s session index (Kimi), `~/.kiro/sessions/cli`
-(Kiro), `~/.grok/sessions` (Grok) and `~/.cursor/chats` (Cursor). Two caveats mirror the local behavior: a Cursor chat is
+(Kiro), `~/.grok/sessions` (Grok), `~/.cursor/chats` (Cursor) and `~/.local/share/opencode/opencode.db`
+(opencode, needs `python3` with stdlib `sqlite3` on that host). Two caveats mirror the local behavior: a Cursor chat is
 only recoverable when Vibe can name its working directory (Cursor records only a hash of it), and
 rendering a remote Cursor chat's own history needs `sqlite3` on that host.
 
@@ -299,6 +304,14 @@ Open **Settings** (the gear in the sidebar) to manage shared engine configuratio
 When a turn finishes on a session you're not currently viewing, the sidebar marks it with a
 steady accent dot and a bold title until you open it.
 
+## Task monitoring
+
+Open **Monitoring** from the sidebar menu to create durable command or HTTP health checks. A
+monitor can notify a conversation or wake its current agent, retry while the condition remains
+unhealthy, and close the incident only after a successful verification probe. Definitions and
+incident history survive server restarts. Agents can create, edit, start, stop, list, and run
+checks through the built-in `vibe-monitor` MCP. See [Task monitoring](docs/task-monitoring.md).
+
 ## How it works
 
 ```
@@ -313,10 +326,10 @@ Agent CLI  (runs in your chosen directory; history is read from native stores or
 ```
 
 - **`shared/protocol.ts`** — the single source of truth for the wire protocol.
-- **`server/`** — token auth, agent runners (Claude SDK plus Codex/Cursor/Kimi/Kiro/Grok CLI runners,
+- **`server/`** — token auth, agent runners (Claude SDK plus Codex/Cursor/Kimi/Kiro/Grok/ZCode/opencode CLI runners,
   local or remote over `ssh`, all normalized into the same block stream), a per‑session
   event hub (seq log, replay, backpressure), a session metadata store, transcript readers
-  for history, discovery of existing Claude/Codex/Cursor/Kimi/Kiro/Grok sessions where available, the
+  for history, discovery of existing Claude/Codex/Cursor/Kimi/Kiro/Grok/ZCode/opencode sessions where available, the
   MCP server registry (per‑scope enable lists + OAuth token management), saved session presets,
   chat‑attachment upload, an optional Telegram bot, and the terminal PTY channel. Deleting a
   discovered session only dismisses it from Vibe — the underlying agent transcript is never touched.

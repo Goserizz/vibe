@@ -28,6 +28,10 @@ export function PresetForm({ def, onDone }: { def?: SessionPreset; onDone: () =>
   const kiroModels = useStore((s) => s.kiroModels);
   const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
   const grokModels = useStore((s) => s.grokModels);
+  const zcodeModels = useStore((s) => s.zcodeModels);
+  const codebuddyModels = useStore((s) => s.codebuddyModels);
+  const devinModels = useStore((s) => s.devinModels);
+  const opencodeModels = useStore((s) => s.opencodeModels);
   const upsertPreset = useStore((s) => s.upsertPreset);
   const setToast = useStore((s) => s.setToast);
 
@@ -39,9 +43,16 @@ export function PresetForm({ def, onDone }: { def?: SessionPreset; onDone: () =>
   const [saving, setSaving] = useState(false);
 
   const codexModelOpt = codexModels.find((m) => m.value === model) ?? null;
-  const modelOptions = modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels);
+  const modelOptions = modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels);
   const permissionOptions = permissionModesForAgent(agent, kimiPermissionModes, kiroPermissionModes);
-  const effortLevels = effortLevelsForAgent(agent, codexModelOpt);
+  // Devin's ladder is per-family like Codex's; ZCode has its own.
+  const effortModelOpt =
+    agent === 'zcode'
+      ? (zcodeModels.find((m) => m.value === model) ?? null)
+      : agent === 'devin'
+        ? (devinModels.find((m) => m.value === model) ?? null)
+        : codexModelOpt;
+  const effortLevels = effortLevelsForAgent(agent, effortModelOpt);
 
   // Switching engine resets model + permission + effort to that engine's
   // sensible defaults (mirrors the New Session dialog's onAgent handler).
@@ -138,6 +149,9 @@ export function PresetRegistry() {
   const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
   const grokModels = useStore((s) => s.grokModels);
   const zcodeModels = useStore((s) => s.zcodeModels);
+  const codebuddyModels = useStore((s) => s.codebuddyModels);
+  const devinModels = useStore((s) => s.devinModels);
+  const opencodeModels = useStore((s) => s.opencodeModels);
   const remove = useStore((s) => s.deletePreset);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
@@ -159,7 +173,7 @@ export function PresetRegistry() {
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13px] text-slate-200">{p.name}</div>
               <div className="truncate font-mono text-[11px] text-slate-500">
-                {`${p.agent} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels)} · ${permissionModeLabel(
+                {`${p.agent} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels)} · ${permissionModeLabel(
                   p.permissionMode,
                   p.agent,
                   kimiPermissionModes,

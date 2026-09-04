@@ -1,9 +1,20 @@
 import type { Conn } from '../ws/hub.js';
-import type { AgentKind, ChatBlock, LiveEvent, VibotConvMeta } from '../../../shared/protocol.js';
+import type {
+  AgentKind,
+  ChatBlock,
+  LiveEvent,
+  ServerEvent,
+  VibotAskQuestion,
+  VibotAskRequest,
+  VibotConvMeta,
+} from '../../../shared/protocol.js';
 import { convStore, toMeta, type StoredConv } from './conversations.js';
 import { startVibotRun, applyEventToBlocks, type VibotRunHandle, type VibotRunResult } from './runner.js';
 import { loadVibotConfig, vibotConfigured } from './config.js';
 import { refreshDelegateWake } from './wakeSuppress.js';
+import * as askRegistry from './ask.js';
+import type { AskAnswers, AskOutcome } from './ask.js';
+import { validateVibotImages } from './images.js';
 import { log } from '../log.js';
 
 const LOG_CAP = 2000;
@@ -41,12 +52,69 @@ class VibotRuntime {
   private pendingWakePrompts = new Map<string, string>();
   /** True while the in-flight turn was started as a silent (wake) turn. */
   private silentTurn = false;
+  /** Ask-user dialogs still waiting for an answer (surfaced on subscribe). */
+  private pendingAsks = new Map<string, VibotAskRequest>();
 
   constructor(
     readonly convId: string,
     /** Fired whenever `running` flips so the hub can broadcast sidebar meta. */
     private readonly onRunningChange: () => void,
   ) {}
+
+  /** Non-seq frames for this conversation's subscribers (asks, not LiveEvents). */
+  private pushFrame(frame: ServerEvent): void {
+    for (const conn of this.subscribers) conn.send(frame);
+  }
+
+  listPendingAsks(): VibotAskRequest[] {
+    return [...this.pendingAsks.values()];
+  }
+
+  /**
+   * Broadcast a vibot_ask and block until the user answers, dismisses, or the
+   * 10-minute timeout fires. Always settles (never throws).
+   */
+  async askUser(callId: string, questions: VibotAskQuestion[]): Promise<AskOutcome> {
+    const request: VibotAskRequest = { callId, questions, ts: Date.now() };
+    this.pendingAsks.set(callId, request);
+    this.pushFrame({ t: 'vibot_ask', convId: this.convId, request });
+    this.lastActivity = Date.now();
+
+    const outcome = await askRegistry.register(this.convId, callId, questions);
+
+    // Timeout path: registry settled without going through answerAsk — clear and
+    // notify subscribers. answerAsk / dismiss already removed the entry.
+    if (this.pendingAsks.has(callId)) {
+      this.pendingAsks.delete(callId);
+      this.pushFrame({ t: 'vibot_ask_resolved', convId: this.convId, callId });
+    }
+    return outcome;
+  }
+
+  /**
+   * Apply the user's answers (or empty answers = dismiss). Unknown/expired
+   * callId still broadcasts resolved and returns false.
+   */
+  answerAsk(callId: string, answers: AskAnswers): boolean {
+    this.pendingAsks.delete(callId);
+    this.pushFrame({ t: 'vibot_ask_resolved', convId: this.convId, callId });
+    this.lastActivity = Date.now();
+    // Empty answers ⇒ user dismissed the dialog (Cancel).
+    if (Object.keys(answers).length === 0) {
+      return askRegistry.cancel(this.convId, callId);
+    }
+    return askRegistry.resolve(this.convId, callId, answers);
+  }
+
+  /** Cancel every pending ask (turn end / abort). Broadcasts resolved for each. */
+  cancelAllAsks(): void {
+    const ids = [...this.pendingAsks.keys()];
+    this.pendingAsks.clear();
+    for (const callId of ids) {
+      this.pushFrame({ t: 'vibot_ask_resolved', convId: this.convId, callId });
+    }
+    askRegistry.cancelAll(this.convId);
+  }
 
   /** Remember a wake prompt to fire after the in-flight turn finishes. */
   queueWakePrompt(sessionId: string, promptText: string): void {
@@ -161,7 +229,11 @@ class VibotRuntime {
     this.onRunningChange();
   }
 
-  startTurn(text: string, clientMsgId: string, opts?: { silent?: boolean; wakeSessionId?: string }): boolean {
+  startTurn(
+    text: string,
+    clientMsgId: string,
+    opts?: { silent?: boolean; wakeSessionId?: string; images?: string[] },
+  ): boolean {
     if (this.running || this.run) return false;
     if (!vibotConfigured()) return false;
 
@@ -174,7 +246,11 @@ class VibotRuntime {
     // (silent) seeds the LLM with the same text but skips the user bubble — the
     // caller has already posted a status note as the visible marker.
     if (!opts?.silent) {
-      this.emit({ k: 'block', block: { id: clientMsgId, kind: 'user', text, ts: Date.now() } });
+      const images = opts?.images?.length ? opts.images : undefined;
+      this.emit({
+        k: 'block',
+        block: { id: clientMsgId, kind: 'user', text, ...(images ? { images } : {}), ts: Date.now() },
+      });
     } else if (opts.wakeSessionId) {
       // Silent turn may start long after markDelegateWake (queued behind a user
       // turn) — refresh so zcode keeps deferring through the actual wake.
@@ -182,7 +258,12 @@ class VibotRuntime {
     }
 
     this.run = startVibotRun(
-      { convId: this.convId, prompt: text, config: loadVibotConfig() },
+      {
+        convId: this.convId,
+        prompt: text,
+        config: loadVibotConfig(),
+        images: opts?.silent ? undefined : opts?.images,
+      },
       { onEvent: (ev) => this.emit(ev) },
     );
     const active = this.run;
@@ -193,6 +274,8 @@ class VibotRuntime {
   private finishTurn(result: VibotRunResult, run: VibotRunHandle): void {
     if (this.run !== run) return;
     this.run = undefined;
+    // Drop any leftover asks so the UI doesn't keep a stale dialog open.
+    this.cancelAllAsks();
     const wasSilent = this.silentTurn;
     this.silentTurn = false;
     if (wasSilent) {
@@ -228,6 +311,7 @@ class VibotRuntime {
   }
 
   abort(): void {
+    this.cancelAllAsks();
     this.run?.abort();
   }
 
@@ -314,21 +398,33 @@ export class VibotHub {
     }
     this.trackSubscriber(convId, conn, rt);
     const ok = rt.replay(conn, lastSeq);
-    conn.send({ t: 'vibot_subscribed', convId, seq: rt.seq, running: rt.running, reset: !ok });
+    conn.send({
+      t: 'vibot_subscribed',
+      convId,
+      seq: rt.seq,
+      running: rt.running,
+      reset: !ok,
+      pendingAsks: rt.listPendingAsks(),
+    });
   }
 
   unsubscribe(conn: Conn, convId: string): void {
     this.untrackSubscriber(convId, conn);
   }
 
-  send(conn: Conn, convId: string, clientMsgId: string, text: string): boolean {
+  send(conn: Conn, convId: string, clientMsgId: string, text: string, images?: string[]): boolean {
     const rt = this.runtimeFor(convId);
     if (!rt) {
       conn.send({ t: 'error', message: 'vibot conversation not found' });
       return false;
     }
+    const imgErr = validateVibotImages(images);
+    if (imgErr) {
+      conn.send({ t: 'error', message: imgErr });
+      return false;
+    }
     this.trackSubscriber(convId, conn, rt);
-    const started = rt.startTurn(text, clientMsgId);
+    const started = rt.startTurn(text, clientMsgId, { images });
     if (!started) {
       conn.send({
         t: 'error',
@@ -342,6 +438,28 @@ export class VibotHub {
 
   abort(convId: string): void {
     this.runtimes.get(convId)?.abort();
+  }
+
+  /** Resolve a pending ask-user dialog (or dismiss with empty answers). */
+  answer(convId: string, callId: string, answers: AskAnswers): boolean {
+    const rt = this.runtimes.get(convId);
+    if (!rt) {
+      // Still broadcast so a late client clears its dialog.
+      this.broadcast({ t: 'vibot_ask_resolved', convId, callId });
+      if (Object.keys(answers).length === 0) return askRegistry.cancel(convId, callId);
+      return askRegistry.resolve(convId, callId, answers);
+    }
+    return rt.answerAsk(callId, answers);
+  }
+
+  /**
+   * Pose clarifying questions to the user and wait for answers. Used by the
+   * ask_user_question tool. Returns a cancelled outcome when the conv is gone.
+   */
+  askUser(convId: string, callId: string, questions: VibotAskQuestion[]): Promise<AskOutcome> {
+    const rt = this.runtimeFor(convId);
+    if (!rt) return Promise.resolve({ type: 'cancelled' });
+    return rt.askUser(callId, questions);
   }
 
   /** Conversation history + the seq to subscribe from. */

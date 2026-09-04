@@ -76,6 +76,27 @@ const AGENT_SKILLS: Record<AgentKind, AgentSkills> = {
     personalLocal: () => path.join(home(), '.agents', 'skills'),
     system: [],
   },
+  codebuddy: {
+    // CodeBuddy's home skills dir (getHomeSkillsDir() in its dist:
+    // <codebuddy home>/skills). Project skills live under <cwd>/.codebuddy/skills.
+    personalRel: '~/.codebuddy/skills',
+    personalLocal: () => path.join(home(), '.codebuddy', 'skills'),
+    system: [],
+  },
+  opencode: {
+    // opencode reads Agent Skills (`<name>/SKILL.md`) from its XDG config dir.
+    personalRel: '~/.config/opencode/skills',
+    personalLocal: () => path.join(home(), '.config', 'opencode', 'skills'),
+    system: [],
+  },
+  devin: {
+    // `devin skills paths` lists this first; Devin also reads
+    // ~/.config/cognition/skills and the shared ~/.agents/skills, but those are
+    // surfaced elsewhere — no extra read-only scan here.
+    personalRel: '~/.config/devin/skills',
+    personalLocal: () => path.join(home(), '.config', 'devin', 'skills'),
+    system: [],
+  },
 };
 
 /** host name → SSH target (mirrors api.ts's private resolveFileTarget). */

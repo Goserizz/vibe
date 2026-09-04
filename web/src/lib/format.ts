@@ -65,6 +65,9 @@ export const AGENTS: { value: AgentKind; label: string }[] = [
   { value: 'kiro', label: 'Kiro' },
   { value: 'grok', label: 'Grok' },
   { value: 'zcode', label: 'ZCode' },
+  { value: 'codebuddy', label: 'CodeBuddy' },
+  { value: 'opencode', label: 'opencode' },
+  { value: 'devin', label: 'Devin' },
 ];
 
 export const MODELS: { value: string; label: string }[] = [
@@ -137,6 +140,37 @@ export const ZCODE_MODELS: ModelOption[] = [
   { value: 'bigmodel/GLM-5-Turbo', label: 'GLM-5-Turbo' },
 ];
 
+/** Fallback CodeBuddy models until the live list from `codebuddy --help`
+ *  loads. The server parses the CLI's `--model` help line for the catalog. */
+export const CODEBUDDY_MODELS: ModelOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'hy4-preview', label: 'HY4 Preview' },
+  { value: 'hy3', label: 'HY3' },
+  { value: 'glm-5.3', label: 'GLM-5.3' },
+  { value: 'glm-5.3-flash', label: 'GLM-5.3 Flash' },
+  { value: 'glm-5.2', label: 'GLM-5.2' },
+  { value: 'glm-5.1', label: 'GLM-5.1' },
+  { value: 'glm-5v-turbo', label: 'GLM-5V Turbo' },
+  { value: 'minimax-m3-pay', label: 'MiniMax M3' },
+  { value: 'kimi-k3-2', label: 'Kimi K3.2' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+  { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+];
+
+/** Fallback Devin models until `devin models list` loads. Values are family
+ *  uids — Devin encodes the effort level into the variant uid, so the picker
+ *  offers families here and effort separately (the server assembles the two). */
+export const DEVIN_MODELS: ModelOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'claude-opus-5', label: 'Claude Opus 5' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+  { value: 'claude-fable-5-1', label: 'Claude Fable 5.1' },
+];
+
+/** Fallback opencode models until `opencode models` loads. Values are
+ *  `provider/model` — `auto` lets opencode pick from its own config. */
+export const OPENCODE_MODELS: ModelOption[] = [{ value: 'auto', label: 'Auto' }];
+
 /** Model options for an agent. */
 export function modelsForAgent(
   agent: AgentKind,
@@ -146,6 +180,9 @@ export function modelsForAgent(
   kiroModels?: ModelOption[],
   grokModels?: ModelOption[],
   zcodeModels?: ModelOption[],
+  codebuddyModels?: ModelOption[],
+  devinModels?: ModelOption[],
+  opencodeModels?: ModelOption[],
 ): ModelOption[] {
   if (agent === 'cursor') return cursorModels && cursorModels.length ? cursorModels : CURSOR_MODELS;
   if (agent === 'codex') return codexModels && codexModels.length ? codexModels : CODEX_MODELS;
@@ -153,6 +190,9 @@ export function modelsForAgent(
   if (agent === 'kiro') return kiroModels && kiroModels.length ? kiroModels : KIRO_MODELS;
   if (agent === 'grok') return grokModels && grokModels.length ? grokModels : GROK_MODELS;
   if (agent === 'zcode') return zcodeModels && zcodeModels.length ? zcodeModels : ZCODE_MODELS;
+  if (agent === 'codebuddy') return codebuddyModels && codebuddyModels.length ? codebuddyModels : CODEBUDDY_MODELS;
+  if (agent === 'devin') return devinModels && devinModels.length ? devinModels : DEVIN_MODELS;
+  if (agent === 'opencode') return opencodeModels && opencodeModels.length ? opencodeModels : OPENCODE_MODELS;
   return MODELS;
 }
 
@@ -205,6 +245,33 @@ export const ZCODE_PERMISSION_MODES: PermissionOption[] = [
   { value: 'bypassPermissions', label: 'Yolo', hint: 'Auto-approve tool calls (careful)' },
 ];
 
+/** CodeBuddy maps the four Vibe modes 1:1 to `--permission-mode`; Ask routes
+ *  tool approvals through Vibe's interactive prompts. */
+export const CODEBUDDY_PERMISSION_MODES: PermissionOption[] = [
+  { value: 'default', label: 'Ask', hint: 'Approve risky tools before they run' },
+  { value: 'plan', label: 'Plan', hint: 'Read-only planning' },
+  { value: 'acceptEdits', label: 'Auto-edit', hint: 'Auto-accept file edits' },
+  { value: 'bypassPermissions', label: 'Bypass', hint: 'Skip permission prompts (careful)' },
+];
+
+/** Devin's ACP `mode` config option. `smart` has no Vibe equivalent (it is a
+ *  middle tier between auto-edit and bypass), so it is not offered. */
+export const DEVIN_PERMISSION_MODES: PermissionOption[] = [
+  { value: 'default', label: 'Ask', hint: 'Answer and read, no changes' },
+  { value: 'acceptEdits', label: 'Code', hint: 'Write and edit code' },
+  { value: 'plan', label: 'Plan', hint: 'Plan before implementing' },
+  { value: 'bypassPermissions', label: 'Bypass', hint: 'Auto-approve all tool calls (careful)' },
+];
+
+/** opencode runs over ACP: risky tools arrive as `session/request_permission`
+ *  and surface as inline Vibe prompts; only Always-approve skips the UI. */
+export const OPENCODE_PERMISSION_MODES: PermissionOption[] = [
+  { value: 'default', label: 'Ask', hint: 'Prompt before risky tools' },
+  { value: 'plan', label: 'Plan', hint: 'Plan mode (edits disallowed) + prompts' },
+  { value: 'acceptEdits', label: 'Auto', hint: 'opencode policy decides per tool' },
+  { value: 'bypassPermissions', label: 'Always-approve', hint: 'Auto-approve tool calls (careful)' },
+];
+
 export function permissionModesForAgent(
   agent: AgentKind,
   kimiPermissions?: PermissionOption[],
@@ -216,6 +283,9 @@ export function permissionModesForAgent(
   if (agent === 'kiro') return kiroPermissions && kiroPermissions.length ? kiroPermissions : KIRO_PERMISSION_MODES;
   if (agent === 'grok') return GROK_PERMISSION_MODES;
   if (agent === 'zcode') return ZCODE_PERMISSION_MODES;
+  if (agent === 'codebuddy') return CODEBUDDY_PERMISSION_MODES;
+  if (agent === 'devin') return DEVIN_PERMISSION_MODES;
+  if (agent === 'opencode') return OPENCODE_PERMISSION_MODES;
   return PERMISSION_MODES;
 }
 
@@ -240,6 +310,9 @@ export function modelLabel(
   kiroModels?: ModelOption[],
   grokModels?: ModelOption[],
   zcodeModels?: ModelOption[],
+  codebuddyModels?: ModelOption[],
+  devinModels?: ModelOption[],
+  opencodeModels?: ModelOption[],
 ): string {
   return (
     MODELS.find((m) => m.value === value)?.label ??
@@ -249,12 +322,18 @@ export function modelLabel(
     kiroModels?.find((m) => m.value === value)?.label ??
     grokModels?.find((m) => m.value === value)?.label ??
     zcodeModels?.find((m) => m.value === value)?.label ??
+    codebuddyModels?.find((m) => m.value === value)?.label ??
+    devinModels?.find((m) => m.value === value)?.label ??
+    opencodeModels?.find((m) => m.value === value)?.label ??
     CURSOR_MODELS.find((m) => m.value === value)?.label ??
     CODEX_MODELS.find((m) => m.value === value)?.label ??
     KIMI_MODELS.find((m) => m.value === value)?.label ??
     KIRO_MODELS.find((m) => m.value === value)?.label ??
     GROK_MODELS.find((m) => m.value === value)?.label ??
     ZCODE_MODELS.find((m) => m.value === value)?.label ??
+    CODEBUDDY_MODELS.find((m) => m.value === value)?.label ??
+    DEVIN_MODELS.find((m) => m.value === value)?.label ??
+    OPENCODE_MODELS.find((m) => m.value === value)?.label ??
     value
   );
 }
@@ -308,6 +387,8 @@ export function effortLabel(value: EffortLevel, agent?: AgentKind): string {
 export function defaultEffortForAgent(agent: AgentKind): EffortLevel {
   if (agent === 'codex') return 'xhigh';
   if (agent === 'grok') return 'high';
+  // Devin's own default variant is `medium` across its families.
+  if (agent === 'devin') return 'medium';
   return 'max';
 }
 
@@ -315,8 +396,10 @@ export function defaultEffortForAgent(agent: AgentKind): EffortLevel {
  *  selected model so the picker matches what the CLI offers for it (Codex from
  *  its cached `supported_reasoning_levels`; ZCode from the catalog probe's
  *  thought-level ladders, e.g. GLM-5.3 low|high|max, GLM-5.2 max|high|nothink).
- *  Cursor and Kimi do not expose a separate effort switch here. Kiro uses the
- *  Claude ladder. Grok is low / medium / high / extra-high. */
+ *  Cursor and Kimi do not expose a separate effort switch here. Kiro uses
+ *  the Claude ladder. Grok is low / medium / high / extra-high. opencode
+ *  maps the shared ladder (minus `ultra`) onto model variants.
+ */
 export function effortLevelsForAgent(
   agent: AgentKind,
   model?: ModelOption | null,
@@ -341,6 +424,21 @@ export function effortLevelsForAgent(
     }
     // No model chosen (`auto`) or cache missing: the ladder common to all known models.
     return EFFORT_LEVELS.filter((e) => e.value !== 'max' && e.value !== 'ultra');
+  }
+  // CodeBuddy's `--effort` accepts minimal..max — the shared ladder minus `ultra`.
+  if (agent === 'codebuddy') return EFFORT_LEVELS.filter((e) => e.value !== 'ultra');
+  // opencode variants are provider-specific reasoning effort — the shared
+  // ladder minus `ultra` (which folds to `max`).
+  if (agent === 'opencode') return EFFORT_LEVELS.filter((e) => e.value !== 'ultra');
+  if (agent === 'devin') {
+    // Devin ships effort as part of the model uid, so it is per-family like
+    // Codex's: offer exactly what the chosen family publishes. Families with a
+    // single undifferentiated variant expose no ladder.
+    const efforts = model?.efforts;
+    if (!efforts?.length) return [];
+    return efforts
+      .map((e) => EFFORT_LEVELS.find((x) => x.value === e))
+      .filter((x): x is { value: EffortLevel; label: string; hint: string } => Boolean(x));
   }
   return EFFORT_LEVELS;
 }

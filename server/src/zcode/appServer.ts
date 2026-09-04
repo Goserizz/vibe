@@ -7,6 +7,7 @@ import { cleanRemoteStderr, loginShellCommand, proxyEnvPrefix, sshConnectPrefix 
 import {
   type BackgroundTask,
   type EffortLevel,
+  type McpServerDef,
   type PermissionDecision,
   type PermissionMode,
   type PermissionRequest,
@@ -58,6 +59,16 @@ interface PendingRpc {
   reject: (error: Error) => void;
 }
 
+/** Deadline for session-setup requests (resume/create/subscribe/setMode/…).
+ *  A live SSH connection (keepalives passing) can still silently drop the data
+ *  channel — seen in the wild: `session/resume` never gets answered, the run
+ *  hangs forever with no error anywhere, and every later user message is
+ *  silently queued into the void. Setup acks are fast even on loaded hosts
+ *  (a 500k-token resume lands in ~6s), so 60s only fires on a stalled link.
+ *  Turn traffic (`session/send` and beyond) must NOT use this — turns legally
+ *  run for many minutes. */
+const SETUP_TIMEOUT_MS = 60_000;
+
 export interface ZcodeRunOptions {
   prompt: string;
   cwd: string;
@@ -71,8 +82,8 @@ export interface ZcodeRunOptions {
   /** Vibe session id (hub runtime) — used to detect an in-flight Vibot delegate
    *  wake so this poller can defer instead of starting a second turn. */
   vibeSessionId?: string;
-  /** Accepted for interface parity; ZCode configures MCP via its config.json. */
-  mcpServers?: unknown;
+  /** Reconciled into ZCode's config.json before app-server starts. */
+  mcpServers?: McpServerDef[];
   remote?: { sshTarget: string; cwd: string; proxy?: string };
 }
 
@@ -224,14 +235,32 @@ class ZcodeRpc {
     });
   }
 
-  request(method: string, params: unknown): Promise<any> {
+  request(method: string, params: unknown, timeoutMs?: number): Promise<any> {
     if (this.closed || !this.child.stdin?.writable) return Promise.reject(new Error('zcode app-server closed'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const entry: PendingRpc = {
+        resolve: (value) => {
+          if (timer) clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          if (timer) clearTimeout(timer);
+          reject(error);
+        },
+      };
+      this.pending.set(id, entry);
+      if (timeoutMs && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`zcode app-server did not answer ${method} within ${Math.round(timeoutMs / 1000)}s — transport stalled`));
+        }, timeoutMs);
+      }
       this.child.stdin!.write(JSON.stringify({ method, id, params }) + '\n', (error) => {
         if (!error) return;
         this.pending.delete(id);
+        if (timer) clearTimeout(timer);
         reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
@@ -479,6 +508,72 @@ export class ZcodeAppServerClient {
     });
   }
 
+  /**
+   * A turn's tool completions can arrive AFTER `turn.completed` (the harness
+   * flushes trailing `tool.updated` results late). Finalizing the turn first
+   * strands those tool blocks: the hub only persists completable blocks, so
+   * the late ones are appended after the result footer and render as "extra
+   * tool calls after the conversation ended". Hold the turn end — footer and
+   * settle alike — until the in-flight tools land, with a bounded grace so a
+   * dropped completion can't pin the turn forever.
+   */
+  private turnEndTimer?: ReturnType<typeof setTimeout>;
+  private pendingTurnEnd: { ok: boolean; error?: unknown } | null = null;
+
+  /** How long a closed turn waits for trailing tool completions. */
+  private static readonly TURN_END_GRACE_MS = 8_000;
+
+  private runningToolCount(): number {
+    let n = 0;
+    for (const t of this.tools.values()) if (t.status === 'running') n += 1;
+    return n;
+  }
+
+  private settleTurnEnd(ok: boolean, error?: unknown): void {
+    if (this.runningToolCount() === 0) {
+      this.finishTurnEnd(ok, error);
+      return;
+    }
+    this.pendingTurnEnd = { ok, error };
+    if (this.turnEndTimer) return;
+    this.turnEndTimer = setTimeout(() => {
+      this.turnEndTimer = undefined;
+      const left = this.runningToolCount();
+      if (left) log.debug('zcode turn closing with tools still running', left);
+      const pending = this.pendingTurnEnd;
+      this.pendingTurnEnd = null;
+      if (pending) this.finishTurnEnd(pending.ok, pending.error);
+    }, ZcodeAppServerClient.TURN_END_GRACE_MS);
+    this.turnEndTimer.unref?.();
+  }
+
+  /** A trailing tool completion landed: flush the held turn end now instead
+   *  of waiting out the grace. */
+  private maybeFinishTurnEnd(): void {
+    const pending = this.pendingTurnEnd;
+    if (!pending || this.runningToolCount() !== 0) return;
+    this.pendingTurnEnd = null;
+    this.finishTurnEnd(pending.ok, pending.error);
+  }
+
+  private clearTurnEndTimer(): void {
+    if (this.turnEndTimer) {
+      clearTimeout(this.turnEndTimer);
+      this.turnEndTimer = undefined;
+    }
+    this.pendingTurnEnd = null;
+  }
+
+  private finishTurnEnd(ok: boolean, error?: unknown): void {
+    this.clearTurnEndTimer();
+    if (ok) {
+      this.emitTurnResult();
+      this.settleTurn(this.turnUsage);
+    } else {
+      this.failTurn(new Error(typeof error === 'string' ? error : JSON.stringify(error).slice(0, 500)));
+    }
+  }
+
   constructor(
     private readonly opts: ZcodeRunOptions,
     private readonly cb: RunCallbacks,
@@ -486,6 +581,7 @@ export class ZcodeAppServerClient {
 
   abort(): void {
     this.aborted = true;
+    this.clearTurnEndTimer();
     if (this.sessionId && this.rpc && !this.rpc.closed) this.rpc.notify('session/stop', { sessionId: this.sessionId });
     this.rpc?.kill();
   }
@@ -546,7 +642,7 @@ export class ZcodeAppServerClient {
     const workspace = { workspaceKey: cwd, workspacePath: cwd };
     if (this.opts.resume) {
       try {
-        const resumed = await this.rpc!.request('session/resume', { sessionId: this.opts.resume, workspace });
+        const resumed = await this.rpc!.request('session/resume', { sessionId: this.opts.resume, workspace }, SETUP_TIMEOUT_MS);
         const id = asString(resumed?.session?.sessionId) || this.opts.resume;
         this.sessionId = id;
         this.rememberModel(resumed?.settings?.model?.current);
@@ -557,7 +653,7 @@ export class ZcodeAppServerClient {
         log.warn('zcode session/resume failed, starting new session', error);
       }
     }
-    const created = await this.rpc!.request('session/create', { workspace });
+    const created = await this.rpc!.request('session/create', { workspace }, SETUP_TIMEOUT_MS);
     const id = asString(created?.session?.sessionId);
     if (!id) throw new Error('session/create did not return sessionId');
     this.sessionId = id;
@@ -589,7 +685,7 @@ export class ZcodeAppServerClient {
 
   private async subscribe(): Promise<void> {
     try {
-      await this.rpc!.request('session/subscribe', { sessionId: this.sessionId, deliveryKind: 'desktop-continuous' });
+      await this.rpc!.request('session/subscribe', { sessionId: this.sessionId, deliveryKind: 'desktop-continuous' }, SETUP_TIMEOUT_MS);
       this.subscribed = true;
     } catch (error) {
       // Without a subscription no session/event notifications arrive; sendTurn
@@ -600,14 +696,14 @@ export class ZcodeAppServerClient {
 
   private async applySessionConfig(): Promise<void> {
     try {
-      await this.rpc!.request('session/setMode', { sessionId: this.sessionId, mode: zcodeModeOf(this.opts.permissionMode) });
+      await this.rpc!.request('session/setMode', { sessionId: this.sessionId, mode: zcodeModeOf(this.opts.permissionMode) }, SETUP_TIMEOUT_MS);
     } catch (error) {
       log.debug('zcode session/setMode failed', error);
     }
     const parsed = splitZcodeModel(this.opts.model);
     if (parsed) {
       try {
-        await this.rpc!.request('session/setModel', { sessionId: this.sessionId, model: parsed });
+        await this.rpc!.request('session/setModel', { sessionId: this.sessionId, model: parsed }, SETUP_TIMEOUT_MS);
       } catch (error) {
         log.debug('zcode session/setModel failed', this.opts.model, error);
       }
@@ -618,7 +714,7 @@ export class ZcodeAppServerClient {
       // Without the ladder, pass the effort through and let ZCode validate it.
       const level = ladder ? nearestThoughtLevel(this.opts.effort, ladder) : this.opts.effort;
       try {
-        await this.rpc!.request('session/setThoughtLevel', { sessionId: this.sessionId, thoughtLevel: level });
+        await this.rpc!.request('session/setThoughtLevel', { sessionId: this.sessionId, thoughtLevel: level }, SETUP_TIMEOUT_MS);
       } catch (error) {
         log.debug('zcode session/setThoughtLevel failed', level, error);
       }
@@ -873,11 +969,21 @@ export class ZcodeAppServerClient {
       }
       // An in-flight native notification turn must finish before the transport
       // may close — tearing down mid-turn kills the wake content.
-      const active =
-        this.nativeTurnActive ||
-        [...this.tasks.values()].some((task) => task.status === 'running' || task.status === 'pending');
+      // A transport that is already gone can never settle its tasks, though:
+      // refreshTasks() then returns [] forever, so `tracked` (read from the
+      // stale in-memory map) stays true and this loop would spin forever —
+      // stranding the hub's run handle and rejecting every later user message
+      // with "a turn is already running".
+      const transportGone = this.aborted || !this.rpc || this.rpc.closed;
+      const tracked = [...this.tasks.values()].some(
+        (task) => task.status === 'running' || task.status === 'pending',
+      );
+      const active = !transportGone && (this.nativeTurnActive || tracked);
       if (!active || this.aborted || Date.now() > deadline) {
-        log.info(`zcode transport closing (active=${active} aborted=${this.aborted})`);
+        if (transportGone && tracked) {
+          log.warn(`zcode transport gone while ${this.tasks.size} background task(s) were tracked — they continue unmanaged`);
+        }
+        log.info(`zcode transport closing (active=${active} aborted=${this.aborted} transportGone=${transportGone})`);
         if (active && !this.aborted) log.warn(`zcode background tasks still running after ${capHours}h — closing transport (tasks continue unmanaged)`);
         return;
       }
@@ -1067,15 +1173,16 @@ export class ZcodeAppServerClient {
             ?? (typeof usage?.totalTokens === 'number' ? usage.totalTokens : undefined),
           contextWindow: this.contextWindow,
         };
-        this.emitTurnResult();
-        this.settleTurn(this.turnUsage);
+        // Gated: trailing tool completions must land before the footer, or
+        // they persist after it and surface as post-turn tool calls.
+        this.settleTurnEnd(true);
         return;
       }
       case 'turn.failed': {
         this.nativeTurnActive = false;
         this.flushStream();
         const error = payload?.error ?? payload?.message ?? payload;
-        this.failTurn(new Error(typeof error === 'string' ? error : JSON.stringify(error).slice(0, 500)));
+        this.settleTurnEnd(false, error);
         return;
       }
       default:
@@ -1127,6 +1234,7 @@ export class ZcodeAppServerClient {
         status: result?.success === false ? 'error' : 'done',
         ...(content !== undefined ? { result: content } : {}),
       });
+      this.maybeFinishTurnEnd();
       return;
     }
     if (kind === 'scheduled' || kind === 'started') {

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { log } from '../log.js';
 import { type ChatBlock, type LiveEvent } from '../../../shared/protocol.js';
 import { convStore } from './conversations.js';
-import { streamChat, LlmError, type LlmMessage, type LlmToolCall } from './llm.js';
+import { streamChat, LlmError, buildUserContent, type LlmMessage, type LlmToolCall } from './llm.js';
 import { VIBOT_TOOLS, dispatchTool } from './tools.js';
 import type { VibotConfig } from '../../../shared/protocol.js';
 
@@ -14,6 +14,8 @@ export interface VibotRunOptions {
   convId: string;
   prompt: string;
   config: VibotConfig;
+  /** Optional image data URLs / https URLs for vision models (first user turn only). */
+  images?: string[];
 }
 
 export interface VibotRunResult {
@@ -28,9 +30,6 @@ export interface VibotRunHandle {
   abort: () => void;
   done: Promise<VibotRunResult>;
 }
-
-/** Safety cap on tool-call rounds per turn so a model loop can't run forever. */
-const MAX_ROUNDS = 12;
 
 function parseArgs(raw: string): Record<string, any> {
   try {
@@ -57,7 +56,8 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
     const system: LlmMessage = { role: 'system', content: opts.config.systemPrompt };
 
     // This turn's append-only history (user prompt first; assistant/tool follow).
-    const turn: LlmMessage[] = [{ role: 'user', content: opts.prompt }];
+    // Images only on this seed message; wake/delegate paths pass no images.
+    const turn: LlmMessage[] = [{ role: 'user', content: buildUserContent(opts.prompt, opts.images) }];
 
     // The live messages array sent to the API each round.
     const live = (): LlmMessage[] => [system, ...seed, ...turn];
@@ -66,7 +66,7 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
     // history, so prompt + completion is the context the next round starts from.
     let contextUsed: number | undefined;
 
-    for (let round = 0; round < MAX_ROUNDS; round++) {
+    for (;;) {
       const assistantId = `va_${crypto.randomUUID()}`;
       const thinkingId = `vt_${crypto.randomUUID()}`;
       let text = '';
@@ -188,7 +188,7 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
         let result: string;
         let isError = false;
         try {
-          result = await dispatchTool(tc.function.name, input, { convId: opts.convId });
+          result = await dispatchTool(tc.function.name, input, { convId: opts.convId, toolCallId: tc.id });
         } catch (err) {
           isError = true;
           result = `Tool ${tc.function.name} threw: ${err instanceof Error ? err.message : String(err)}`;
@@ -197,10 +197,6 @@ export function startVibotRun(opts: VibotRunOptions, cb: VibotRunCallbacks): Vib
         turn.push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: result });
       }
     }
-
-    // Hit the round cap — record a gentle stop.
-    cb.onEvent({ k: 'block', block: { id: `vr_${crypto.randomUUID()}`, kind: 'result', durationMs: Date.now() - startedAt, contextUsed, ts: Date.now() } });
-    return { newMessages: turn };
   })();
 
   return {

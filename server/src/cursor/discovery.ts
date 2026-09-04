@@ -6,6 +6,8 @@ import { log } from '../log.js';
 import { getRecentProjects } from '../projects.js';
 import { sessionStore } from '../sessions/store.js';
 import { isClaudeSessionId, type DiscoveredSession } from '../sessions/discovery.js';
+import { readCursorStoreTranscript } from './transcript.js';
+import { parseTurnUserText } from '../switch/canonical.js';
 
 // Cursor stores each chat under ~/.cursor/chats/<md5(cwd)>/<chatId>/. There's no
 // cwd recorded in the chat metadata, so we recover it by hashing every cwd Vibe
@@ -14,6 +16,157 @@ import { isClaudeSessionId, type DiscoveredSession } from '../sessions/discovery
 
 function md5(s: string): string {
   return crypto.createHash('md5').update(s).digest('hex');
+}
+
+interface CursorRecoveryInput {
+  vibeSessionId: string;
+  cwd: string;
+  title: string;
+  updatedAt: number;
+  /** Current Vibe transcript's user turns. Used only to identify a legacy
+   *  switched chat whose old sidecar predates `vibeSessionId`. */
+  userTexts?: readonly string[];
+}
+
+interface CursorRecoveryCandidate {
+  id: string;
+  stamp: number;
+  exact: boolean;
+}
+
+/**
+ * Recover a Vibe→Cursor native-id mapping after a stale source runtime wrote
+ * its own id back. Exact `vibeSessionId` provenance wins. Older sidecars do
+ * not have it, so the compatibility fallback is deliberately strict: same
+ * cwd + title and exactly one chat inside a ten-minute window.
+ */
+export function recoverCursorChatId(
+  input: CursorRecoveryInput,
+  chatsDir: string = config.cursorChatsDir,
+): string | null {
+  const hashes = new Set([md5(input.cwd)]);
+  try {
+    hashes.add(md5(fs.realpathSync(input.cwd)));
+  } catch {
+    /* cwd may have disappeared; the literal hash is still useful */
+  }
+
+  const candidates: CursorRecoveryCandidate[] = [];
+  for (const hash of hashes) {
+    const hashDir = path.join(chatsDir, hash);
+    let chatIds: string[];
+    try {
+      chatIds = fs.readdirSync(hashDir);
+    } catch {
+      continue;
+    }
+    for (const id of chatIds) {
+      if (!isClaudeSessionId(id)) continue;
+      let meta: any;
+      try {
+        meta = JSON.parse(fs.readFileSync(path.join(hashDir, id, 'meta.json'), 'utf8'));
+      } catch {
+        continue;
+      }
+      if (meta?.hasConversation === false) continue;
+      const exact = meta?.vibeSessionId === input.vibeSessionId;
+      if (!exact && String(meta?.title ?? '').trim() !== input.title.trim()) continue;
+      let stamp = Number(meta?.updatedAtMs) || Number(meta?.createdAtMs) || 0;
+      if (!stamp) {
+        try {
+          stamp = fs.statSync(path.join(hashDir, id, 'store.db')).mtimeMs;
+        } catch {
+          continue;
+        }
+      }
+      candidates.push({ id, stamp, exact });
+    }
+  }
+
+  const exact = candidates.filter((candidate) => candidate.exact);
+  if (exact.length === 1) return exact[0]!.id;
+  if (exact.length > 1) {
+    exact.sort((a, b) => Math.abs(a.stamp - input.updatedAt) - Math.abs(b.stamp - input.updatedAt));
+    return exact[0]!.id;
+  }
+
+  const windowMs = 10 * 60_000;
+  const nearby = candidates.filter((candidate) => Math.abs(candidate.stamp - input.updatedAt) <= windowMs);
+  if (nearby.length === 1) return nearby[0]!.id;
+
+  // A failed ACP resume can replace the stored mapping with a fresh, valid
+  // UUID, long after the original ten-minute switch window. For legacy
+  // sidecars we recover only when native content proves identity: every user
+  // turn in exactly one candidate must equal the prefix of Vibe's transcript.
+  // This is deliberately stronger than title/cwd matching and cannot be
+  // fooled by another same-named chat or an empty decoy database.
+  const expectedUsers = (input.userTexts ?? []).map((text) => text.trim()).filter(Boolean);
+  if (!expectedUsers.length) return null;
+  const contentMatches = candidates.filter((candidate) => {
+    const candidateUsers = readCursorStoreTranscript(input.cwd, candidate.id, chatsDir)
+      .filter((block) => block.kind === 'user')
+      .map((block) => parseTurnUserText(block.text).text.trim())
+      .filter(Boolean);
+    return candidateUsers.length > 0
+      && candidateUsers.length <= expectedUsers.length
+      && candidateUsers.every((text, index) => text === expectedUsers[index]);
+  });
+  return contentMatches.length === 1 ? contentMatches[0]!.id : null;
+}
+
+/**
+ * Mirror a chat-store database into the root used by `cursor-agent acp`.
+ * Cursor uses the same SQLite/blob format in both places but does not search
+ * `~/.cursor/chats` when handling `session/resume`.
+ */
+export function ensureCursorAcpSessionFromChat(
+  chatId: string,
+  cwd: string,
+  chatsDir: string = config.cursorChatsDir,
+  acpSessionsDir: string = config.cursorAcpSessionsDir,
+): boolean {
+  if (!isClaudeSessionId(chatId)) return false;
+  const target = path.join(acpSessionsDir, chatId, 'store.db');
+  if (fs.existsSync(target)) return true;
+
+  const hashes = new Set([md5(cwd)]);
+  try {
+    hashes.add(md5(fs.realpathSync(cwd)));
+  } catch {
+    /* literal cwd may still locate the chat */
+  }
+
+  let source: string | undefined;
+  for (const hash of hashes) {
+    const candidate = path.join(chatsDir, hash, chatId, 'store.db');
+    if (fs.existsSync(candidate)) {
+      source = candidate;
+      break;
+    }
+  }
+  if (!source) return false;
+
+  const dir = path.dirname(target);
+  const tmp = `${target}.vibe-import-${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(source, tmp);
+    // Never overwrite a session that ACP may have created concurrently.
+    if (fs.existsSync(target)) {
+      fs.rmSync(tmp, { force: true });
+      return true;
+    }
+    fs.renameSync(tmp, target);
+    return true;
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* ignore cleanup failure */
+    }
+    log.warn(`failed to mirror Cursor chat ${chatId} into ACP sessions`, err);
+    return false;
+  }
 }
 
 /** Every local cwd Vibe knows about (recent projects + stored local sessions). */

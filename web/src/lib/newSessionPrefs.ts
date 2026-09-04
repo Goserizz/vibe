@@ -40,7 +40,7 @@ export function loadNewSessionPrefs(): NewSessionPrefs | null {
     // Kimi's actual modes arrive asynchronously from the selected host. Keep a
     // valid saved wire value here; the dialog drops it later if that CLI lacks it.
     const validPermission =
-      parsed.agent === 'kimi' || parsed.agent === 'kiro' || parsed.agent === 'grok' || parsed.agent === 'zcode'
+      parsed.agent === 'kimi' || parsed.agent === 'kiro' || parsed.agent === 'grok' || parsed.agent === 'zcode' || parsed.agent === 'codebuddy' || parsed.agent === 'opencode'
         ? typeof parsed.permissionMode === 'string' && PERMISSIONS.has(parsed.permissionMode)
         : permissionModesForAgent(parsed.agent).some((m) => m.value === parsed.permissionMode);
     if (!validPermission) return null;

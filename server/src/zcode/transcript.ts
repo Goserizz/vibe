@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
+import { externalizeResults } from '../sessions/blobs.js';
 import { log } from '../log.js';
-import { isZcodeSessionId } from './discovery.js';
+import { isZcodeSessionId, resolveZcodeSessionSync } from './discovery.js';
 import { withZcodeAppServer } from './appServer.js';
 import type { ChatBlock, ToolBlock } from '../../../shared/protocol.js';
 
@@ -27,14 +28,30 @@ export function readZcodeTranscript(sessionId: string): ChatBlock[] {
       /* skip corrupt line */
     }
   }
-  return blocks;
+  // Stable-sort by creation time. Normally a no-op — lines are already in
+  // time order. But a tool whose completion arrived after its turn's result
+  // footer was persisted behind that footer (the app would render it as an
+  // "extra tool call after the conversation ended"); the sort moves it back
+  // to its conversation position. Stability keeps same-ts lines as written;
+  // blocks without a timestamp stay where they are.
+  return blocks
+    .map((block, i) => ({ block, i }))
+    .sort((x, y) => {
+      const tx = Number(x.block.ts);
+      const ty = Number(y.block.ts);
+      const dx = Number.isFinite(tx) ? tx : Infinity;
+      const dy = Number.isFinite(ty) ? ty : Infinity;
+      return dx - dy || x.i - y.i;
+    })
+    .map(({ block }) => block);
 }
 
 export function appendZcodeBlocks(sessionId: string, blocks: ChatBlock[]): void {
   if (!blocks.length) return;
   try {
     fs.mkdirSync(config.zcodeTranscriptsDir, { recursive: true });
-    fs.appendFileSync(transcriptFile(sessionId), `${blocks.map((block) => JSON.stringify(block)).join('\n')}\n`);
+    const persisted = externalizeResults(sessionId, blocks);
+    fs.appendFileSync(transcriptFile(sessionId), `${persisted.map((block) => JSON.stringify(block)).join('\n')}\n`);
   } catch (error) {
     log.warn('failed to persist zcode transcript', error);
   }
@@ -131,12 +148,49 @@ function toolResultText(output: unknown): string {
   }
 }
 
-/** Read a native ZCode session's history via `zcode app-server` session/messages. */
-export async function readZcodeNativeTranscript(sessionId: string): Promise<ChatBlock[]> {
+function listedWorkspacePath(rows: unknown, sessionId: string): string {
+  const sessions = Array.isArray(rows)
+    ? rows
+    : (rows as { sessions?: unknown } | null | undefined)?.sessions;
+  if (!Array.isArray(sessions)) return '';
+  const match = sessions.find((row) =>
+    row && typeof row === 'object'
+      && (row as { sessionId?: unknown }).sessionId === sessionId);
+  const workspace = (match as { workspace?: { workspacePath?: unknown } } | undefined)?.workspace;
+  return typeof workspace?.workspacePath === 'string' ? workspace.workspacePath.trim() : '';
+}
+
+type ZcodeRequest = (method: string, params: unknown) => Promise<any>;
+
+/** Activate one session in an app-server process, then return its messages. */
+export async function requestZcodeSessionMessages(
+  request: ZcodeRequest,
+  sessionId: string,
+  cwd?: string,
+): Promise<unknown> {
+  let workspacePath = cwd?.trim() || resolveZcodeSessionSync(sessionId)?.cwd.trim() || '';
+  if (!workspacePath) {
+    workspacePath = listedWorkspacePath(await request('session/list', {}), sessionId);
+  }
+  if (!workspacePath) throw new Error(`cannot resolve workspace for ZCode session ${sessionId}`);
+  const workspace = { workspaceKey: workspacePath, workspacePath };
+  await request('session/resume', { sessionId, workspace });
+  return request('session/messages', { sessionId });
+}
+
+/**
+ * Read a native ZCode session's history via `zcode app-server`.
+ *
+ * `session/messages` is not a database lookup: ZCode returns -32004 unless the
+ * requested session is active in this particular app-server process. Always
+ * resume it first, resolving the strict workspace argument from the caller,
+ * the discovery sidecar, or a same-process `session/list` probe.
+ */
+export async function readZcodeNativeTranscript(sessionId: string, cwd?: string): Promise<ChatBlock[]> {
   if (!isZcodeSessionId(sessionId)) return [];
   try {
-    const result = await withZcodeAppServer({ timeoutMs: 25_000 }, (request) =>
-      request('session/messages', { sessionId }),
+    const result = await withZcodeAppServer({ cwd: cwd?.trim() || undefined, timeoutMs: 45_000 }, (request) =>
+      requestZcodeSessionMessages(request, sessionId, cwd),
     );
     return zcodeMessagesToBlocks((result as { messages?: unknown })?.messages ?? result);
   } catch (error) {

@@ -7,6 +7,7 @@ import { VibotChat } from './VibotChat';
 import { VibotSettings } from './VibotSettings';
 import { VibotMemories } from './VibotMemories';
 import { VibotSessionPreview } from './VibotSessionPreview';
+import { VibotQuestionPrompt } from './VibotQuestionPrompt';
 import { RightPanel } from '../RightPanel';
 import { FilePreview } from '../FilePreview';
 import { Toast } from '../Toast';
@@ -128,6 +129,7 @@ export function VibotView({
 
       {settingsOpen && <VibotSettings onClose={() => setSettingsOpen(false)} />}
       {memoriesOpen && <VibotMemories onClose={() => setMemoriesOpen(false)} />}
+      {activeConvId && <VibotQuestionPrompt convId={activeConvId} />}
       <FilePreview />
       <Toast />
     </div>

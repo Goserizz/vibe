@@ -4,6 +4,7 @@ import { useStore } from '../store/store';
 import { agentLabel, cn } from '../lib/format';
 import { api, ApiError } from '../lib/api';
 import { buildMessage } from '../lib/attachments';
+import { useComposerKeys } from '../lib/composerKeys';
 import { Glass } from './LiquidGlass';
 import { CliPromptTextarea } from './CliPromptTextarea';
 
@@ -52,6 +53,22 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // milliseconds of compositionend, whereas a real send comes much later.
   const composingRef = useRef(false);
   const endedAtRef = useRef(0);
+
+  // Ctrl-U discards to line start, ↑/↓ walk the persisted prompt history, Esc
+  // stops a running turn (same logic as the Stop button). History is bucketed
+  // per session — ↑ only ever recalls this session's prompts. Esc defers to
+  // the file preview modal when one is open — it owns Escape while visible.
+  const keys = useComposerKeys({
+    getText: () => text,
+    setText,
+    textareaRef: ref,
+    isRunning: () => running,
+    onStop: abort,
+    escapeSuppressed: () => useStore.getState().filePreview !== null,
+    onEmptyHistory: () => setToast('No input history yet — send a message first'),
+    storageKey: 'vibe.promptHistory',
+    bucketId: sessionId,
+  });
 
   // Auto-grow up to a sensible cap.
   useEffect(() => {
@@ -113,11 +130,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
     const message = buildMessage(value, paths);
     if (!message) return; // uploads failed and there was no text — nothing to send
     sendMessage(message);
+    keys.commit(value);
     setText('');
     setAttachments([]);
   };
 
-  const onKeyDown = (e: React.KeyboardEvent) => {
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (keys.onKeyDown(e)) return;
     if (e.key !== 'Enter' || e.shiftKey) return;
     // Ignore the Enter that confirms an IME candidate (see composingRef comment).
     const justEnded = endedAtRef.current > 0 && Date.now() - endedAtRef.current < 10;
@@ -262,25 +281,25 @@ export function Composer({ sessionId }: { sessionId: string }) {
             {attachmentChips}
             <div className={cn('flex items-end gap-2', dragging && 'ring-1 ring-accent/40')}>
               <span className="select-none pb-2 font-mono text-[14px] text-accent">❯</span>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={running || uploading}
-                title="Attach files"
-                className="flex h-8 shrink-0 items-center justify-center font-mono text-[12px] text-slate-500 transition hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                +
-              </button>
               <CliPromptTextarea
                 textareaRef={ref}
                 value={text}
-                onChange={setText}
+                onChange={keys.onChange}
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
                 placeholder={placeholder}
                 {...compositionHandlers}
               />
-              {(running || busy || !isDesktop) && actionButton}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={running || uploading}
+                title="Attach files"
+                className="flex h-8 w-8 shrink-0 items-center justify-center text-slate-400 transition hover:bg-ink-800 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Paperclip className="h-4 w-4" />
+              </button>
+              {actionButton}
             </div>
           </div>
         </div>
@@ -312,19 +331,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
             {fileInput}
             {attachmentChips}
             <div className="flex items-end gap-2 px-3 py-2.5">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={running || uploading}
-                title="Attach files"
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-ink-700 text-slate-300 transition hover:border-ink-600 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <Paperclip className="h-4 w-4" />
-              </button>
               <textarea
                 ref={ref}
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => keys.onChange(e.target.value)}
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
                 {...compositionHandlers}
@@ -332,6 +342,15 @@ export function Composer({ sessionId }: { sessionId: string }) {
                 placeholder={placeholder}
                 className="max-h-[220px] flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-relaxed text-slate-100 placeholder:text-slate-600 focus:outline-none"
               />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={running || uploading}
+                title="Attach files"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-400 transition hover:bg-ink-800 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Paperclip className="h-4 w-4" />
+              </button>
               {actionButton}
             </div>
           </Glass>

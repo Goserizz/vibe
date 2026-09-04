@@ -88,7 +88,15 @@ export interface SshResult {
 export function sshExec(
   target: string,
   remoteCmd: string,
-  opts: { timeoutMs?: number; input?: string | Buffer; /** Default true. Set false so killing this client tears down the remote command (no ControlMaster). */ mux?: boolean } = {},
+  opts: {
+    timeoutMs?: number;
+    input?: string | Buffer;
+    /** Bound captured stdout and stderr independently. The remote command may
+     * continue, but an accidental log flood cannot exhaust the Vibe process. */
+    maxOutputBytes?: number;
+    /** Default true. Set false so killing this client tears down the remote command (no ControlMaster). */
+    mux?: boolean;
+  } = {},
 ): Promise<SshResult> {
   const useMux = opts.mux !== false;
   const { bin, base } = sshBin();
@@ -100,14 +108,24 @@ export function sshExec(
     // reallocation; Buffer push + concat keeps it linear.
     const outChunks: Buffer[] = [];
     const errChunks: Buffer[] = [];
+    const maxOutputBytes = opts.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+    let outBytes = 0;
+    let errBytes = 0;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGKILL');
     }, opts.timeoutMs ?? 20_000);
 
-    child.stdout.on('data', (d: Buffer) => outChunks.push(d));
-    child.stderr.on('data', (d: Buffer) => errChunks.push(d));
+    const collect = (chunks: Buffer[], chunk: Buffer, used: number): number => {
+      if (used >= maxOutputBytes) return used;
+      const remaining = maxOutputBytes - used;
+      const kept = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      chunks.push(kept);
+      return used + kept.length;
+    };
+    child.stdout.on('data', (d: Buffer) => { outBytes = collect(outChunks, d, outBytes); });
+    child.stderr.on('data', (d: Buffer) => { errBytes = collect(errChunks, d, errBytes); });
     const finish = (code: number | null, extraErr = ''): void => {
       clearTimeout(timer);
       const stdout = Buffer.concat(outChunks).toString('utf8');
@@ -164,11 +182,17 @@ export function cleanRemoteStderr(s: string, maxLen = 1000): string {
  *
  * Use `stdbuf -oL` only — do NOT wrap with `script`/PTY here: agents read the
  * prompt from stdin, and `script` often breaks stdin forwarding over SSH.
+ *
+ * `inner` must go through `bash -c`: stdbuf can only exec a real binary, so
+ * handing it a shell compound command makes it try to exec the first token.
+ * When that token is a shell builtin (`set -a`, `cd`, …) stdbuf fails with
+ * "failed to execute process: No such file or directory" — the error lands in
+ * the transcript every turn, and the agent never gets line-buffered stdio.
  */
 export function streamRemoteCommand(inner: string): string {
   // `inner` is a full command with shell-safe quoting already applied.
   return (
-    `if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL ${inner}; ` +
+    `if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL bash -c ${shQuote(inner)}; ` +
     `else ${inner}; fi`
   );
 }

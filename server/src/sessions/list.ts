@@ -8,6 +8,9 @@ import { listKimiSessions } from '../kimi/discovery.js';
 import { listKiroSessions } from '../kiro/discovery.js';
 import { listGrokSessions } from '../grok/discovery.js';
 import { listZcodeSessions } from '../zcode/discovery.js';
+import { listCodebuddySessions } from '../codebuddy/discovery.js';
+import { listOpencodeSessions } from '../opencode/discovery.js';
+import { listDevinSessions } from '../devin/discovery.js';
 import { hostRegistry, proxyForAgent } from '../remote/hosts.js';
 import { listRemoteAgentSessions, clearRemoteDiscoveryCache } from '../remote/discovery.js';
 import { encodeRemoteId } from '../remote/sessionId.js';
@@ -61,7 +64,13 @@ export function discoveredToMeta(
                 ? 'grok'
                 : agent === 'zcode'
                   ? 'zcode'
-                  : 'claude',
+                  : agent === 'codebuddy'
+                    ? 'codebuddy'
+                    : agent === 'opencode'
+                      ? 'opencode'
+                      : agent === 'devin'
+                        ? 'devin'
+                        : 'claude',
     host,
   };
 }
@@ -85,6 +94,29 @@ function seedFromStore(): SessionMeta[] {
     .map((s) => toMeta(s, hub.isRunning(s.id), 'vibe', hub.hasActiveBackgroundTasks(s.id)))
     .map((s) => ({ ...s, pinned: sessionStore.isPinned(s.id) }))
     .sort(compareSessions);
+}
+
+/**
+ * A discovery pass can spend seconds waiting for local CLIs and SSH. Its
+ * `storeMetas` snapshot may therefore predate an agent switch that completed
+ * while the pass was in flight. Never let that stale snapshot overwrite the
+ * eagerly patched cache: replace every Vibe-owned row with the latest store
+ * view and drop discovered aliases of the latest native ids.
+ */
+export function reconcileSessionSnapshot(
+  discoveredSnapshot: readonly SessionMeta[],
+  latestStored: readonly SessionMeta[],
+): SessionMeta[] {
+  const known = new Set<string>();
+  for (const session of latestStored) {
+    known.add(session.id);
+    if (session.claudeSessionId) known.add(session.claudeSessionId);
+  }
+  const discovered = discoveredSnapshot.filter((session) =>
+    session.source !== 'vibe'
+    && !known.has(session.id)
+    && (!session.claudeSessionId || !known.has(session.claudeSessionId)));
+  return [...latestStored, ...discovered].sort(compareSessions);
 }
 
 function ensureSeeded(): void {
@@ -177,6 +209,36 @@ async function loadAllSessions(): Promise<SessionMeta[]> {
     log.warn('zcode session discovery failed', err);
   }
 
+  try {
+    for (const d of listCodebuddySessions()) {
+      if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
+        discovered.push(discoveredToMeta(d, config.localName, false, 'codebuddy'));
+      }
+    }
+  } catch (err) {
+    log.warn('codebuddy session discovery failed', err);
+  }
+
+  try {
+    for (const d of listOpencodeSessions()) {
+      if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
+        discovered.push(discoveredToMeta(d, config.localName, false, 'opencode'));
+      }
+    }
+  } catch (err) {
+    log.warn('opencode session discovery failed', err);
+  }
+
+  try {
+    for (const d of listDevinSessions()) {
+      if (!known.has(d.claudeSessionId) && !sessionStore.isHidden(d.claudeSessionId)) {
+        discovered.push(discoveredToMeta(d, config.localName, false, 'devin'));
+      }
+    }
+  } catch (err) {
+    log.warn('devin session discovery failed', err);
+  }
+
   await Promise.all(
     hostRegistry.list().map(async (host) => {
       try {
@@ -255,7 +317,12 @@ async function loadSessionListAwait(): Promise<SessionMeta[]> {
   const prev = peekSessionListCache()?.slice() ?? null;
   const pending = loadAllSessions()
     .then((sessions) => {
-      const live = withLiveState(sessions);
+      const latestStored = seedFromStore();
+      const reconciled = reconcileSessionSnapshot(sessions, latestStored)
+        .filter((session) =>
+          !sessionStore.isHidden(session.id)
+          && (!session.claudeSessionId || !sessionStore.isHidden(session.claudeSessionId)));
+      const live = withLiveState(reconciled);
       setSessionListCache(live);
       fullDiscoveryDone = true;
       broadcastSessionListDiff(prev, live);

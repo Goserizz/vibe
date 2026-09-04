@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
+import compression from 'compression';
 import { config } from './config.js';
 import { log } from './log.js';
 import { createApiRouter } from './http/api.js';
@@ -11,6 +12,8 @@ import { startTelegramBot } from './telegram/index.js';
 import { prefetchSessionList, startSessionListRefresher, stopSessionListRefresher } from './sessions/list.js';
 import { prefetchAgentModels } from './agents/prefetchModels.js';
 import { scheduleZcodeAutoUpdate, stopZcodeAutoUpdate } from './zcode/autoUpdate.js';
+import { monitorService } from './monitoring/service.js';
+import { hub } from './ws/hub.js';
 
 function localIPs(): string[] {
   const out: string[] = [];
@@ -37,6 +40,8 @@ function banner(): void {
   log.info('cursor:', config.cursorExecutable ?? '(not found)');
   log.info('codex:', config.codexExecutable ?? '(not found)');
   log.info('kimi:', config.kimiExecutable ?? '(not found)');
+  log.info('devin:', config.devinExecutable ?? '(not found)');
+  log.info('opencode:', config.opencodeExecutable ?? '(not found)');
   log.info('Open a link above. The token is also stored at', path.join(config.home, 'token'), '\n');
   if (config.telegramBotToken) {
     log.info('Telegram bot: enabled (token from VIBE_TELEGRAM_BOT_TOKEN)');
@@ -45,6 +50,7 @@ function banner(): void {
 
 function main(): void {
   const app = express();
+  app.use(compression());
   app.use(express.json({ limit: '8mb' }));
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
@@ -66,6 +72,14 @@ function main(): void {
 
   let telegram: { stop: () => Promise<void> } | null = null;
 
+  monitorService.configure({
+    wakeAgent: (input) => hub.triggerMonitorTurn(input),
+    appendNotice: ({ owner, monitorId, sessionId, level, text }) => {
+      hub.appendMonitorNotice(owner, monitorId, sessionId, level, text);
+    },
+    changed: (owner, monitorId) => hub.broadcastMonitorChanged(owner, monitorId),
+  });
+
   server.listen(config.port, config.host, () => {
     banner();
     prefetchSessionList();
@@ -73,6 +87,7 @@ function main(): void {
     prefetchAgentModels();
     telegram = startTelegramBot();
     scheduleZcodeAutoUpdate();
+    monitorService.start();
   });
 
   server.on('error', (err) => {
@@ -86,6 +101,7 @@ function main(): void {
     log.info(`shutting down (${signal})…`);
     stopSessionListRefresher();
     stopZcodeAutoUpdate();
+    monitorService.stop();
     try {
       await telegram?.stop();
     } catch (err) {

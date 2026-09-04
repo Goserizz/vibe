@@ -12,7 +12,11 @@ import { sessionVisible } from '../sessions/visibility.js';
 import { createLocalWorkdir, getRecentProjects, validateDir } from '../projects.js';
 import { getClaudeSessionInfo, type DiscoveredSession } from '../sessions/discovery.js';
 import { listAllSessions } from '../sessions/list.js';
-import { peekSessionListCache } from '../sessions/listCache.js';
+import { peekSessionListCache, invalidateSessionListCache } from '../sessions/listCache.js';
+import { localFs, createSshFs } from '../switch/fs.js';
+import { defaultSwitchPaths } from '../switch/paths.js';
+import { resolveRemoteSwitchPaths } from '../switch/remotePaths.js';
+import { fidelityFor, fidelityMatrix, switchSessionAgent } from '../switch/index.js';
 import { resolveCursorSessionSync } from '../cursor/discovery.js';
 import { invalidateCursorModelsCache, listCursorModels, listRemoteCursorModels } from '../cursor/models.js';
 import { resolveCodexSessionSync } from '../codex/discovery.js';
@@ -48,9 +52,47 @@ import {
   listZcodeModels,
 } from '../zcode/models.js';
 import { deleteZcodeTranscript } from '../zcode/transcript.js';
+import { resolveCodebuddySessionSync } from '../codebuddy/discovery.js';
+import {
+  CODEBUDDY_PERMISSIONS,
+  invalidateCodebuddyModelsCache,
+  listCodebuddyModels,
+  listRemoteCodebuddyModels,
+} from '../codebuddy/models.js';
+import { deleteCodebuddyTranscript } from '../codebuddy/transcript.js';
+import { resolveOpencodeSessionSync } from '../opencode/discovery.js';
+import {
+  OPENCODE_PERMISSIONS,
+  invalidateOpencodeModelsCache,
+  listOpencodeModels,
+  listRemoteOpencodeModels,
+} from '../opencode/models.js';
+import { deleteOpencodeTranscript } from '../opencode/transcript.js';
+import { resolveDevinSessionSync } from '../devin/discovery.js';
+import {
+  DEVIN_PERMISSIONS,
+  invalidateDevinModelsCache,
+  listDevinModels,
+  listRemoteDevinModels,
+} from '../devin/models.js';
+import { deleteDevinTranscript } from '../devin/transcript.js';
+import { resolveDevinExecutable } from '../devin/resolve.js';
+import {
+  clearCodebuddyCredentials,
+  codebuddyAccount,
+  saveCodebuddyCredentials,
+  CodebuddyAuthError,
+} from '../agents/codebuddyLogin.js';
 import { prefetchAgentModels } from '../agents/prefetchModels.js';
-import { agentLoginAccount, agentLoginManager } from '../agents/login.js';
+import { defaultModelForAgent } from '../agents/defaultModel.js';
+import { execFile } from 'node:child_process';
+import {
+  agentLoginAccount,
+  agentLoginManager,
+  invalidateAgentLoginAccount,
+} from '../agents/login.js';
 import { searchConversations } from '../sessions/search.js';
+import { PAGE_MAX_BLOCKS } from '../sessions/window.js';
 import { hostRegistry, proxyForAgent, HostRegistryError } from '../remote/hosts.js';
 import { mcpRegistry } from '../mcp/registry.js';
 import { oauthStore } from '../mcp/oauth.js';
@@ -74,11 +116,16 @@ import { loadVibotConfig, updateVibotConfig, vibotConfigClient } from '../vibot/
 import { vibotHub } from '../vibot/hub.js';
 import { memoryStore } from '../vibot/memories.js';
 import { teardownDelegateSession } from '../vibot/delegate.js';
+import { handleMonitorMcp } from '../monitoring/mcp.js';
+import { monitorService } from '../monitoring/service.js';
+import { monitorStore, MonitorStoreUnavailableError } from '../monitoring/store.js';
+import { monitorInputSchema } from '../monitoring/validation.js';
 import type {
   AgentKind,
   EffortLevel,
   FileEntry,
   LoginAgent,
+  MonitorInput,
   PermissionMode,
   SkillDetail,
   SkillScope,
@@ -118,7 +165,7 @@ const createSchema = z
     permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']).optional(),
     effort: z.enum(effortLevels).optional(),
     /** Engine to drive the session; defaults to the server's default agent. */
-    agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode']).optional(),
+    agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin']).optional(),
     title: z.string().optional(),
     /** Remote host name to create the session on; omit for local. */
     host: z.string().optional(),
@@ -134,6 +181,14 @@ const updateSchema = z.object({
 
 const pinSchema = z.object({ pinned: z.boolean() });
 
+/** 切换会话的 agent / 模型。`agent` 可与当前相同（只改模型）。 */
+const switchSchema = z.object({
+  agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin']),
+  model: z.string().min(1).optional(),
+  /** 可读 thinking 只作为带标记的普通文本迁移；省略即默认开启。 */
+  carryThinking: z.boolean().optional(),
+});
+
 // Per-agent proxy overrides: a sparse map keyed by AgentKind. Zod 4's
 // `z.record(enumKeys, value)` would require *every* enum key to be present, so
 // model it as a partial object instead (unknown keys are stripped by default).
@@ -146,6 +201,9 @@ const proxyByAgentSchema = z
     kiro: z.string(),
     grok: z.string(),
     zcode: z.string(),
+    codebuddy: z.string(),
+    opencode: z.string(),
+    devin: z.string(),
   })
   .partial();
 
@@ -178,7 +236,7 @@ const mcpServerSchema = z.object({
 // Saved New-session engine preset (agent + model + permission + effort).
 const presetSchema = z.object({
   name: z.string().min(1),
-  agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode']),
+  agent: z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin']),
   model: z.string().min(1),
   permissionMode: z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']),
   effort: z.enum(effortLevels),
@@ -187,7 +245,7 @@ const presetSchema = z.object({
 // Agent skills (personal CRUD + read-only system view) for Claude/Cursor/Codex/
 // Kimi/Kiro/Grok. Skill names become directory names under the agent's user skills dir,
 // so the charset is locked down here and re-checked server-side (no traversal).
-const skillAgentSchema = z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode']);
+const skillAgentSchema = z.enum(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin']);
 const skillNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'invalid skill name');
 const skillSaveSchema = z.object({
   agent: skillAgentSchema,
@@ -317,6 +375,27 @@ class HttpError extends Error {
   }
 }
 
+/** Bind a monitor to authoritative session/host metadata. A browser or model
+ * cannot redirect a session-bound recurring command to another account's host
+ * by forging host/cwd fields. */
+async function normalizeMonitorTarget(input: MonitorInput, account: string): Promise<MonitorInput> {
+  if (input.sessionId) {
+    if (!sessionVisible(account, input.sessionId)) throw new HttpError(404, 'session not found');
+    await ensureRemoteCached(input.sessionId);
+    const target = hub.adoptForMonitor(input.sessionId, account);
+    if (!target) throw new HttpError(404, 'session not found');
+    return {
+      ...input,
+      host: target.host,
+      cwd: target.cwd,
+    };
+  }
+  if (!hostRegistry.visibleTo(account, input.host?.trim() || 'local')) {
+    throw new HttpError(403, 'this host is not available for your account');
+  }
+  return input;
+}
+
 /** Read up to MAX_RAW_BYTES of a file into a Buffer — local fs, or remote over
  *  SSH as base64 (sshExec accumulates text stdout, so raw bytes would corrupt).
  *  Shared by /files/raw (inline display) and /files/download (attachment). */
@@ -423,6 +502,11 @@ function sessionForbidden(res: express.Response, account: string, sessionId: str
 export function createApiRouter(): Router {
   const router = Router();
 
+  // Built-in stateless MCP endpoint. It uses a short-lived, session-scoped
+  // capability rather than the user's broad Vibe API token, so it intentionally
+  // sits before the normal requireAuth middleware.
+  router.all('/internal/monitor-mcp', handleMonitorMcp);
+
   // The OAuth callback is hit by the user's browser as a top-level redirect from
   // the MCP provider — it carries no Authorization header — so it MUST sit before
   // requireAuth. CSRF is bounded by the random `state` we issued at /start.
@@ -464,6 +548,161 @@ export function createApiRouter(): Router {
 
   router.use(requireAuth);
 
+  // -- Durable monitors ------------------------------------------------------
+
+  const monitorError = (res: express.Response, error: unknown, fallback: string): void => {
+    const status = error instanceof HttpError
+      ? error.status
+      : error instanceof MonitorStoreUnavailableError
+        ? 503
+        : 400;
+    res.status(status).json({ error: error instanceof Error ? error.message : fallback });
+  };
+
+  router.get('/monitors', (req, res) => {
+    try {
+      res.json({ monitors: monitorStore.list(accountOf(req).name) });
+    } catch (error) {
+      monitorError(res, error, 'could not list monitors');
+    }
+  });
+
+  router.get('/monitor-events', (req, res) => {
+    const parsed = z.object({
+      monitorId: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(500).default(100),
+    }).safeParse({ monitorId: req.query.monitorId, limit: req.query.limit });
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid query' });
+      return;
+    }
+    try {
+      if (parsed.data.monitorId && !monitorStore.getOwned(parsed.data.monitorId, accountOf(req).name)) {
+        res.status(404).json({ error: 'monitor not found' });
+        return;
+      }
+      res.json({
+        events: monitorStore.listEvents(accountOf(req).name, parsed.data.monitorId, parsed.data.limit),
+      });
+    } catch (error) {
+      monitorError(res, error, 'could not list monitor events');
+    }
+  });
+
+  router.post('/monitors', async (req, res) => {
+    const parsed = monitorInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid monitor' });
+      return;
+    }
+    const owner = accountOf(req).name;
+    try {
+      const input = await normalizeMonitorTarget(parsed.data, owner);
+      const monitor = monitorService.createDraft(owner, input);
+      res.status(201).json({ monitor });
+    } catch (error) {
+      monitorError(res, error, 'could not create monitor');
+    }
+  });
+
+  router.put('/monitors/:id', async (req, res) => {
+    const parsed = monitorInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid monitor' });
+      return;
+    }
+    const owner = accountOf(req).name;
+    try {
+      if (!monitorStore.getOwned(req.params.id, owner)) {
+        res.status(404).json({ error: 'monitor not found' });
+        return;
+      }
+      const input = await normalizeMonitorTarget(parsed.data, owner);
+      const monitor = monitorStore.update(req.params.id, owner, input);
+      if (!monitor) {
+        res.status(404).json({ error: 'monitor not found' });
+        return;
+      }
+      monitorService.announceChanged(owner, monitor.id);
+      res.json({ monitor });
+    } catch (error) {
+      monitorError(res, error, 'could not update monitor');
+    }
+  });
+
+  router.delete('/monitors/:id', (req, res) => {
+    const owner = accountOf(req).name;
+    try {
+      const ok = monitorStore.delete(req.params.id, owner);
+      if (!ok) {
+        res.status(404).json({ error: 'monitor not found' });
+        return;
+      }
+      monitorService.announceChanged(owner, req.params.id);
+      res.json({ ok: true });
+    } catch (error) {
+      monitorError(res, error, 'could not delete monitor');
+    }
+  });
+
+  router.post('/monitors/test', async (req, res) => {
+    const parsed = monitorInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid monitor' });
+      return;
+    }
+    try {
+      const input = await normalizeMonitorTarget(parsed.data, accountOf(req).name);
+      const result = await monitorService.test(input);
+      res.json({ result });
+    } catch (error) {
+      monitorError(res, error, 'monitor test failed');
+    }
+  });
+
+  router.post('/monitors/:id/run', async (req, res) => {
+    const owner = accountOf(req).name;
+    try {
+      if (!monitorStore.getOwned(req.params.id, owner)) {
+        res.status(404).json({ error: 'monitor not found' });
+        return;
+      }
+      const result = await monitorService.runNow(req.params.id);
+      res.json({ result, monitor: monitorStore.getOwned(req.params.id, owner) });
+    } catch (error) {
+      monitorError(res, error, 'monitor run failed');
+    }
+  });
+
+  router.post('/monitors/:id/enabled', async (req, res) => {
+    const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'enabled must be a boolean' });
+      return;
+    }
+    const owner = accountOf(req).name;
+    try {
+      const current = monitorStore.getOwned(req.params.id, owner);
+      if (!current) {
+        res.status(404).json({ error: 'monitor not found' });
+        return;
+      }
+      if (parsed.data.enabled) {
+        const normalized = await normalizeMonitorTarget(current, owner);
+        monitorStore.update(req.params.id, owner, normalized);
+      }
+      const monitor = monitorStore.setEnabled(req.params.id, owner, parsed.data.enabled);
+      if (!monitor) {
+        res.status(404).json({ error: 'monitor not found' });
+        return;
+      }
+      monitorService.announceChanged(owner, monitor.id);
+      res.json({ monitor });
+    } catch (error) {
+      monitorError(res, error, 'could not change monitor state');
+    }
+  });
+
   // -- Accounts (admin only) --------------------------------------------------
 
   router.get('/accounts', requireAdmin, (_req, res) => {
@@ -493,7 +732,13 @@ export function createApiRouter(): Router {
       // Accounts are peers — nobody inherits the deleted account's hosts, so
       // they (and their sessions) go away with it.
       const removed = hostRegistry.removeOwnedBy(name);
-      res.json({ ok: true, hostsRemoved: removed });
+      let monitorsRemoved = 0;
+      try {
+        if (monitorStore.available()) monitorsRemoved = monitorStore.deleteOwnedBy(name);
+      } catch (error) {
+        log.warn(`could not remove monitors for deleted account ${name}`, error);
+      }
+      res.json({ ok: true, hostsRemoved: removed, monitorsRemoved });
     } catch (err) {
       const status = err instanceof AccountError ? err.status : 400;
       res.status(status).json({ error: err instanceof Error ? err.message : 'delete failed' });
@@ -594,6 +839,35 @@ export function createApiRouter(): Router {
     if (hostForbidden(res, accountOf(req).name, host)) return;
     const models = host ? await listRemoteZcodeModels(host) : await listZcodeModels();
     res.json({ models, permissions: ZCODE_PERMISSIONS });
+  });
+
+  // CodeBuddy's `--model` help line carries the CLI's live catalog; parse it
+  // (one cheap local run, or `--help` over SSH for a remote host). Permission
+  // modes map 1:1 to `--permission-mode`.
+  router.get('/codebuddy/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    const models = host ? await listRemoteCodebuddyModels(host) : listCodebuddyModels();
+    res.json({ models, permissions: CODEBUDDY_PERMISSIONS });
+  });
+
+  // Devin models come from `devin models list --format json`. The catalog is
+  // two-level (family → effort variants); the API ships families plus each
+  // family's efforts so the UI can offer model and effort as separate picks.
+  router.get('/devin/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    const models = host ? await listRemoteDevinModels(host) : await listDevinModels();
+    res.json({ models, permissions: DEVIN_PERMISSIONS });
+  });
+
+  // opencode models come from `opencode models` (`provider/model` lines);
+  // permission modes are coarse (only Always-approve changes the invocation).
+  router.get('/opencode/models', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host.trim() : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    const models = host ? await listRemoteOpencodeModels(host) : await listOpencodeModels();
+    res.json({ models, permissions: OPENCODE_PERMISSIONS });
   });
 
   router.post('/projects/validate', requireAdmin, (req, res) => {
@@ -994,6 +1268,7 @@ export function createApiRouter(): Router {
       invalidateCursorModelsCache(updated.name);
       invalidateCodexModelsCache(updated.name);
       invalidateGrokModelsCache(updated.name);
+      invalidateCodebuddyModelsCache(updated.name);
     }
     if (parsed.data.ssh !== undefined || proxyChanged) {
       prefetchAgentModels([updated.name]);
@@ -1003,12 +1278,20 @@ export function createApiRouter(): Router {
 
   router.delete('/hosts/:name', (req, res) => {
     try {
-      const ok = hostRegistry.remove(req.params.name, accountOf(req).name);
+      const owner = accountOf(req).name;
+      const ok = hostRegistry.remove(req.params.name, owner);
       if (!ok) {
         res.status(404).json({ error: 'unknown host' });
         return;
       }
-      res.json({ ok: true });
+      let pausedMonitors: string[] = [];
+      try {
+        if (monitorStore.available()) pausedMonitors = monitorStore.pauseForHost(req.params.name, owner);
+      } catch (error) {
+        log.warn(`could not pause monitors for deleted host ${req.params.name}`, error);
+      }
+      for (const monitorId of pausedMonitors) monitorService.announceChanged(owner, monitorId);
+      res.json({ ok: true, pausedMonitors: pausedMonitors.length });
     } catch (err) {
       const status = err instanceof HostRegistryError ? err.status : 400;
       res.status(status).json({ error: err instanceof Error ? err.message : 'invalid host' });
@@ -1286,8 +1569,16 @@ export function createApiRouter(): Router {
   // machine (admin-only), otherwise a configured remote host over SSH.
 
   function loginAgentParam(res: express.Response, agent: string): LoginAgent | null {
-    if (agent === 'cursor' || agent === 'codex') return agent;
-    res.status(400).json({ error: 'agent must be cursor or codex' });
+    if (agent === 'cursor' || agent === 'codex' || agent === 'codebuddy' || agent === 'devin') return agent;
+    res.status(400).json({ error: 'agent must be cursor, codex, codebuddy, or devin' });
+    return null;
+  }
+
+  /** Link-flow endpoints drive a CLI login process — CodeBuddy has none (its
+   *  sign-in is credential injection via /agents/codebuddy/credentials). */
+  function linkLoginAgentParam(res: express.Response, agent: string): 'cursor' | 'codex' | 'devin' | null {
+    if (agent === 'cursor' || agent === 'codex' || agent === 'devin') return agent;
+    res.status(400).json({ error: 'link-based sign-in is only available for cursor, codex, and devin' });
     return null;
   }
 
@@ -1298,7 +1589,9 @@ export function createApiRouter(): Router {
     const host = typeof req.query.host === 'string' ? req.query.host : '';
     if (hostForbidden(res, accountOf(req).name, host)) return;
     try {
-      const account = await agentLoginAccount(loginAgent, host);
+      const account = loginAgent === 'codebuddy'
+        ? await codebuddyAccount(host)
+        : await agentLoginAccount(loginAgent, host);
       res.json(account);
     } catch (err) {
       log.warn('agent account probe failed', err);
@@ -1308,7 +1601,7 @@ export function createApiRouter(): Router {
 
   // Begin a login: spawns the CLI's login command and returns immediately.
   router.post('/agents/:agent/login', (req, res) => {
-    const loginAgent = loginAgentParam(res, req.params.agent);
+    const loginAgent = linkLoginAgentParam(res, req.params.agent);
     if (!loginAgent) return;
     const host = typeof req.body?.host === 'string' ? req.body.host : '';
     if (hostForbidden(res, accountOf(req).name, host)) return;
@@ -1322,7 +1615,7 @@ export function createApiRouter(): Router {
 
   // Poll the running (or last finished) login flow.
   router.get('/agents/:agent/login', (req, res) => {
-    const loginAgent = loginAgentParam(res, req.params.agent);
+    const loginAgent = linkLoginAgentParam(res, req.params.agent);
     if (!loginAgent) return;
     const host = typeof req.query.host === 'string' ? req.query.host : '';
     if (hostForbidden(res, accountOf(req).name, host)) return;
@@ -1331,7 +1624,7 @@ export function createApiRouter(): Router {
 
   // Abort a waiting login flow.
   router.delete('/agents/:agent/login', (req, res) => {
-    const loginAgent = loginAgentParam(res, req.params.agent);
+    const loginAgent = linkLoginAgentParam(res, req.params.agent);
     if (!loginAgent) return;
     const host = typeof req.query.host === 'string' ? req.query.host : '';
     if (hostForbidden(res, accountOf(req).name, host)) return;
@@ -1339,11 +1632,119 @@ export function createApiRouter(): Router {
     res.json({ ok: true });
   });
 
+  // Hand the user's pasted auth code to a flow that is waiting for it.
+  //
+  // Devin's manual-token flow prints a sign-in link and then blocks reading the
+  // code from stdin, so unlike cursor/codex (which finish on their own once the
+  // browser step completes) it needs this round trip.
+  router.post('/agents/:agent/login/input', (req, res) => {
+    const loginAgent = linkLoginAgentParam(res, req.params.agent);
+    if (!loginAgent) return;
+    const parsed = z
+      .object({
+        host: z.string().optional(),
+        text: z.string().min(1).max(2_000),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid body' });
+      return;
+    }
+    const host = parsed.data.host ?? '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    const login = agentLoginManager.submit(loginAgent, host, parsed.data.text);
+    if (!login) {
+      res.status(409).json({ error: 'no sign-in flow is waiting for input' });
+      return;
+    }
+    res.json({ login });
+  });
+
+  // Sign out of the CLI on a host. Only offered for agents whose CLI owns the
+  // credentials; deliberately destructive, so it is a separate explicit action
+  // rather than something a login attempt does implicitly.
+  router.post('/agents/:agent/logout', async (req, res) => {
+    const loginAgent = linkLoginAgentParam(res, req.params.agent);
+    if (!loginAgent) return;
+    const host = typeof req.body?.host === 'string' ? req.body.host : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    if (loginAgent !== 'devin') {
+      res.status(400).json({ error: `sign-out is not supported for ${loginAgent}` });
+      return;
+    }
+    const inner = [
+      'devin_fallback="$HOME/.local/bin/devin"',
+      'if command -v devin >/dev/null 2>&1; then devin_bin="$(command -v devin)"; '
+        + 'elif [ -x "$devin_fallback" ]; then devin_bin="$devin_fallback"; '
+        + 'else echo "devin CLI not found" >&2; exit 127; fi',
+      '"$devin_bin" auth logout',
+    ].join('\n');
+    try {
+      if (!host) {
+        await new Promise<void>((resolve, reject) => {
+          execFile(resolveDevinExecutable() ?? 'devin', ['auth', 'logout'], { timeout: 20_000 }, (err) =>
+            err ? reject(err) : resolve(),
+          );
+        });
+      } else {
+        const hostRec = hostRegistry.get(host);
+        if (!hostRec) {
+          res.status(404).json({ error: 'unknown host' });
+          return;
+        }
+        await sshExec(hostRec.ssh, loginShellCommand(inner), { timeoutMs: 20_000, mux: false });
+      }
+      invalidateAgentLoginAccount(loginAgent, host);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : 'sign-out failed' });
+    }
+  });
+
+  // -- CodeBuddy credential login (no link flow — paste an API key / token) --
+
+  // Validate pasted credentials with a probe turn, then persist them to
+  // ~/.codebuddy/vibe-auth.env on this machine or a remote host.
+  router.post('/agents/codebuddy/credentials', async (req, res) => {
+    const host = typeof req.body?.host === 'string' ? req.body.host : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    const parsed = z
+      .object({ apiKey: z.string().min(1).optional(), authToken: z.string().min(1).optional(), host: z.string().optional() })
+      .refine((d) => d.apiKey || d.authToken, { message: 'apiKey or authToken is required' })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid body' });
+      return;
+    }
+    try {
+      await saveCodebuddyCredentials(host, {
+        apiKey: parsed.data.apiKey?.trim() || undefined,
+        authToken: parsed.data.authToken?.trim() || undefined,
+      });
+      res.json({ ok: true, account: await codebuddyAccount(host) });
+    } catch (err) {
+      const status = err instanceof CodebuddyAuthError ? 400 : 502;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'credential check failed' });
+    }
+  });
+
+  // Logout: remove the stored credentials (a TUI login is left untouched).
+  router.delete('/agents/codebuddy/credentials', async (req, res) => {
+    const host = typeof req.query.host === 'string' ? req.query.host : '';
+    if (hostForbidden(res, accountOf(req).name, host)) return;
+    try {
+      const existed = await clearCodebuddyCredentials(host);
+      res.json({ ok: true, existed });
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : 'logout failed' });
+    }
+  });
+
   // Install or upgrade an agent CLI on a host (local machine or remote over SSH).
   router.post('/hosts/:name/agents/:agent/update', async (req, res) => {
     const agentParam = req.params.agent;
     if (!isAgentKind(agentParam)) {
-      res.status(400).json({ error: 'agent must be claude, cursor, codex, kimi, kiro, grok, or zcode' });
+      res.status(400).json({ error: 'agent must be claude, cursor, codex, kimi, kiro, grok, zcode, codebuddy, opencode, or devin' });
       return;
     }
     const name = req.params.name;
@@ -1365,6 +1766,9 @@ export function createApiRouter(): Router {
       if (agentParam === 'kiro') invalidateKiroModelsCache(isLocal ? undefined : name);
       if (agentParam === 'grok') invalidateGrokModelsCache(isLocal ? undefined : name);
       if (agentParam === 'zcode') invalidateZcodeModelsCache(isLocal ? undefined : name);
+      if (agentParam === 'codebuddy') invalidateCodebuddyModelsCache(isLocal ? undefined : name);
+      if (agentParam === 'opencode') invalidateOpencodeModelsCache(isLocal ? undefined : name);
+      if (agentParam === 'devin') invalidateDevinModelsCache(isLocal ? undefined : name);
       // Re-warm in the background; the update response itself stays snappy.
       prefetchAgentModels(isLocal ? [] : [name]);
       res.json(result);
@@ -1430,21 +1834,7 @@ export function createApiRouter(): Router {
     const agent: AgentKind = parsed.data.agent ?? config.defaultAgent;
     const session = sessionStore.create({
       cwd,
-      model:
-        parsed.data.model
-        || (agent === 'cursor'
-          ? config.defaultCursorModel
-          : agent === 'codex'
-            ? config.defaultCodexModel
-            : agent === 'kimi'
-              ? config.defaultKimiModel
-              : agent === 'kiro'
-                ? config.defaultKiroModel
-                : agent === 'grok'
-                  ? config.defaultGrokModel
-                  : agent === 'zcode'
-                    ? config.defaultZcodeModel
-                    : config.defaultModel),
+      model: parsed.data.model || defaultModelForAgent(agent),
       permissionMode: (parsed.data.permissionMode as PermissionMode) || 'default',
       effort: (parsed.data.effort as EffortLevel) || (config.defaultEffort as EffortLevel),
       agent,
@@ -1527,7 +1917,25 @@ export function createApiRouter(): Router {
                   if (z) {
                     info = z;
                     agent = 'zcode';
-                  }
+                    } else {
+                      const cb = resolveCodebuddySessionSync(id);
+                      if (cb) {
+                        info = cb;
+                        agent = 'codebuddy';
+                      } else {
+                        const oc = resolveOpencodeSessionSync(id);
+                        if (oc) {
+                          info = oc;
+                          agent = 'opencode';
+                        } else {
+                          const dv = resolveDevinSessionSync(id);
+                          if (dv) {
+                            info = dv;
+                            agent = 'devin';
+                          }
+                        }
+                      }
+                    }
                 }
               }
             }
@@ -1580,31 +1988,210 @@ export function createApiRouter(): Router {
     res.json({ ok: true, pinned: parsed.data.pinned });
   });
 
+  /**
+   * 把一个会话切换成另一个 agent（10 个 agent 两两互转，共 100 个方向）。
+   *
+   * 历史无损保留：源会话的归一化 transcript 就是枢纽格式，目标 agent 的 adapter
+   * 从它重建出自己的原生会话文件，之后 Vibe 用原生的 resume 机制续接。
+   *
+   * 远端会话的处理沿用项目既有的转发模式：不把请求转给远端的另一个 Vibe，而是
+   * 通过 SSH 在**会话所在的那台主机**上直接读写它的原生会话文件
+   * （和远端文件路由、远端 transcript 读取是同一套路）。
+   */
+  router.post('/sessions/:id/switch', async (req, res) => {
+    const id = req.params.id;
+    if (sessionForbidden(res, accountOf(req).name, id)) return;
+    // 先校验入参：畸形请求一律 400，不依赖会话是否存在。
+    const parsed = switchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid body: { agent, model?, carryThinking? }' });
+      return;
+    }
+    const { agent: targetAgent, model, carryThinking } = parsed.data;
+    const stored = sessionStore.get(id);
+    if (!stored) {
+      res.status(404).json({ error: 'session not found — only Vibe-managed sessions can switch agent' });
+      return;
+    }
+    if (!hub.beginAgentSwitch(id)) {
+      res.status(409).json({ error: 'session is running or another agent switch is already in progress' });
+      return;
+    }
+    const targetModel = model ?? defaultModelForAgent(targetAgent);
+
+    // 远端会话：把文件操作下发到那台主机上执行。
+    const { host } = parseSessionId(id);
+    const remoteHost = host ? hostRegistry.get(host) : undefined;
+    if (host && !remoteHost) {
+      hub.endAgentSwitch(id);
+      res.status(400).json({ error: `unknown host: ${host}` });
+      return;
+    }
+    const fsImpl = remoteHost
+      ? createSshFs(remoteHost.ssh, async (target, remoteCmd, opts) => sshExec(target, remoteCmd, opts))
+      : localFs;
+
+    try {
+      const localPaths = defaultSwitchPaths();
+      // Vibe-owned normalized transcripts always live on this server, even
+      // when the agent process and its native session live behind SSH. This is
+      // an unpaged switch snapshot — Hub.snapshot() is intentionally bounded
+      // for UI transport and must never be used to rebuild native history.
+      const source = await hub.switchSnapshot(id);
+      const hasSourceConversation = source.blocks.some((block) =>
+        block.kind === 'user' || block.kind === 'assistant' || block.kind === 'thinking' || block.kind === 'tool');
+      if (!hasSourceConversation && stored.messageCount > 0) {
+        throw new Error(
+          `source history is unavailable (${stored.agent ?? 'claude'} session ${stored.claudeSessionId ?? id}); refusing to create an empty target session`,
+        );
+      }
+      const remotePaths = remoteHost
+        ? await resolveRemoteSwitchPaths(remoteHost.ssh)
+        : undefined;
+      const outcome = await switchSessionAgent(
+        { session: stored, targetAgent, targetModel, carryThinking },
+        {
+          sourceBlocks: source.blocks,
+          nativeFs: fsImpl,
+          nativePaths: remotePaths ?? localPaths,
+          transcriptFs: localFs,
+          transcriptPaths: localPaths,
+          // Resolve both stable blob sidecars and legacy line offsets while
+          // the store/runtime still points at the source agent.
+          resolveResultRef: (block) => block.resultRef
+            ? hub.blockResult(id, block.id, block.resultRef)?.text ?? null
+            : null,
+        },
+      );
+
+      // 注册新的原生 id：full 方向指向新建的原生会话，partial 方向清空
+      // （Vibe 会为它开一个全新的会话，历史靠首轮注入）。
+      const updated = sessionStore.update(id, {
+        agent: targetAgent,
+        model: targetModel,
+        claudeSessionId: outcome.nativeId || undefined,
+        switchPrimer: outcome.primer,
+      });
+      if (!updated) {
+        res.status(500).json({ error: 'failed to update session' });
+        return;
+      }
+
+      // 新原生 id 是关键映射，跳过 debounce 立刻落盘：否则进程在这 250ms 内挂掉
+      // 会话会仍指向旧 agent 的原生会话，重开时续到错误的引擎上。
+      sessionStore.flush();
+
+      // The cached runtime has immutable agent/native-id fields. Recreate it
+      // now; otherwise the next WebSocket message would still run the source
+      // agent with the target model and could overwrite the new native id.
+      hub.rebindAfterAgentSwitch(id);
+
+      // 旧 agent 的原生会话仍然留在磁盘上（不删 —— 切回去还能用），但要失效
+      // 发现缓存，让新 agent 的原生会话能被下一次扫描发现。
+      invalidateSessionListCache();
+      const meta = toMeta(updated, false, 'vibe');
+      hub.broadcastMetaObject(meta);
+
+      res.json({
+        session: meta,
+        switch: {
+          from: stored.agent ?? 'claude',
+          to: targetAgent,
+          fidelity: outcome.fidelity,
+          nativeId: outcome.nativeId,
+          note: outcome.note,
+          files: outcome.files,
+          blocks: outcome.blocks.length,
+        },
+      });
+    } catch (err) {
+      log.error(`switch agent failed session=${id} -> ${targetAgent}`, err);
+      res.status(500).json({ error: err instanceof Error ? err.message : 'switch failed' });
+    } finally {
+      hub.endAgentSwitch(id);
+    }
+  });
+
   // Delete = stop tracking in Vibe. We never delete the underlying ~/.claude
   // transcript; instead we dismiss it (so discovery won't resurface it).
   router.delete('/sessions/:id', (req, res) => {
     const id = req.params.id;
-    if (sessionForbidden(res, accountOf(req).name, id)) return;
+    const owner = accountOf(req).name;
+    if (sessionForbidden(res, owner, id)) return;
     const stored = sessionStore.get(id);
+    let pausedMonitors: string[] = [];
+    try {
+      if (monitorStore.available()) pausedMonitors = monitorStore.pauseForSession(id, owner);
+    } catch (error) {
+      log.warn(`could not pause monitors for deleted session ${id}`, error);
+    }
     sessionStore.remove(id);
     if (stored?.agent === 'kimi') deleteKimiTranscript(id);
     if (stored?.agent === 'kiro') deleteKiroTranscript(id);
     if (stored?.agent === 'grok') deleteGrokTranscript(id);
     if (stored?.agent === 'zcode') deleteZcodeTranscript(id);
+    if (stored?.agent === 'codebuddy') deleteCodebuddyTranscript(id);
+    if (stored?.agent === 'opencode') deleteOpencodeTranscript(id);
+    if (stored?.agent === 'devin') deleteDevinTranscript(id);
     // Dismiss every form discovery might resurface it under (the list id and,
     // for local sessions, the bare Claude id).
     sessionStore.hide(id);
     if (stored?.claudeSessionId) sessionStore.hide(stored.claudeSessionId);
     hub.broadcastRemoved(id);
-    res.json({ ok: true });
+    for (const monitorId of pausedMonitors) monitorService.announceChanged(owner, monitorId);
+    res.json({ ok: true, pausedMonitors: pausedMonitors.length });
   });
 
-  // Conversation history + the seq to subscribe from (see Hub.snapshot).
-  // Works for local Vibe-managed, local CLI, and remote sessions.
+  // Conversation history + the seq to subscribe from (see Hub.snapshot), one
+  // page at a time: without a cursor, the newest window (default 200 blocks /
+  // ~2MB of raw transcript); `cursor` (a byte offset from the previous page)
+  // walks older pages; `limit` (1..500) overrides the page size. Tool results
+  // travel as bounded previews — the full text comes from
+  // /sessions/:id/blocks/:blockId/result on demand.
   router.get('/sessions/:id/messages', async (req, res) => {
     if (sessionForbidden(res, accountOf(req).name, req.params.id)) return;
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : '';
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), PAGE_MAX_BLOCKS) : undefined;
+    if (cursor && !/^\d+$/.test(cursor)) {
+      res.status(400).json({ error: 'invalid cursor' });
+      return;
+    }
     await ensureRemoteCached(req.params.id);
-    res.json(await hub.snapshot(req.params.id));
+    res.json(await hub.snapshot(req.params.id, { endByte: cursor ? Number(cursor) : undefined, limit }));
+  });
+
+  // Unabridged text of one tool result that arrived truncated in a page
+  // payload (`ref` is the block's opaque resultRef: `blob:` sidecar or
+  // `line:` transcript offset).
+  router.get('/sessions/:id/blocks/:blockId/result', (req, res) => {
+    if (sessionForbidden(res, accountOf(req).name, req.params.id)) return;
+    const ref = typeof req.query.ref === 'string' ? req.query.ref : '';
+    if (!ref || !/^(blob:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+|line:\d+)$/.test(ref)) {
+      res.status(400).json({ error: 'invalid ref' });
+      return;
+    }
+    const hit = hub.blockResult(req.params.id, req.params.blockId, ref);
+    if (!hit) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    res.json(hit);
+  });
+
+  /**
+   * 每个转换方向的保真等级（10×10 = 100 个方向）。
+   *
+   * 保真只取决于**目标** agent，所以 `byTarget` 才是 UI 真正需要的那份；
+   * `matrix` 供文档/测试核对全表。
+   */
+  router.get('/meta/switch-fidelity', (_req, res) => {
+    const agents: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin'];
+    const byTarget = Object.fromEntries(agents.map((a) => [a, fidelityFor(a)])) as Record<
+      AgentKind,
+      'full' | 'partial'
+    >;
+    res.json({ byTarget, matrix: fidelityMatrix(agents) });
   });
 
   // Full-text search across local + remote conversation messages.

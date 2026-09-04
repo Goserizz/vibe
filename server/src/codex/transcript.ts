@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
+import { externalizeResults } from '../sessions/blobs.js';
 import { log } from '../log.js';
 import type { ChatBlock, ToolBlock } from '../../../shared/protocol.js';
 import { parseCodexResponseItem } from './normalize.js';
@@ -45,7 +46,8 @@ export function appendCodexBlocks(sessionId: string, blocks: ChatBlock[]): void 
   if (!blocks.length) return;
   try {
     fs.mkdirSync(config.codexTranscriptsDir, { recursive: true });
-    fs.appendFileSync(transcriptFile(sessionId), blocks.map((b) => JSON.stringify(b)).join('\n') + '\n');
+    const persisted = externalizeResults(sessionId, blocks);
+    fs.appendFileSync(transcriptFile(sessionId), persisted.map((b) => JSON.stringify(b)).join('\n') + '\n');
   } catch (err) {
     log.warn('failed to persist codex transcript', err);
   }

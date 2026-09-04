@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import type {
   AgentInstallInfo,
   AgentKind,
@@ -10,9 +11,9 @@ import type {
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { buildZcodeBundle, localZcodeVersion } from '../zcode/bundle.js';
-import { cleanRemoteStderr, loginShellCommand, sshExec, type SshResult } from './ssh.js';
+import { cleanRemoteStderr, loginShellCommand, shQuote, sshExec, type SshResult } from './ssh.js';
 
-const AGENTS: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'];
+const AGENTS: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin'];
 
 const emptyAgents = (): HostAgentsStatus => ({
   claude: { installed: false },
@@ -22,6 +23,9 @@ const emptyAgents = (): HostAgentsStatus => ({
   kiro: { installed: false },
   grok: { installed: false },
   zcode: { installed: false },
+  codebuddy: { installed: false },
+  opencode: { installed: false },
+  devin: { installed: false },
 });
 
 /** Probe script shared by local + remote (login-shell PATH for nvm/fnm/…). */
@@ -48,6 +52,20 @@ const PROBE_SCRIPT = [
     + 'if command -v zcode >/dev/null 2>&1; then echo "ZCODE_VER:$(zcode --version 2>/dev/null | head -1)"; '
     + 'elif [ -x "$zcode_fallback" ]; then echo "ZCODE_VER:$("$zcode_fallback" --version 2>/dev/null | head -1)"; '
     + 'else echo ZCODE_MISS; fi',
+  'if command -v codebuddy >/dev/null 2>&1; then echo "CB_VER:$(codebuddy --version 2>/dev/null | head -1)"; else echo CB_MISS; fi',
+  // opencode's installer drops the binary under ~/.opencode/bin, which a login
+  // shell usually has — fall back the same way the other XDG-ish CLIs do.
+  'opencode_fallback="$HOME/.opencode/bin/opencode"; '
+    + 'if command -v opencode >/dev/null 2>&1; then echo "OPENCODE_VER:$(opencode --version 2>/dev/null | head -1)"; '
+    + 'elif [ -x "$opencode_fallback" ]; then echo "OPENCODE_VER:$("$opencode_fallback" --version 2>/dev/null | head -1)"; '
+    + 'else echo OPENCODE_MISS; fi',
+  // Devin installs to ~/.local/bin, which a login shell usually has — but the
+  // symlink target lives under ~/.local/share, so fall back the same way the
+  // other XDG-installed CLIs do.
+  'devin_fallback="$HOME/.local/bin/devin"; '
+    + 'if command -v devin >/dev/null 2>&1; then echo "DEVIN_VER:$(devin --version 2>/dev/null | head -1)"; '
+    + 'elif [ -x "$devin_fallback" ]; then echo "DEVIN_VER:$("$devin_fallback" --version 2>/dev/null | head -1)"; '
+    + 'else echo DEVIN_MISS; fi',
 ].join('; ');
 
 /** Pull a semver-ish or Cursor-style version token out of CLI `--version` output. */
@@ -84,6 +102,9 @@ function parseProbeStdout(stdout: string): HostAgentsStatus {
   parseLine('KIRO', 'kiro');
   parseLine('GROK', 'grok');
   parseLine('ZCODE', 'zcode');
+  parseLine('CB', 'codebuddy');
+  parseLine('OPENCODE', 'opencode');
+  parseLine('DEVIN', 'devin');
   return agents;
 }
 
@@ -261,13 +282,14 @@ export async function getLatestAgentVersions(force = false): Promise<AgentLatest
   if (!force && latestCache && Date.now() - latestCache.at < LATEST_TTL_MS) {
     return overlayLocalZcode(latestCache.versions);
   }
-  const [claude, cursor, codex, kimi, kiro, grok] = await Promise.all([
+  const [claude, cursor, codex, kimi, kiro, grok, codebuddy] = await Promise.all([
     npmViewVersion('@anthropic-ai/claude-code'),
     fetchCursorLatest(),
     npmViewVersion('@openai/codex'),
     fetchKimiLatest(),
     fetchKiroLatest(),
     fetchGrokLatest(),
+    npmViewVersion('@tencent-ai/codebuddy-code'),
   ]);
   const versions: AgentLatestVersions = {};
   if (claude) versions.claude = claude;
@@ -276,6 +298,7 @@ export async function getLatestAgentVersions(force = false): Promise<AgentLatest
   if (kimi) versions.kimi = kimi;
   if (kiro) versions.kiro = kiro;
   if (grok) versions.grok = grok;
+  if (codebuddy) versions.codebuddy = codebuddy;
   // ZCode publishes no registry — the local CLI the push installer ships IS
   // the latest, so hosts lagging it show an Update button.
   latestCache = { at: Date.now(), versions };
@@ -317,6 +340,14 @@ function updateCommand(agent: AgentKind): string {
         'npm install -g @openai/codex@latest',
         'echo VIBE_UPDATE_DONE',
         'if command -v codex >/dev/null 2>&1; then echo "CODEX_VER:$(codex --version 2>/dev/null | head -1)"; fi',
+      ].join('\n');
+    case 'codebuddy':
+      // npm @latest; idempotent, so Install and Update share this command. The
+      // credential push + login probe run in codebuddyPushInstall afterwards.
+      return [
+        'npm install -g @tencent-ai/codebuddy-code@latest',
+        'echo VIBE_UPDATE_DONE',
+        'if command -v codebuddy >/dev/null 2>&1; then echo "CB_VER:$(codebuddy --version 2>/dev/null | head -1)"; fi',
       ].join('\n');
     case 'kimi':
       // The official installer is non-interactive and handles both install and
@@ -407,6 +438,29 @@ function updateCommand(agent: AgentKind): string {
         'echo VIBE_UPDATE_DONE',
         'echo "ZCODE_VER:$(/usr/local/bin/zcode --version 2>/dev/null | head -1)"',
       ].join('\n');
+    case 'opencode':
+      // Official installer, non-interactive: installs to ~/.opencode/bin,
+      // upgrades in place, exit 0. Same install-and-update pattern as Kimi.
+      return [
+        'curl -fsSL https://opencode.ai/install | bash',
+        'echo VIBE_UPDATE_DONE',
+        'opencode_fallback="$HOME/.opencode/bin/opencode"',
+        'if command -v opencode >/dev/null 2>&1; then echo "OPENCODE_VER:$(opencode --version 2>/dev/null | head -1)"; '
+          + 'elif [ -x "$opencode_fallback" ]; then echo "OPENCODE_VER:$("$opencode_fallback" --version 2>/dev/null | head -1)"; fi',
+      ].join('\n');
+    case 'devin':
+      // Official installer (referenced by the CLI's own strings), verified
+      // non-interactive with no TTY: installs latest to ~/.local/bin/devin,
+      // upgrades in place, exit 0. The trailing "Login canceled" it prints
+      // when nobody is signed in yet is the post-install first-run probe
+      // failing harmlessly. Same install-and-update pattern as Kimi.
+      return [
+        'curl -fsSL https://cli.devin.ai/install.sh | bash',
+        'echo VIBE_UPDATE_DONE',
+        'devin_fallback="$HOME/.local/bin/devin"',
+        'if command -v devin >/dev/null 2>&1; then echo "DEVIN_VER:$(devin --version 2>/dev/null | head -1)"; '
+          + 'elif [ -x "$devin_fallback" ]; then echo "DEVIN_VER:$("$devin_fallback" --version 2>/dev/null | head -1)"; fi',
+      ].join('\n');
   }
 }
 
@@ -417,6 +471,9 @@ function versionPrefix(agent: AgentKind): string {
   if (agent === 'kimi') return 'KIMI_VER:';
   if (agent === 'kiro') return 'KIRO_VER:';
   if (agent === 'zcode') return 'ZCODE_VER:';
+  if (agent === 'codebuddy') return 'CB_VER:';
+  if (agent === 'opencode') return 'OPENCODE_VER:';
+  if (agent === 'devin') return 'DEVIN_VER:';
   return 'GROK_VER:';
 }
 
@@ -450,8 +507,149 @@ export async function sshUpdateAgent(target: string, agent: AgentKind): Promise<
   // ZCode: prefer pushing the local CLI bundle over SSH (~9MB tar.gz) instead
   // of downloading the ~200MB AppImage on the remote host.
   if (agent === 'zcode') return zcodePushInstall(target);
+  // CodeBuddy: after the npm install, deploy this machine's credentials (never
+  // overwriting the remote's) and verify with a remote login probe.
+  if (agent === 'codebuddy') return codebuddyPushInstall(target);
   const res = await sshExec(target, loginShellCommand(updateCommand(agent)), { timeoutMs: 180_000 });
   return updateResultFromExec(agent, res);
+}
+
+// ---------------------------------------------------------------------------
+// CodeBuddy push install: npm install + credential deploy + login probe.
+// ---------------------------------------------------------------------------
+
+/** Deploy ~/.codebuddy/vibe-auth.env from this machine to the remote host —
+ *  only when the remote has none of its own (never clobber host credentials).
+ *  Returns a human-readable note for the update log. */
+async function deployCodebuddyCredentials(target: string): Promise<string> {
+  let localCreds = '';
+  try {
+    localCreds = fs.readFileSync(config.codebuddyAuthEnvFile, 'utf8');
+  } catch {
+    return 'no local credentials to deploy — sign in on the host if needed';
+  }
+  if (!localCreds.trim()) return 'no local credentials to deploy — sign in on the host if needed';
+  const have = await sshExec(
+    target,
+    loginShellCommand('[ -f ~/.codebuddy/vibe-auth.env ] && echo HAVE || echo MISS'),
+    { timeoutMs: 15_000 },
+  );
+  if (have.stdout.includes('HAVE')) return 'remote already has ~/.codebuddy/vibe-auth.env (kept)';
+  const wrote = await sshExec(
+    target,
+    loginShellCommand(
+      'mkdir -p ~/.codebuddy && chmod 700 ~/.codebuddy && cat > ~/.codebuddy/vibe-auth.env && chmod 600 ~/.codebuddy/vibe-auth.env && echo CREDS_OK',
+    ),
+    { input: localCreds, timeoutMs: 15_000 },
+  );
+  return wrote.code === 0 && wrote.stdout.includes('CREDS_OK')
+    ? 'deployed local credentials to ~/.codebuddy/vibe-auth.env'
+    : 'credential deployment failed — sign in on the host from Vibe Hosts';
+}
+
+async function codebuddyPushInstall(target: string): Promise<AgentUpdateResult> {
+  const res = await sshExec(target, loginShellCommand(updateCommand('codebuddy')), { timeoutMs: 300_000 });
+  const result = updateResultFromExec('codebuddy', res);
+  if (!result.ok) return result;
+
+  const notes: string[] = [];
+  try {
+    notes.push(await deployCodebuddyCredentials(target));
+  } catch (err) {
+    log.debug('codebuddy credential deploy failed', err);
+    notes.push('credential deployment skipped (SSH error)');
+  }
+  try {
+    notes.push(await syncCodebuddySkills(target));
+  } catch (err) {
+    log.debug('codebuddy skill sync failed', err);
+    notes.push('skill sync skipped (SSH error)');
+  }
+  // Verify the remote can actually authenticate (also warms nothing — one turn).
+  try {
+    const { probeCodebuddyTarget } = await import('../agents/codebuddyProbe.js');
+    const probe = await probeCodebuddyTarget(target);
+    notes.push(
+      probe.ok
+        ? 'login probe: signed in ✓'
+        : `login probe: not signed in (${probe.error ?? 'no credentials'}) — sign in from Vibe Hosts`,
+    );
+  } catch (err) {
+    log.debug('codebuddy login probe failed', err);
+    notes.push('login probe skipped');
+  }
+  result.log = `${notes.join('\n')}\n${result.log ?? ''}`.trim();
+  return result;
+}
+
+/** Local ~/.codebuddy/skills entries (dirs holding a SKILL.md), newest first. */
+function localCodebuddySkills(): string[] {
+  const dir = path.join(config.codebuddyHome, 'skills');
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'SKILL.md')))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+/** tar.gz a local skill dir as a Buffer (preserves extra reference files). */
+function tarSkill(name: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'tar',
+      ['-czf', '-', '-C', path.join(config.codebuddyHome, 'skills'), name],
+      { timeout: 30_000, maxBuffer: 32 * 1024 * 1024, encoding: 'buffer' },
+      (err, stdout) => (err ? reject(err) : resolve(stdout as Buffer)),
+    );
+  });
+}
+
+/**
+ * Sync this machine's ~/.codebuddy/skills to the remote host: skill dirs the
+ * remote already has are never touched; missing ones arrive as a base64'd
+ * tar.gz over the SSH channel (the same transport the file panel uses).
+ */
+async function syncCodebuddySkills(target: string): Promise<string> {
+  const names = localCodebuddySkills();
+  if (!names.length) return 'no local codebuddy skills to sync';
+
+  const listing = names.map((n) => shQuote(n)).join(' ');
+  const probe = await sshExec(
+    target,
+    loginShellCommand(
+      `mkdir -p ~/.codebuddy/skills; for n in ${listing}; do if [ -d ~/.codebuddy/skills/"$n" ]; then echo "HAVE:$n"; else echo "MISS:$n"; fi; done`,
+    ),
+    { timeoutMs: 15_000 },
+  );
+  const missing = probe.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('MISS:'))
+    .map((l) => l.slice(5));
+  const present = names.length - missing.length;
+
+  let okCount = 0;
+  for (const name of missing) {
+    try {
+      const tarball = await tarSkill(name);
+      const uploaded = await sshExec(
+        target,
+        loginShellCommand(`base64 -d | tar -xzf - -C ~/.codebuddy/skills && echo SKILL_OK`),
+        { input: tarball.toString('base64'), timeoutMs: 60_000 },
+      );
+      if (uploaded.code === 0 && uploaded.stdout.includes('SKILL_OK')) okCount++;
+      else log.debug(`codebuddy skill upload failed: ${name}`, cleanRemoteStderr(uploaded.stderr));
+    } catch (err) {
+      log.debug(`codebuddy skill upload failed: ${name}`, err);
+    }
+  }
+  const kept = present > 0 ? `, ${present} already present (untouched)` : '';
+  return missing.length
+    ? `skills: synced ${okCount}/${missing.length}${kept}`
+    : `skills: all ${present} already on the host (untouched)`;
 }
 
 // ---------------------------------------------------------------------------

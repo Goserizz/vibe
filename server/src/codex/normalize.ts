@@ -18,6 +18,35 @@ function displayValue(value: unknown): string {
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
+/** Codex fileChange change kinds arrive as objects (`{type:"update",move_path}`),
+ *  older builds as plain strings. Collapse either to a stable label. */
+function changeKindLabel(kind: unknown): string {
+  if (typeof kind === 'string' && kind) return kind;
+  if (kind && typeof kind === 'object') {
+    const k = kind as Record<string, unknown>;
+    const type = typeof k.type === 'string' ? k.type : '';
+    const move = typeof k.move_path === 'string' && k.move_path
+      ? k.move_path
+      : typeof k.movePath === 'string' ? k.movePath : '';
+    if (type && move) return `${type} → ${move}`;
+    if (type) return type;
+  }
+  return 'change';
+}
+
+/** One result segment per change — `kind path` header plus the change's unified
+ *  diff body — so the frontend renders the same red/green edit lines as other
+ *  engines (its diff parser ignores the header lines). */
+function fileChangeResult(changes: any[]): string {
+  return changes
+    .map((c) => {
+      const path = typeof c?.path === 'string' ? c.path : '(unknown file)';
+      const diff = typeof c?.diff === 'string' ? c.diff.trimEnd() : '';
+      return diff ? `${path}\n${diff}` : `${changeKindLabel(c?.kind)} ${path}`;
+    })
+    .join('\n');
+}
+
 /** Join every text-like content part of a message into one string. */
 function joinContent(content: any, want: string[]): string {
   if (!Array.isArray(content)) return '';
@@ -120,25 +149,24 @@ export function parseCodexResponseItem(item: any): ParsedItem[] {
     }
     return parts;
   }
-  if (type === 'file_change') {
+  if (type === 'file_change' || type === 'fileChange') {
     const id = String(item.id ?? '');
     if (!id) return [];
+    const camel = type === 'fileChange';
     const changes = Array.isArray(item.changes) ? item.changes : [];
-    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name: 'edit', input: { changes: changes.map((c: any) => ({ path: c.path, kind: c.kind })) } }];
-    if (item.status === 'completed') {
-      const summary = changes.length ? changes.map((c: any) => `${c.kind || 'change'} ${c.path}`).join('\n') : '(no changes)';
-      parts.push({ kind: 'toolResult', id, content: summary, isError: false });
-    }
-    return parts;
-  }
-  if (type === 'fileChange') {
-    const id = String(item.id ?? '');
-    if (!id) return [];
-    const changes = Array.isArray(item.changes) ? item.changes : [];
-    const parts: ParsedItem[] = [{ kind: 'toolCall', id, name: 'edit', input: { changes: changes.map((c: any) => ({ path: c.path, kind: c.kind })) } }];
-    if (item.status === 'completed' || item.status === 'failed') {
-      const summary = changes.length ? changes.map((c: any) => `${c.kind || 'change'} ${c.path}`).join('\n') : '(no changes)';
-      parts.push({ kind: 'toolResult', id, content: summary, isError: item.status === 'failed' });
+    // Keep `kind` a plain label and let the diff ride in the result text; the
+    // per-change diff is what the frontend needs to color the edit lines.
+    const parts: ParsedItem[] = [{
+      kind: 'toolCall',
+      id,
+      name: 'edit',
+      input: { changes: changes.map((c: any) => ({ path: c?.path, kind: changeKindLabel(c?.kind) })) },
+    }];
+    const done = camel
+      ? item.status === 'completed' || item.status === 'failed'
+      : item.status === 'completed';
+    if (done) {
+      parts.push({ kind: 'toolResult', id, content: fileChangeResult(changes) || '(no changes)', isError: item.status === 'failed' });
     }
     return parts;
   }
@@ -202,6 +230,9 @@ export class CodexStreamNormalizer {
   /** Latest `token_count` snapshot, reported on the result block at turn end. */
   private lastContextUsed?: number;
   private lastContextWindow?: number;
+  /** Wall-clock fallback for protocol variants which omit `durationMs` on the
+   *  completed turn. App Server normally supplies an exact duration. */
+  private turnStartedAt?: number;
 
   constructor(private readonly cb: NormalizerCallbacks) {}
 
@@ -225,6 +256,35 @@ export class CodexStreamNormalizer {
       contextUsed: this.lastContextUsed ?? usageContextTokens(usage),
       contextWindow: this.lastContextWindow,
     };
+  }
+
+  private startTurn(message: any): void {
+    // One App Server process can execute several foreground/background turns.
+    // Usage is per turn, so never let the previous turn's watermark leak into
+    // a later result when that later turn happens to emit no usage update.
+    this.sawTurnEnd = false;
+    this.lastContextUsed = undefined;
+    this.lastContextWindow = undefined;
+    const raw = Number(message?.startedAt ?? message?.started_at);
+    this.turnStartedAt = Number.isFinite(raw) && raw > 0
+      ? (raw < 1_000_000_000_000 ? raw * 1000 : raw)
+      : Date.now();
+  }
+
+  private durationFields(message: any): { durationMs?: number } {
+    const directRaw = message?.durationMs ?? message?.duration_ms;
+    const direct = Number(directRaw);
+    if (directRaw != null && Number.isFinite(direct) && direct >= 0) return { durationMs: direct };
+
+    const startedRaw = Number(message?.startedAt ?? message?.started_at);
+    const completedRaw = Number(message?.completedAt ?? message?.completed_at);
+    const toMs = (value: number): number => value < 1_000_000_000_000 ? value * 1000 : value;
+    if (Number.isFinite(startedRaw) && startedRaw > 0
+      && Number.isFinite(completedRaw) && completedRaw > 0) {
+      return { durationMs: Math.max(0, toMs(completedRaw) - toMs(startedRaw)) };
+    }
+    if (this.turnStartedAt != null) return { durationMs: Math.max(0, Date.now() - this.turnStartedAt) };
+    return {};
   }
 
   private segment(kind: 'assistant' | 'thinking', text: string, partial: boolean): void {
@@ -288,6 +348,11 @@ export class CodexStreamNormalizer {
       return;
     }
 
+    if (type === 'turn.started') {
+      this.startTurn(message);
+      return;
+    }
+
     if (type === 'item.started' || type === 'item.completed' || type === 'item.updated') {
       const item = message.item ?? message.raw_response_item ?? (message.payload && message.payload.type ? message.payload : null);
       const parts = parseCodexResponseItem(item);
@@ -317,24 +382,36 @@ export class CodexStreamNormalizer {
       return;
     }
 
+    if (type === 'thread/tokenUsage/updated') {
+      // Codex App Server v2 uses camelCase ThreadTokenUsage, unlike legacy
+      // `codex exec --json`'s snake_case token_count event. `last` is the
+      // current context watermark; `total` is cumulative billing usage and
+      // must not be shown as the next-turn context size.
+      const tokenUsage = message.tokenUsage ?? message.token_usage ?? {};
+      this.lastContextUsed = usageContextTokens(tokenUsage.last) ?? this.lastContextUsed;
+      const window = tokenUsage.modelContextWindow ?? tokenUsage.model_context_window;
+      if (typeof window === 'number' && Number.isFinite(window)) this.lastContextWindow = window;
+      return;
+    }
+
     if (type === 'turn.completed' || type === 'turn_complete' || type === 'task_complete') {
       this.sawTurnEnd = true;
       this.flushStream();
-      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: false, ...this.contextFields(message.usage), ts: Date.now() } });
+      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: false, ...this.durationFields(message), ...this.contextFields(message.usage), ts: Date.now() } });
       return;
     }
     if (type === 'turn.failed' || type === 'turn_failed') {
       this.sawTurnEnd = true;
       this.flushStream();
       const text = pickError(message);
-      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'error', ...this.contextFields(message.usage), ts: Date.now() } });
+      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'error', ...this.durationFields(message), ...this.contextFields(message.usage), ts: Date.now() } });
       if (text) this.cb.onEvent({ k: 'error', text });
       return;
     }
     if (type === 'turn.aborted' || type === 'turn_aborted') {
       this.sawTurnEnd = true;
       this.flushStream();
-      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'aborted', ...this.contextFields(message.usage), ts: Date.now() } });
+      this.cb.onEvent({ k: 'block', block: { id: `result_${crypto.randomUUID()}`, kind: 'result', isError: true, subtype: 'aborted', ...this.durationFields(message), ...this.contextFields(message.usage), ts: Date.now() } });
       return;
     }
 

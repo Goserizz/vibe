@@ -29,6 +29,13 @@ export interface StoredSession {
   owner?: string;
   /** True when cwd is an auto-created throwaway folder (kept out of "common dirs"). */
   ephemeral?: boolean;
+  /** 切换 agent 时的待注入历史（fidelity=partial 的降级方向才有）。
+   *
+   * 当目标 adapter 的运行时依赖不可用、无法安全构造原生会话时，把完整历史序列化
+   * 成文本暂存在这里，等该会话**第一次发消息**时作为上下文前缀注入，注入后立即
+   * 清空。
+   * 新增字段，旧数据没有它 —— 向后兼容。 */
+  switchPrimer?: string;
 }
 
 interface PersistShape {
@@ -70,19 +77,40 @@ class SessionStore {
     if (this.writeTimer) return;
     this.writeTimer = setTimeout(() => {
       this.writeTimer = null;
-      const payload: PersistShape = {
-        sessions: [...this.sessions.values()],
-        hidden: [...this.hiddenIds],
-        pinned: [...this.pinnedIds],
-      };
-      const tmp = `${config.sessionsFile}.tmp`;
-      try {
-        fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
-        fs.renameSync(tmp, config.sessionsFile);
-      } catch (err) {
-        log.error('failed to persist sessions', err);
-      }
+      this.writeNow();
     }, 250);
+  }
+
+  /** Atomic write: temp file + same-directory rename, so a reader never sees a
+   *  half-written sessions.json. */
+  private writeNow(): void {
+    const payload: PersistShape = {
+      sessions: [...this.sessions.values()],
+      hidden: [...this.hiddenIds],
+      pinned: [...this.pinnedIds],
+    };
+    const tmp = `${config.sessionsFile}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
+      fs.renameSync(tmp, config.sessionsFile);
+    } catch (err) {
+      log.error('failed to persist sessions', err);
+    }
+  }
+
+  /**
+   * 立刻落盘（跳过 debounce）。
+   *
+   * 用于「低频但关键」的状态变更 —— 比如切换 agent：新注册的原生会话 id 如果
+   * 在下一次 debounce 窗口内进程就挂了，会话会仍然指向旧 agent 的原生 id，
+   * 用户重开时会续到错误的引擎上。
+   */
+  flush(): void {
+    if (this.writeTimer) {
+      clearTimeout(this.writeTimer);
+      this.writeTimer = null;
+    }
+    this.writeNow();
   }
 
   list(): StoredSession[] {
@@ -227,7 +255,7 @@ class SessionStore {
 export function toMeta(
   s: StoredSession,
   running: boolean,
-  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode' = 'vibe',
+  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode' | 'codebuddy' | 'opencode' | 'devin' = 'vibe',
   backgroundTasksRunning = false,
 ): SessionMeta {
   return {

@@ -21,8 +21,11 @@ export function PermissionPrompt({ sessionId }: { sessionId: string }) {
   // ExitPlanMode is the plan-review gate — show the plan in a modal instead of
   // the generic allow/deny card. Claude ≥2.1 injects the plan text into the
   // tool input, which the server copies to req.plan; the input also carries the
-  // permissions the plan needs.
-  if (req.toolName === 'ExitPlanMode') return <PlanPrompt req={req} respond={respond} />;
+  // permissions the plan needs. A non-empty `plan` also catches any
+  // non-canonical tool-name spelling the server didn't rewrite.
+  if (req.toolName === 'ExitPlanMode' || (typeof req.plan === 'string' && req.plan.trim())) {
+    return <PlanPrompt req={req} respond={respond} />;
+  }
 
   const meta = toolMeta(req.toolName, req.input);
   const Icon = meta.icon;

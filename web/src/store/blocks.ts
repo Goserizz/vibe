@@ -1,4 +1,10 @@
-import type { ChatBlock, LiveEvent } from '@shared/protocol';
+import {
+  settleInterruptedTools,
+  sortBlocksChronologically,
+  type ChatBlock,
+  type LiveEvent,
+  type SnapshotPage,
+} from '@shared/protocol';
 
 /**
  * The rendered conversation for one session plus the live metadata that drives
@@ -11,16 +17,68 @@ export interface SessionView {
   lastSeq: number;
   loaded: boolean;
   running: boolean;
+  /** Older history exists server-side; `cursor` fetches the next page. */
+  hasMore: boolean;
+  cursor?: string;
+  /** A loadOlder() request is in flight (guards double-fires). */
+  loadingOlder: boolean;
 }
 
 export function emptyView(): SessionView {
-  return { blocks: [], index: new Map(), lastSeq: 0, loaded: false, running: false };
+  return { blocks: [], index: new Map(), lastSeq: 0, loaded: false, running: false, hasMore: false, loadingOlder: false };
 }
 
-export function viewFromBlocks(blocks: ChatBlock[], seq: number, running: boolean): SessionView {
+/** The settling/filtering viewFromBlocks applies to freshly fetched history —
+ *  shared by the first page and prepended older pages. */
+function settleHistory(blocks: ChatBlock[], running: boolean): ChatBlock[] {
+  const kept = blocks.filter((b) => b.kind !== 'thinking' || b.text);
+  const settled = running
+    ? kept
+    : settleInterruptedTools(kept).map((b) =>
+        (b.kind === 'assistant' || b.kind === 'thinking') && b.streaming
+          ? { ...b, streaming: false }
+          : b,
+      );
+  return sortBlocksChronologically(settled);
+}
+
+export function viewFromBlocks(
+  blocks: ChatBlock[],
+  seq: number,
+  running: boolean,
+  page?: SnapshotPage,
+): SessionView {
   const index = new Map<string, number>();
-  blocks.forEach((b, i) => index.set(b.id, i));
-  return { blocks, index, lastSeq: seq, loaded: true, running };
+  // Empty thinking shells — an agent generation cancelled before its first
+  // reasoning token — never render (ThinkingView bails on empty text), so drop
+  // them here too. And history is static: a persisted streaming flag would show
+  // "Thinking…" forever, and a tool left `running` by a dead transport would
+  // pulse "Running…" forever — unless this fetch caught a turn that is live
+  // right now. Transcript files are also append-only: a tool stuck `running`
+  // is force-flushed after the turn's result block even when its `ts` is
+  // older, so restore chronological order by sorting on `ts`.
+  const ordered = settleHistory(blocks, running);
+  ordered.forEach((b, i) => index.set(b.id, i));
+  return {
+    blocks: ordered,
+    index,
+    lastSeq: seq,
+    loaded: true,
+    running,
+    hasMore: page?.hasMore ?? false,
+    cursor: page?.cursor,
+    loadingOlder: false,
+  };
+}
+
+/** Prepend one older page onto a loaded view. Older blocks come first; ids
+ *  already present keep their existing (newer) copy. */
+export function prependPage(view: SessionView, blocks: ChatBlock[], page: SnapshotPage): SessionView {
+  const older = settleHistory(blocks, view.running).filter((b) => !view.index.has(b.id));
+  const merged = [...older, ...view.blocks];
+  const index = new Map<string, number>();
+  merged.forEach((b, i) => index.set(b.id, i));
+  return { ...view, blocks: merged, index, hasMore: page.hasMore, cursor: page.cursor, loadingOlder: false };
 }
 
 /**

@@ -34,7 +34,17 @@ export type EffortLevel =
   | 'disabled';
 
 /** Which CLI engine drives a session. */
-export type AgentKind = 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode';
+export type AgentKind =
+  | 'claude'
+  | 'cursor'
+  | 'codex'
+  | 'kimi'
+  | 'kiro'
+  | 'grok'
+  | 'zcode'
+  | 'codebuddy'
+  | 'opencode'
+  | 'devin';
 
 // ---------------------------------------------------------------------------
 // Normalized conversation blocks (what the client renders)
@@ -52,6 +62,8 @@ interface BaseBlock {
 export interface UserBlock extends BaseBlock {
   kind: 'user';
   text: string;
+  /** Optional image data URLs shown as thumbnails in the user bubble (Vibot). */
+  images?: string[];
 }
 
 export interface AssistantBlock extends BaseBlock {
@@ -74,6 +86,13 @@ export interface ToolBlock extends BaseBlock {
   status: ToolStatus;
   result?: string;
   isError?: boolean;
+  /** Present when `result` was cut short — `resultSize` is the full string
+   *  length and `resultRef` is an opaque locator the client can use to fetch
+   *  the unabridged text on demand (`blob:` for a persisted sidecar, `line:`
+   *  for a byte offset into the transcript). */
+  resultTruncated?: boolean;
+  resultSize?: number;
+  resultRef?: string;
 }
 
 export interface ResultBlock extends BaseBlock {
@@ -110,6 +129,38 @@ export type ChatBlock =
   | ResultBlock
   | ErrorBlock
   | SystemBlock;
+
+/** A tool block still `running` after its run ended can never receive a result —
+ *  the transport died mid-call (SSH drop, abort, crash). Close it with a note
+ *  instead of letting history render an eternal "Running…" row. Returns the
+ *  same reference when there is nothing to settle. */
+export function settleInterruptedTool<T extends ChatBlock>(block: T): T {
+  return block.kind === 'tool' && block.status === 'running'
+    ? ({ ...block, status: 'done', result: '(结果未送达 — 连接中断或轮次已结束)' } as T)
+    : block;
+}
+
+/** Array form of settleInterruptedTool — pure, returns copies where changed. */
+export function settleInterruptedTools<T extends ChatBlock>(blocks: T[]): T[] {
+  return blocks.map(settleInterruptedTool);
+}
+
+/** Transcript files are append-only, so a block skipped by every incremental
+ *  flush (e.g. a tool stuck `running`) is force-flushed at turn end — after the
+ *  result block even when its `ts` is older. Stable-sorting by `ts` restores
+ *  chronological order without rewriting files. */
+export function sortBlocksChronologically<T extends ChatBlock>(blocks: T[]): T[] {
+  return [...blocks].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+}
+
+/** One page of a conversation snapshot. `blocks` are the newest `limit` (or
+ *  fewer) blocks; `hasMore` marks older history that wasn't included, and
+ *  `cursor` is the opaque handle the client sends back to fetch the next
+ *  older page. Absent fields = the whole conversation fit (legacy shape). */
+export interface SnapshotPage {
+  hasMore: boolean;
+  cursor?: string;
+}
 
 /** Status of a single task in an agent's todo list. */
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -153,7 +204,7 @@ export interface SessionMeta {
   backgroundTasksRunning: boolean;
   running: boolean;
   /** 'vibe' = managed in Vibe; otherwise discovered from that CLI. */
-  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode';
+  source: 'vibe' | 'claude' | 'cursor' | 'codex' | 'kimi' | 'kiro' | 'grok' | 'zcode' | 'codebuddy' | 'opencode' | 'devin';
   /** Which machine the project lives on (local machine name, or an SSH host). */
   host: string;
   /** True when the cwd is an auto-created throwaway folder under the fixed
@@ -167,6 +218,47 @@ export interface SessionMeta {
    *  never renders it). Undefined on discovered local CLI sessions, which every
    *  account on the shared local machine can see. */
   owner?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Agent 互转（把已有会话切换成另一个 agent，历史无损保留）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一个转换方向的保真等级。只取决于**目标** agent（中间格式是统一的归一化
+ * transcript，来源不影响重建能力）：
+ *  - `full`：完整历史（文本 + 工具调用与结果）已重建成目标 agent 的原生会话，
+ *    目标 CLI 用原生 resume 机制接手；
+ *  - `partial`：本机 SQLite 原生模块不可加载时的诚实降级；历史将作为**首轮
+ *    上下文**注入。标准安装下 10 个目标均为 full。
+ */
+export type SwitchFidelity = 'full' | 'partial';
+
+/** `GET /api/meta/switch-fidelity` 的响应。 */
+export interface SwitchFidelityMatrix {
+  /** 按目标 agent 索引 —— UI 真正需要的那份（保真只取决于目标）。 */
+  byTarget: Record<AgentKind, SwitchFidelity>;
+  /** 10×10 = 100 个方向的完整表格，供文档与测试核对。 */
+  matrix: { from: AgentKind; to: AgentKind; fidelity: SwitchFidelity }[];
+}
+
+/** `POST /api/sessions/:id/switch` 的响应。 */
+export interface SwitchSessionResult {
+  /** 切换后的会话（agent / model / claudeSessionId 已改写）。 */
+  session: SessionMeta;
+  switch: {
+    from: AgentKind;
+    to: AgentKind;
+    fidelity: SwitchFidelity;
+    /** 新的原生会话 id；partial 方向为空串。 */
+    nativeId: string;
+    /** 面向用户的保真说明（UI 直接展示）。 */
+    note: string;
+    /** 写出的原生会话文件（partial 方向为空）。 */
+    files: string[];
+    /** 被迁移的历史块数。 */
+    blocks: number;
+  };
 }
 
 /** Sidebar display order: favorited (pinned) sessions first, then most-recently-
@@ -377,8 +469,12 @@ export interface AgentUpdateResult {
 // Agent CLI sign-in (Cursor / Codex link-based login)
 // ---------------------------------------------------------------------------
 
-/** Agents whose CLIs support a link-based login Vibe can drive. */
-export type LoginAgent = 'cursor' | 'codex';
+/** Agents whose sign-in Vibe manages. Cursor/Codex use a link-based CLI login
+ *  Vibe can drive; Devin's manual-token flow additionally needs the auth code
+ *  the browser shows pasted back into the CLI's stdin; CodeBuddy has no headless
+ *  login, so Vibe manages pasted API-key/token credentials instead (injected as
+ *  env vars on every turn). */
+export type LoginAgent = 'cursor' | 'codex' | 'codebuddy' | 'devin';
 
 export type AgentLoginPhase =
   | 'starting' /** CLI spawned, waiting for it to print the link */
@@ -398,6 +494,11 @@ export interface AgentLoginStatus {
   phase: AgentLoginPhase;
   url?: string;
   code?: string;
+  /** True when this flow needs the user to type/paste something back into the
+   *  CLI (Devin's manual-token flow prints a link, then waits for the auth code
+   *  on its stdin). Set from the agent's login spec when the flow starts, so
+   *  the UI can render an input box as soon as the link is shown. */
+  needsInput?: boolean;
   /** Tail of the CLI output — context for debugging a failure. */
   output?: string;
   error?: string;
@@ -582,6 +683,27 @@ export interface VibotMemory {
   updatedAt: number;
 }
 
+/** One clickable option in a Vibot ask-user question. */
+export interface VibotAskOption {
+  label: string;
+  description?: string;
+}
+
+/** One clarifying question Vibot poses via the interactive ask dialog. */
+export interface VibotAskQuestion {
+  question: string;
+  header?: string;
+  options: VibotAskOption[];
+  multiSelect?: boolean;
+}
+
+/** A pending ask-user request broadcast to Vibot UI subscribers. */
+export interface VibotAskRequest {
+  callId: string;
+  questions: VibotAskQuestion[];
+  ts: number;
+}
+
 // ---------------------------------------------------------------------------
 // Agent background tasks
 // ---------------------------------------------------------------------------
@@ -630,6 +752,104 @@ export interface BackgroundTask {
 }
 
 // ---------------------------------------------------------------------------
+// Durable monitors
+// ---------------------------------------------------------------------------
+
+/** A monitor probe is deliberately small and deterministic. The command form
+ * treats exit code 0 as healthy; the HTTP form treats the configured status
+ * range (and optional body substring) as healthy. Agent reasoning happens only
+ * after a probe has opened an incident. */
+export type MonitorProbe =
+  | {
+      kind: 'command';
+      command: string;
+      /** Hard wall-clock limit for one check. */
+      timeoutMs: number;
+    }
+  | {
+      kind: 'http';
+      url: string;
+      method: 'GET' | 'HEAD';
+      timeoutMs: number;
+      expectedStatusMin: number;
+      expectedStatusMax: number;
+      /** When present, a successful status is healthy only if the response
+       * body contains this literal text. */
+      bodyIncludes?: string;
+    };
+
+export type MonitorStatus = 'draft' | 'paused' | 'checking' | 'healthy' | 'firing' | 'error';
+export type MonitorEventStatus = 'open' | 'handling' | 'resolved' | 'escalated';
+export type MonitorActionMode = 'notify' | 'wake-agent';
+
+/** User-editable part of a monitor. Ownership and runtime state are assigned
+ * by the server and therefore never accepted from the browser/model. */
+export interface MonitorInput {
+  name: string;
+  /** Stable Vibe session to wake. Native agent ids are intentionally not used,
+   * so switching that session to another agent keeps the monitor attached. */
+  sessionId?: string;
+  /** Undefined means the Vibe server machine; otherwise a host-registry name. */
+  host?: string;
+  cwd?: string;
+  intervalMs: number;
+  probe: MonitorProbe;
+  actionMode: MonitorActionMode;
+  /** Runbook delivered with every incident wake. */
+  instructions: string;
+  maxWakeAttempts: number;
+  remindEveryMs: number;
+  notifyOnRecovery: boolean;
+}
+
+/** Persisted monitor as returned by the API. */
+export interface Monitor extends MonitorInput {
+  id: string;
+  enabled: boolean;
+  status: MonitorStatus;
+  createdAt: number;
+  updatedAt: number;
+  nextCheckAt?: number;
+  lastCheckAt?: number;
+  lastHealthyAt?: number;
+  lastSummary?: string;
+  lastError?: string;
+  consecutiveFailures: number;
+  activeEventId?: string;
+}
+
+/** One continuous unhealthy period. It remains the same event across repeated
+ * polls and agent attempts, then resolves only after a healthy probe. */
+export interface MonitorEvent {
+  id: string;
+  monitorId: string;
+  kind: 'unhealthy' | 'probe-error';
+  status: MonitorEventStatus;
+  summary: string;
+  detail?: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  resolvedAt?: number;
+  attemptCount: number;
+  lastDispatchAt?: number;
+  nextDispatchAt?: number;
+}
+
+/** Result of a read-only test/run. `detail` is capped by the server before it
+ * crosses the API boundary or enters an agent prompt. */
+export interface MonitorProbeResult {
+  healthy: boolean;
+  kind: 'observation' | 'probe-error';
+  summary: string;
+  detail?: string;
+  fingerprint: string;
+  checkedAt: number;
+  durationMs: number;
+  exitCode?: number;
+  httpStatus?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Live events (seq-tagged; these mutate block state and are replayable)
 // ---------------------------------------------------------------------------
 
@@ -655,8 +875,9 @@ export type ClientMessage =
   | { t: 'permission'; sessionId: string; requestId: string; decision: PermissionDecision }
   | { t: 'vibot_subscribe'; convId: string; lastSeq: number }
   | { t: 'vibot_unsubscribe'; convId: string }
-  | { t: 'vibot_send'; convId: string; clientMsgId: string; text: string }
+  | { t: 'vibot_send'; convId: string; clientMsgId: string; text: string; images?: string[] }
   | { t: 'vibot_abort'; convId: string }
+  | { t: 'vibot_answer'; convId: string; callId: string; answers: Record<string, string | string[]> }
   | { t: 'ping' };
 
 // ---------------------------------------------------------------------------
@@ -686,6 +907,16 @@ export type ServerEvent =
     }
   | { t: 'session_meta'; session: SessionMeta }
   | { t: 'session_removed'; sessionId: string }
+  /** A durable monitor or one of its incidents changed. Clients that have the
+   * monitor panel open can refresh its REST snapshot. */
+  | { t: 'monitor_changed'; monitorId: string }
+  | {
+      t: 'monitor_notice';
+      monitorId: string;
+      sessionId: string;
+      level: 'alert' | 'recovery' | 'escalated';
+      text: string;
+    }
   // -- Vibot (separate interface; reuses LiveEvent so BlockView renders it) --
   | { t: 'vibot_event'; convId: string; seq: number; ev: LiveEvent }
   | {
@@ -696,7 +927,11 @@ export type ServerEvent =
       running: boolean;
       /** When true the client must discard live state and reload history. */
       reset: boolean;
+      /** Ask-user dialogs still waiting for an answer (replay for late joiners). */
+      pendingAsks: VibotAskRequest[];
     }
+  | { t: 'vibot_ask'; convId: string; request: VibotAskRequest }
+  | { t: 'vibot_ask_resolved'; convId: string; callId: string }
   | { t: 'vibot_conv_meta'; conv: VibotConvMeta }
   | { t: 'vibot_conv_removed'; convId: string }
   | { t: 'vibot_conv_list'; convs: VibotConvMeta[] }

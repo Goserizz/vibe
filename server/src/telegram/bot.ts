@@ -45,7 +45,7 @@ type BotContext = Context;
 const PAGE_SIZE = 8;
 const effortLevels = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const permissionModes = new Set(['default', 'plan', 'acceptEdits', 'bypassPermissions']);
-const agents = new Set(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode']);
+const agents = new Set(['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin']);
 
 /** Cache the last listed sessions per chat so /use N and session buttons resolve. */
 const listCache = new Map<number, SessionMeta[]>();

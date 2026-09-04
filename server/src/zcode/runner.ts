@@ -2,6 +2,14 @@ import { log } from '../log.js';
 import { ZcodeAppServerClient, type ZcodeRunOptions } from './appServer.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
+import { applyZcodeMcp } from '../mcp/apply.js';
+
+/** SSH link corruption (bad packets) that kills the transport mid-stream —
+ *  retry is safe (session state persists remotely, client re-resumes).
+ *  "transport stalled" is the silent variant: the link stays up (keepalives
+ *  pass) but a setup request's reply is lost — the setup timeout rejects with
+ *  it, and a backoff retry over a fresh connection clears it. */
+const TRANSPORT_DEATH = /exited mid-turn|message authentication code incorrect|ssh_dispatch_run_fatal|transport stalled/i;
 
 interface Outcome {
   transient: boolean;
@@ -29,6 +37,11 @@ export function startZcodeRun(opts: ZcodeRunOptions, cb: RunCallbacks): RunHandl
   };
 
   const done = (async () => {
+    // ZCode reads MCP from its JSON config when app-server starts.
+    await applyZcodeMcp(
+      opts.mcpServers ?? [],
+      opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined,
+    );
     for (let attempt = 0; ; attempt++) {
       const startedAt = Date.now();
       client = new ZcodeAppServerClient({ ...opts, resume }, wrappedCb);
@@ -49,9 +62,20 @@ export function startZcodeRun(opts: ZcodeRunOptions, cb: RunCallbacks): RunHandl
         log.debug('zcode run aborted');
         return;
       }
-      if (outcome.transient && !producedAny && attempt < MAX_RETRIES) {
+      // Transport death can strike mid-stream, after content already streamed —
+      // still retryable (the resume picks up the remote session state), but
+      // capped tighter than the generic case to avoid a resume storm.
+      const transportDeath = Boolean(outcome.error && TRANSPORT_DEATH.test(outcome.error));
+      if (outcome.transient && (!producedAny || transportDeath) && attempt < (transportDeath ? 3 : MAX_RETRIES)) {
         const backoff = backoffFor(attempt);
-        log.warn(`zcode transient error, retry ${attempt + 1}/${MAX_RETRIES} in ${backoff}ms`);
+        const cap = transportDeath ? 3 : MAX_RETRIES;
+        log.warn(`zcode transient error${transportDeath ? ' (transport death)' : ''}, retry ${attempt + 1}/${cap} in ${backoff}ms`);
+        if (transportDeath && producedAny) {
+          wrappedCb.onEvent({
+            k: 'error',
+            text: `⚠️ SSH 链路中断（传输数据损坏），${Math.round(backoff / 1000)}s 后自动续跑（第 ${attempt + 1}/3 次）…`,
+          });
+        }
         try {
           await sleep(backoff, abortController.signal);
         } catch {

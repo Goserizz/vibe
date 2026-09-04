@@ -21,12 +21,18 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const kiroPermissionModes = useStore((s) => s.kiroPermissionModes);
   const grokModels = useStore((s) => s.grokModels);
   const zcodeModels = useStore((s) => s.zcodeModels);
+  const codebuddyModels = useStore((s) => s.codebuddyModels);
+  const devinModels = useStore((s) => s.devinModels);
+  const opencodeModels = useStore((s) => s.opencodeModels);
   const loadCursorModels = useStore((s) => s.loadCursorModels);
   const loadCodexModels = useStore((s) => s.loadCodexModels);
   const loadKimiCapabilities = useStore((s) => s.loadKimiCapabilities);
   const loadKiroModels = useStore((s) => s.loadKiroModels);
   const loadGrokModels = useStore((s) => s.loadGrokModels);
   const loadZcodeModels = useStore((s) => s.loadZcodeModels);
+  const loadCodebuddyModels = useStore((s) => s.loadCodebuddyModels);
+  const loadDevinModels = useStore((s) => s.loadDevinModels);
+  const loadOpencodeModels = useStore((s) => s.loadOpencodeModels);
   const createSession = useStore((s) => s.createSession);
   const presets = useStore((s) => s.presets);
   const upsertPreset = useStore((s) => s.upsertPreset);
@@ -63,8 +69,8 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
 
   const isRemote = host !== '';
   const modelOptions = useMemo(
-    () => modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels),
-    [agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels],
+    () => modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels),
+    [agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels],
   );
   const modelOpt = useMemo(() => modelOptions.find((m) => m.value === model) ?? null, [modelOptions, model]);
   const effortLevels = useMemo(() => effortLevelsForAgent(agent, modelOpt), [agent, modelOpt]);
@@ -164,7 +170,10 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     void loadKiroModels(h);
     void loadGrokModels(h);
     void loadZcodeModels(h);
-  }, [host, isAdmin, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels]);
+    void loadCodebuddyModels(h);
+    void loadDevinModels(h);
+    void loadOpencodeModels(h);
+  }, [host, isAdmin, loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels, loadCodebuddyModels, loadDevinModels, loadOpencodeModels]);
   useEffect(() => {
     return () => {
       const h = activeHostRef.current || undefined;
@@ -174,8 +183,11 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
       void loadKiroModels(h);
       void loadGrokModels(h);
       void loadZcodeModels(h);
+      void loadCodebuddyModels(h);
+      void loadDevinModels(h);
+      void loadOpencodeModels(h);
     };
-  }, [loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels]);
+  }, [loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels, loadCodebuddyModels, loadDevinModels, loadOpencodeModels]);
 
   // If the current model disappeared after a host switch (or a remembered
   // model is no longer valid), fall back to a safe default.
@@ -191,12 +203,12 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     setPermissionMode(permissionOptions[0]?.value ?? 'default');
   }, [permissionMode, permissionOptions]);
 
-  // Drop an effort the current agent/model does not advertise (Codex and ZCode
-  // are per-model; Grok has no max/ultra).
+  // Drop an effort the current agent/model does not advertise (Codex, ZCode and
+  // Devin are per-model; Grok has no max/ultra).
   useEffect(() => {
     if (!effortLevels.length) return;
     if (effortLevels.some((e) => e.value === effort)) return;
-    if (agent === 'codex' || agent === 'zcode') {
+    if (agent === 'codex' || agent === 'zcode' || agent === 'devin') {
       setEffort((modelOpt?.defaultEffort as EffortLevel) || (agent === 'codex' ? 'medium' : defaultEffortForAgent(agent)));
       return;
     }
@@ -410,7 +422,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
                       <option value="">Custom</option>
                       {presets.map((p) => (
                         <option key={p.name} value={p.name}>
-                          {`${p.name} — ${agentLabel(p.agent)} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels)} · ${effortLabel(p.effort, p.agent)}`}
+                          {`${p.name} — ${agentLabel(p.agent)} · ${modelLabel(p.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels)} · ${effortLabel(p.effort, p.agent)}`}
                         </option>
                       ))}
                     </select>

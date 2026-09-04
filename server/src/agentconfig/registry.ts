@@ -64,6 +64,19 @@ const AGENT_CONFIGS: Record<AgentKind, ConfigFileDef[]> = {
     // preserved as-is on edit (same policy as the other agents' config files).
     { id: 'config', label: 'config.json', rel: '~/.zcode/cli/config.json', local: () => path.join(home(), '.zcode', 'cli', 'config.json') },
   ],
+  codebuddy: [
+    { id: 'settings', label: 'settings.json', rel: '~/.codebuddy/settings.json', local: () => path.join(home(), '.codebuddy', 'settings.json') },
+  ],
+  opencode: [
+    // Main config (JSONC — comments preserved, raw text round-trip).
+    // auth.json holds credentials and is deliberately not exposed here.
+    { id: 'config', label: 'opencode.json', rel: '~/.config/opencode/opencode.json', local: () => path.join(home(), '.config', 'opencode', 'opencode.json') },
+  ],
+  devin: [
+    // User config lives under ~/.config (XDG), unlike Devin's data dir which
+    // sits under ~/.local/share. Credentials are deliberately not exposed here.
+    { id: 'config', label: 'config.json', rel: '~/.config/devin/config.json', local: () => path.join(home(), '.config', 'devin', 'config.json') },
+  ],
 };
 
 /** Resolve an opaque `id` to its fixed def, or throw. This is the confinement check. */

@@ -14,6 +14,10 @@ import type {
   LoginResponse,
   McpConfigSnapshot,
   McpServerDef,
+  Monitor,
+  MonitorEvent,
+  MonitorInput,
+  MonitorProbeResult,
   PermissionMode,
   ProjectDir,
   RemoteHost,
@@ -21,10 +25,13 @@ import type {
   SkillDetail,
   SkillEntry,
   SkillScope,
+  SnapshotPage,
   ConfigFileDetail,
   ConfigFileEntry,
   SessionMeta,
   SessionPreset,
+  SwitchFidelityMatrix,
+  SwitchSessionResult,
   VibotConfigClient,
   VibotConvMeta,
   VibotMemory,
@@ -101,6 +108,48 @@ export const api = {
 
   listProjects: () => request<{ projects: ProjectDir[] }>('/projects').then((r) => r.projects),
 
+  // -- Durable monitors -----------------------------------------------------
+
+  listMonitors: () => request<{ monitors: Monitor[] }>('/monitors').then((r) => r.monitors),
+
+  listMonitorEvents: (monitorId?: string, limit = 100) => {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (monitorId) qs.set('monitorId', monitorId);
+    return request<{ events: MonitorEvent[] }>(`/monitor-events?${qs.toString()}`).then((r) => r.events);
+  },
+
+  createMonitor: (input: MonitorInput) =>
+    request<{ monitor: Monitor }>('/monitors', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }).then((r) => r.monitor),
+
+  updateMonitor: (id: string, input: MonitorInput) =>
+    request<{ monitor: Monitor }>(`/monitors/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }).then((r) => r.monitor),
+
+  deleteMonitor: (id: string) =>
+    request<{ ok: boolean }>(`/monitors/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  setMonitorEnabled: (id: string, enabled: boolean) =>
+    request<{ monitor: Monitor }>(`/monitors/${encodeURIComponent(id)}/enabled`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }).then((r) => r.monitor),
+
+  testMonitor: (input: MonitorInput) =>
+    request<{ result: MonitorProbeResult }>('/monitors/test', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }).then((r) => r.result),
+
+  runMonitor: (id: string) =>
+    request<{ result: MonitorProbeResult; monitor: Monitor }>(`/monitors/${encodeURIComponent(id)}/run`, {
+      method: 'POST',
+    }),
+
   listCursorModels: (host?: string) => {
     const q = host ? `?host=${encodeURIComponent(host)}` : '';
     return request<{ models: { value: string; label: string }[] }>(`/cursor/models${q}`).then((r) => r.models);
@@ -129,6 +178,21 @@ export const api = {
   listZcodeModels: (host?: string) => {
     const q = host ? `?host=${encodeURIComponent(host)}` : '';
     return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/zcode/models${q}`);
+  },
+
+  listCodebuddyModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/codebuddy/models${q}`);
+  },
+
+  listDevinModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/devin/models${q}`);
+  },
+
+  listOpencodeModels: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ models: ModelOption[]; permissions: PermissionOption[] }>(`/opencode/models${q}`);
   },
 
   validateDir: (path: string) =>
@@ -267,6 +331,41 @@ export const api = {
     return request<{ ok: boolean }>(`/agents/${agent}/login${q}`, { method: 'DELETE' });
   },
 
+  /** Deliver the pasted auth code to a flow waiting for it (Devin). */
+  submitAgentLoginInput: (agent: LoginAgent, text: string, host?: string) =>
+    request<{ login: AgentLoginStatus }>(`/agents/${agent}/login/input`, {
+      method: 'POST',
+      body: JSON.stringify({ text, host: host ?? '' }),
+    }).then((r) => r.login),
+
+  /** Sign the CLI out on a host. Destructive: only ever called from an explicit
+   *  user action (Devin refuses to re-login while already signed in). */
+  agentLogout: (agent: LoginAgent, host?: string) =>
+    request<{ ok: boolean }>(`/agents/${agent}/logout`, {
+      method: 'POST',
+      body: JSON.stringify({ host: host ?? '' }),
+    }),
+
+  // -- CodeBuddy credential sign-in (no link flow — paste a key / token) -----
+
+  codebuddyAccount: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<AgentLoginAccount>(`/agents/codebuddy/account${q}`);
+  },
+
+  /** Validate pasted credentials with a probe turn, then persist them. */
+  saveCodebuddyCredentials: (input: { apiKey?: string; authToken?: string; host?: string }) =>
+    request<{ ok: boolean; account: AgentLoginAccount }>('/agents/codebuddy/credentials', {
+      method: 'POST',
+      body: JSON.stringify({ ...input, host: input.host ?? '' }),
+    }),
+
+  /** Logout: remove the stored credential file (TUI logins untouched). */
+  clearCodebuddyCredentials: (host?: string) => {
+    const q = host ? `?host=${encodeURIComponent(host)}` : '';
+    return request<{ ok: boolean; existed: boolean }>(`/agents/codebuddy/credentials${q}`, { method: 'DELETE' });
+  },
+
   updateHostAgent: (name: string, agent: AgentKind) =>
     request<AgentUpdateResult>(`/hosts/${encodeURIComponent(name)}/agents/${agent}/update`, {
       method: 'POST',
@@ -278,6 +377,23 @@ export const api = {
       body: JSON.stringify(patch),
     }).then((r) => r.session),
 
+  /**
+   * 把一个会话切换成另一个 agent（历史无损保留）。
+   * `fidelity` 为 `partial` 时表示本次目标 agent 的原生写入失败或运行时
+   * 依赖不可用，历史会作为首轮上下文注入 —— UI 需要就此提示用户。
+   */
+  switchSessionAgent: (
+    id: string,
+    input: { agent: AgentKind; model?: string; carryThinking?: boolean },
+  ): Promise<SwitchSessionResult> =>
+    request<SwitchSessionResult>(`/sessions/${encodeURIComponent(id)}/switch`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  /** 10×10 = 100 个转换方向各自的保真等级（由目标 agent 的存储方式决定）。 */
+  switchFidelity: (): Promise<SwitchFidelityMatrix> => request<SwitchFidelityMatrix>('/meta/switch-fidelity'),
+
   deleteSession: (id: string) => request<{ ok: boolean }>(`/sessions/${id}`, { method: 'DELETE' }),
 
   setSessionPinned: (id: string, pinned: boolean) =>
@@ -286,7 +402,18 @@ export const api = {
       body: JSON.stringify({ pinned }),
     }),
 
-  getMessages: (id: string) => request<{ blocks: ChatBlock[]; seq: number }>(`/sessions/${id}/messages`),
+  getMessages: (id: string, opts: { cursor?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.cursor) qs.set('cursor', opts.cursor);
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : '';
+    return request<{ blocks: ChatBlock[]; seq: number } & SnapshotPage>(`/sessions/${id}/messages${suffix}`);
+  },
+  /** Unabridged text of a tool result that arrived truncated in a page. */
+  getBlockResult: (id: string, blockId: string, ref: string) =>
+    request<{ blockId: string; size: number; text: string }>(
+      `/sessions/${id}/blocks/${encodeURIComponent(blockId)}/result?ref=${encodeURIComponent(ref)}`,
+    ),
 
   search: (q: string) =>
     request<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(q)}`).then((r) => r.results),

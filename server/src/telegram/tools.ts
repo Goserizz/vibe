@@ -79,6 +79,8 @@ const TOOL_KIND_ALIASES: Record<string, ToolKind> = {
   task: 'task',
   subagent: 'task',
   exitplanmode: 'plan',
+  createplan: 'plan',
+  enterplanmode: 'plan',
   readlints: 'lints',
   getdiagnostics: 'lints',
   diagnostics: 'lints',

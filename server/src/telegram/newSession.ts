@@ -9,6 +9,9 @@ import { discoverKimiCapabilities, discoverRemoteKimiCapabilities } from '../kim
 import { KIRO_PERMISSIONS, listKiroModels, listRemoteKiroModels } from '../kiro/models.js';
 import { GROK_PERMISSIONS, listGrokModels, listRemoteGrokModels } from '../grok/models.js';
 import { ZCODE_PERMISSIONS, listRemoteZcodeModels, listZcodeModels } from '../zcode/models.js';
+import { CODEBUDDY_PERMISSIONS, listCodebuddyModels, listRemoteCodebuddyModels } from '../codebuddy/models.js';
+import { DEVIN_PERMISSIONS, listDevinModels, listRemoteDevinModels } from '../devin/models.js';
+import { OPENCODE_PERMISSIONS, listOpencodeModels, listRemoteOpencodeModels } from '../opencode/models.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import { hub } from '../ws/hub.js';
 import type { AgentKind, EffortLevel, PermissionMode, SessionMeta } from '../../../shared/protocol.js';
@@ -51,6 +54,9 @@ const PERMISSIONS: Record<AgentKind, { value: PermissionMode; label: string }[]>
   kiro: KIRO_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
   grok: GROK_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
   zcode: ZCODE_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
+  codebuddy: CODEBUDDY_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
+  opencode: OPENCODE_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
+  devin: DEVIN_PERMISSIONS.map((p) => ({ value: p.value, label: p.label })),
 };
 
 const EFFORTS_CLAUDE: { value: EffortLevel; label: string }[] = [
@@ -77,6 +83,15 @@ const EFFORTS_GROK: { value: EffortLevel; label: string }[] = [
   { value: 'xhigh', label: 'Extra High' },
 ];
 
+/** opencode model variants: provider-specific reasoning effort. */
+const EFFORTS_OPENCODE: { value: EffortLevel; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'X-High' },
+  { value: 'max', label: 'Max' },
+];
+
 /** Telegram's model-agnostic ZCode ladder (union of the per-model ladders the
  *  catalog probe returns; the server maps to the nearest level per model). */
 const EFFORTS_ZCODE: { value: EffortLevel; label: string }[] = [
@@ -100,9 +115,13 @@ function clampEffort(agent: AgentKind, effort: EffortLevel | undefined): EffortL
 
 function effortsFor(agent: AgentKind): { value: EffortLevel; label: string }[] {
   if (agent === 'kimi' || agent === 'cursor') return [];
+  if (agent === 'opencode') return EFFORTS_OPENCODE;
   if (agent === 'codex') return EFFORTS_CODEX;
   if (agent === 'grok') return EFFORTS_GROK;
   if (agent === 'zcode') return EFFORTS_ZCODE;
+  // Devin's effort ladder tops out at `max` — the same as Claude's, so the
+  // shared ladder already matches what its catalog advertises.
+  if (agent === 'devin') return EFFORTS_CLAUDE;
   return EFFORTS_CLAUDE;
 }
 
@@ -148,7 +167,13 @@ function defaultDraft(chatId?: number): NewDraft {
                 ? config.defaultGrokModel
                 : agent === 'zcode'
                   ? config.defaultZcodeModel
-                  : config.defaultModel),
+                  : agent === 'codebuddy'
+                    ? config.defaultCodebuddyModel
+                    : agent === 'opencode'
+                      ? config.defaultOpencodeModel
+                      : agent === 'devin'
+                      ? config.defaultDevinModel
+                      : config.defaultModel),
     permissionMode:
       saved?.permissionMode || (agent === 'claude' ? 'bypassPermissions' : 'default'),
     effort: clampEffort(agent, saved?.effort as EffortLevel | undefined),
@@ -236,7 +261,7 @@ function hostKeyboard(d: NewDraft): InlineKeyboard {
 
 function agentKeyboard(d: NewDraft): InlineKeyboard {
   const kb = new InlineKeyboard();
-  for (const a of ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode'] as AgentKind[]) {
+  for (const a of ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin'] as AgentKind[]) {
     kb.text(mark(d.agent, a, a[0]!.toUpperCase() + a.slice(1)), `ns:set:agent:${a}`);
   }
   kb.row().text('← Back', 'ns:back');
@@ -286,6 +311,15 @@ async function modelOptions(d: NewDraft): Promise<{ value: string; label: string
   }
   if (agent === 'zcode') {
     return host ? await listRemoteZcodeModels(host) : await listZcodeModels();
+  }
+  if (agent === 'codebuddy') {
+    return host ? await listRemoteCodebuddyModels(host) : listCodebuddyModels();
+  }
+  if (agent === 'devin') {
+    return host ? await listRemoteDevinModels(host) : await listDevinModels();
+  }
+  if (agent === 'opencode') {
+    return host ? await listRemoteOpencodeModels(host) : await listOpencodeModels();
   }
   return host ? await listRemoteCodexModels(host) : listCodexModels();
 }
@@ -381,7 +415,13 @@ export async function createSessionFromDraft(d: NewDraft): Promise<SessionMeta> 
                 ? config.defaultGrokModel
                 : agent === 'zcode'
                   ? config.defaultZcodeModel
-                  : config.defaultModel),
+                  : agent === 'codebuddy'
+                    ? config.defaultCodebuddyModel
+                    : agent === 'opencode'
+                      ? config.defaultOpencodeModel
+                      : agent === 'devin'
+                      ? config.defaultDevinModel
+                      : config.defaultModel),
     permissionMode: (d.permissionMode as PermissionMode) || 'default',
     effort: clampEffort(agent, d.effort as EffortLevel | undefined),
     agent,
@@ -599,7 +639,13 @@ export async function handleNewSessionCallback(ctx: BotContext): Promise<boolean
                 ? config.defaultGrokModel
                 : agent === 'zcode'
                   ? config.defaultZcodeModel
-                  : config.defaultModel;
+                  : agent === 'codebuddy'
+                    ? config.defaultCodebuddyModel
+                    : agent === 'opencode'
+                      ? config.defaultOpencodeModel
+                      : agent === 'devin'
+                      ? config.defaultDevinModel
+                      : config.defaultModel;
     d!.permissionMode = agent === 'claude' ? 'bypassPermissions' : 'default';
     d!.effort = defaultEffort(agent);
     saveDraft(chatId, d!);

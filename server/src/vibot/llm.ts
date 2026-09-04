@@ -18,15 +18,32 @@ export interface LlmToolCall {
 
 export type LlmRole = 'system' | 'user' | 'assistant' | 'tool';
 
+/** OpenAI-compatible multimodal content parts (vision models). */
+export type LlmContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export interface LlmMessage {
   role: LlmRole;
-  content: string | null;
+  /** Plain string for text-only turns; content-part array when images are attached.
+   *  Keep strings for text-only so the JSON body matches the pre-vision shape. */
+  content: string | null | LlmContentPart[];
   /** Assistant messages that requested tool calls carry these. */
   tool_calls?: LlmToolCall[];
   /** `tool` role messages carry the call id they answer. */
   tool_call_id?: string;
   /** Optional function name on `tool` role messages. */
   name?: string;
+}
+
+/** Build a user message content value — string when there are no images. */
+export function buildUserContent(text: string, images?: string[]): string | LlmContentPart[] {
+  if (!images?.length) return text;
+  const parts: LlmContentPart[] = [{ type: 'text', text }];
+  for (const url of images) {
+    parts.push({ type: 'image_url', image_url: { url } });
+  }
+  return parts;
 }
 
 export interface LlmToolDef {

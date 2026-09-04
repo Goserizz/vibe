@@ -19,6 +19,7 @@ import type {
   SkillScope,
   ConfigFileDetail,
   ConfigFileEntry,
+  SwitchFidelity,
 } from '@shared/protocol';
 import { compareSessions } from '@shared/protocol';
 import { api, ApiError, setApiToken } from '../lib/api';
@@ -35,7 +36,7 @@ import {
   saveAccentPreference,
   type AccentPreference,
 } from '../lib/systemAccent';
-import { emptyView, reduceView, viewFromBlocks, type SessionView } from './blocks';
+import { emptyView, prependPage, reduceView, viewFromBlocks, type SessionView } from './blocks';
 import { useVibotStore, vibotHandleBatch } from './vibot';
 
 let socket: VibeSocket | null = null;
@@ -60,6 +61,9 @@ let kimiModelsGen = 0;
 let kiroModelsGen = 0;
 let grokModelsGen = 0;
 let zcodeModelsGen = 0;
+let codebuddyModelsGen = 0;
+let devinModelsGen = 0;
+let opencodeModelsGen = 0;
 const MODEL_REPULL_MS = 2_500;
 
 // Sessions the user aborted this turn. Their end-of-turn chime is suppressed
@@ -100,6 +104,11 @@ interface StoreState {
   kiroPermissionModes: PermissionOption[];
   grokModels: ModelOption[];
   zcodeModels: ModelOption[];
+  codebuddyModels: ModelOption[];
+  /** Devin model families — effort is chosen separately and the server
+   *  assembles the variant uid. */
+  devinModels: ModelOption[];
+  opencodeModels: ModelOption[];
   theme: Theme;
   /** Sound played when a model turn finishes. Persisted in localStorage. */
   notifySound: NotifySoundId;
@@ -177,6 +186,12 @@ interface StoreState {
   loadGrokModels: (host?: string) => Promise<void>;
   /** Load ZCode models for local or remote CLI (from its config.json). */
   loadZcodeModels: (host?: string) => Promise<void>;
+  /** Load CodeBuddy models for local or remote CLI (parsed from `--help`). */
+  loadCodebuddyModels: (host?: string) => Promise<void>;
+  /** Load Devin model families for local or remote CLI (`devin models list`). */
+  loadDevinModels: (host?: string) => Promise<void>;
+  /** Load opencode models for local or remote CLI (`opencode models`). */
+  loadOpencodeModels: (host?: string) => Promise<void>;
   addHost: (host: RemoteHost) => Promise<boolean>;
   updateHost: (name: string, patch: { ssh?: string; proxy?: string; proxyByAgent?: Partial<Record<AgentKind, string>> }) => Promise<boolean>;
   removeHost: (name: string) => Promise<void>;
@@ -208,8 +223,16 @@ interface StoreState {
   /** Create or overwrite a config file. Returns the updated detail, or null on failure. */
   saveAgentConfigFile: (args: { agent: AgentKind; host?: string; id: string; content: string }) => Promise<ConfigFileDetail | null>;
   openSession: (id: string) => Promise<void>;
+  /** Fetch the next older history page for an open conversation. No-op when
+   *  none is left or a request is already in flight. */
+  loadOlder: (id: string) => Promise<void>;
   createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<boolean>;
   renameSession: (id: string, title: string) => Promise<void>;
+  /** 把会话切换成另一个 agent（历史无损保留）。返回保真等级，失败返回 null。 */
+  switchSessionAgent: (
+    id: string,
+    input: { agent: AgentKind; model?: string; carryThinking?: boolean },
+  ) => Promise<SwitchFidelity | null>;
   deleteSession: (id: string) => Promise<void>;
   togglePin: (id: string) => Promise<void>;
   sendMessage: (text: string) => void;
@@ -268,6 +291,7 @@ export const useStore = create<StoreState>((set, get) => {
     const liveRunning = new Map<string, boolean>();
     let playDoneSound = false;
     const finishedUnreadIds: string[] = [];
+    let monitorToast: string | undefined;
 
     const push = (sid: string, seq: number, ev: import('@shared/protocol').LiveEvent) => {
       let arr = eventsBySession.get(sid);
@@ -340,6 +364,17 @@ export const useStore = create<StoreState>((set, get) => {
           sessionsDirty = true;
           break;
         }
+        case 'monitor_changed':
+          window.dispatchEvent(new CustomEvent('vibe-monitor-changed', { detail: { monitorId: msg.monitorId } }));
+          break;
+        case 'monitor_notice':
+          window.dispatchEvent(new CustomEvent('vibe-monitor-changed', { detail: { monitorId: msg.monitorId } }));
+          if (msg.sessionId !== state.activeId) {
+            finishedUnreadIds.push(msg.sessionId);
+            monitorToast = msg.text;
+            playDoneSound = true;
+          }
+          break;
         case 'session_removed':
           sessions = sessions.filter((s) => s.id !== msg.sessionId);
           sessionsDirty = true;
@@ -373,6 +408,7 @@ export const useStore = create<StoreState>((set, get) => {
         pending,
         tasks,
         unread,
+        ...(monitorToast ? { toast: monitorToast } : {}),
         sessions: sessionsDirty ? sessions : s.sessions,
       };
     });
@@ -387,10 +423,10 @@ export const useStore = create<StoreState>((set, get) => {
 
   async function reloadAndResubscribe(id: string): Promise<void> {
     try {
-      const { blocks, seq } = await api.getMessages(id);
+      const page = await api.getMessages(id);
       const running = get().sessions.find((s) => s.id === id)?.running ?? false;
-      set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
-      sendSubscribe(id, seq);
+      set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(page.blocks, page.seq, running, page) } }));
+      sendSubscribe(id, page.seq);
     } catch {
       /* ignore */
     }
@@ -413,6 +449,9 @@ export const useStore = create<StoreState>((set, get) => {
     kiroPermissionModes: [],
     grokModels: [],
     zcodeModels: [],
+    codebuddyModels: [],
+    devinModels: [],
+    opencodeModels: [],
     theme: initialTheme(),
     notifySound: loadNotifySound(),
     viewMode: loadViewMode(),
@@ -480,6 +519,9 @@ export const useStore = create<StoreState>((set, get) => {
         void get().loadKiroModels();
         void get().loadGrokModels();
         void get().loadZcodeModels();
+        void get().loadCodebuddyModels();
+        void get().loadDevinModels();
+        void get().loadOpencodeModels();
       }
 
       const { sessions, activeId } = get();
@@ -620,6 +662,63 @@ export const useStore = create<StoreState>((set, get) => {
           .listZcodeModels(host)
           .then(({ models }) => {
             if (gen === zcodeModelsGen) set({ zcodeModels: models });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
+    },
+
+    async loadCodebuddyModels(host?: string) {
+      const gen = ++codebuddyModelsGen;
+      try {
+        const { models } = await api.listCodebuddyModels(host);
+        if (gen === codebuddyModelsGen) set({ codebuddyModels: models });
+      } catch {
+        /* ignore — picker falls back to Auto + static CodeBuddy models */
+      }
+      window.setTimeout(() => {
+        if (gen !== codebuddyModelsGen) return;
+        void api
+          .listCodebuddyModels(host)
+          .then(({ models }) => {
+            if (gen === codebuddyModelsGen) set({ codebuddyModels: models });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
+    },
+
+    async loadDevinModels(host?: string) {
+      const gen = ++devinModelsGen;
+      try {
+        const { models } = await api.listDevinModels(host);
+        if (gen === devinModelsGen) set({ devinModels: models });
+      } catch {
+        /* ignore — picker falls back to Auto + static Devin families */
+      }
+      window.setTimeout(() => {
+        if (gen !== devinModelsGen) return;
+        void api
+          .listDevinModels(host)
+          .then(({ models }) => {
+            if (gen === devinModelsGen) set({ devinModels: models });
+          })
+          .catch(() => {});
+      }, MODEL_REPULL_MS);
+    },
+
+    async loadOpencodeModels(host?: string) {
+      const gen = ++opencodeModelsGen;
+      try {
+        const { models } = await api.listOpencodeModels(host);
+        if (gen === opencodeModelsGen) set({ opencodeModels: models });
+      } catch {
+        /* ignore — picker falls back to Auto */
+      }
+      window.setTimeout(() => {
+        if (gen !== opencodeModelsGen) return;
+        void api
+          .listOpencodeModels(host)
+          .then(({ models }) => {
+            if (gen === opencodeModelsGen) set({ opencodeModels: models });
           })
           .catch(() => {});
       }, MODEL_REPULL_MS);
@@ -838,10 +937,10 @@ export const useStore = create<StoreState>((set, get) => {
       const existing = get().views[id];
       if (!existing?.loaded) {
         try {
-          const { blocks, seq } = await api.getMessages(id);
+          const page = await api.getMessages(id);
           const running = get().sessions.find((s) => s.id === id)?.running ?? false;
-          set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(blocks, seq, running) } }));
-          sendSubscribe(id, seq);
+          set((s) => ({ views: { ...s.views, [id]: viewFromBlocks(page.blocks, page.seq, running, page) } }));
+          sendSubscribe(id, page.seq);
           return;
         } catch {
           set({ toast: 'Failed to load conversation' });
@@ -849,6 +948,25 @@ export const useStore = create<StoreState>((set, get) => {
         }
       }
       resubscribe(id);
+    },
+
+    async loadOlder(id) {
+      const view = get().views[id];
+      if (!view?.loaded || !view.hasMore || !view.cursor || view.loadingOlder) return;
+      set((s) => ({ views: { ...s.views, [id]: { ...view, loadingOlder: true } } }));
+      try {
+        const page = await api.getMessages(id, { cursor: view.cursor });
+        set((s) => {
+          const cur = s.views[id];
+          if (!cur) return {};
+          return { views: { ...s.views, [id]: prependPage(cur, page.blocks, page) } };
+        });
+      } catch {
+        set((s) => {
+          const cur = s.views[id];
+          return cur ? { views: { ...s.views, [id]: { ...cur, loadingOlder: false } } } : {};
+        });
+      }
     },
 
     async createSession(input) {
@@ -869,6 +987,24 @@ export const useStore = create<StoreState>((set, get) => {
         set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? session : x)) }));
       } catch {
         set({ toast: 'Rename failed' });
+      }
+    },
+
+    async switchSessionAgent(id, input) {
+      try {
+        const result = await api.switchSessionAgent(id, input);
+        // 会话的 agent/model 变了，用服务端返回的最新记录替换本地那条。
+        set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? result.session : x)) }));
+        // The server replaced the immutable per-agent runtime. Reload the
+        // migrated transcript and subscribe at its handed-off sequence before
+        // the composer is enabled again.
+        await reloadAndResubscribe(id);
+        // 刷新列表：新 agent 的原生会话需要重新发现，排序也会随之变化。
+        await get().refreshSessions();
+        return result.switch.fidelity;
+      } catch (err) {
+        set({ toast: err instanceof Error ? `切换失败：${err.message}` : '切换失败' });
+        return null;
       }
     },
 

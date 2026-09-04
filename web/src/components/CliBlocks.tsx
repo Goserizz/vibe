@@ -47,11 +47,26 @@ function CliUserView({ block }: { block: UserBlock }) {
   const { text, files } = stripAttachments(block.text);
   const display =
     text.trim() || (files.length ? `${files.length} file${files.length > 1 ? 's' : ''} attached` : '');
+  const images = block.images?.length ? block.images : undefined;
   return (
     <div className="cli-turn mt-5 font-mono text-[13.5px] leading-relaxed first:mt-0">
       <div className="flex items-start gap-2">
         <span className="cli-gutter select-none text-accent">❯</span>
-        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words text-slate-100">{display}</div>
+        <div className="min-w-0 flex-1 space-y-2 whitespace-pre-wrap break-words text-slate-100">
+          {images && (
+            <div className="flex flex-wrap gap-1.5">
+              {images.map((src, i) => (
+                <img
+                  key={`${block.id}-img-${i}`}
+                  src={src}
+                  alt=""
+                  className="max-h-36 max-w-full border border-ink-700 object-contain"
+                />
+              ))}
+            </div>
+          )}
+          {display}
+        </div>
       </div>
     </div>
   );
@@ -375,9 +390,9 @@ function CliErrorView({ block }: { block: ErrorBlock }) {
 /** Muted engine notice as a dashed divider — e.g. a background task woke the agent. */
 function CliSystemView({ block }: { block: SystemBlock }) {
   return (
-    <div className="flex items-center gap-2.5 py-1">
+    <div className="flex min-w-0 items-center gap-2.5 py-1">
       <span className="min-w-6 flex-1 border-t border-dashed border-white/10" />
-      <span className="shrink-0 font-mono text-[11.5px] text-slate-500">
+      <span className="min-w-0 whitespace-normal break-words font-mono text-[11.5px] text-slate-500 [overflow-wrap:anywhere]">
         ↻ {block.text} · {beijingClock(block.ts)}
       </span>
       <span className="min-w-6 flex-1 border-t border-dashed border-white/10" />
