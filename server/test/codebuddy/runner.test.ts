@@ -220,6 +220,57 @@ describe('CodeBuddy resume path + silent-run guards', () => {
     assert.doesNotMatch(command, /\/root\//);
   });
 
+  it('passes CodeBuddy an absolute remote MCP path instead of a shell-quoted literal tilde', async () => {
+    const child = new FakeChild();
+    const events: LiveEvent[] = [];
+    const sshCalls: Array<{ command: string; input?: string | Buffer }> = [];
+    let spawnedArgs: readonly string[] = [];
+    const absoluteConfig = '/home/tester/.vibe/codebuddy-mcp/0123456789abcdef0123456789abcdef.json';
+    const run = startCodebuddyRun(
+      {
+        ...RUN_OPTIONS,
+        resume: undefined,
+        vibeSessionId: 'remote::session/with vendor characters',
+        mcpServers: [{
+          name: 'vibe-monitor',
+          transport: 'http',
+          url: 'https://vibe.example.test/api/internal/monitor-mcp',
+          headers: { Authorization: 'Bearer test-capability' },
+        }],
+      },
+      fakeCallbacks(events),
+      {
+        spawnProcess: ((_bin: string, args: readonly string[]) => {
+          spawnedArgs = args;
+          queueMicrotask(() => {
+            child.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', duration_ms: 1 })}\n`);
+            child.close(0);
+          });
+          return child as unknown as ChildProcess;
+        }) as typeof spawn,
+        sshExec: async (_target, command, options = {}) => {
+          sshCalls.push({ command, input: options.input });
+          if (command.includes('cat > "$tmp"')) {
+            return { code: 0, stdout: `MCP_OK:${absoluteConfig}\n`, stderr: '', timedOut: false };
+          }
+          return { code: 0, stdout: '', stderr: '', timedOut: false };
+        },
+        startupTimeoutMs: 100,
+        firstResponseTimeoutMs: 100,
+      },
+    );
+    await run.done;
+
+    const upload = sshCalls.find((call) => call.command.includes('cat > "$tmp"'));
+    assert.ok(upload, 'remote MCP config must be uploaded before spawn');
+    assert.match(upload.command, /\$HOME\/\.vibe\/codebuddy-mcp/);
+    assert.match(String(upload.input), /"vibe-monitor"/);
+    const remoteLaunch = String(spawnedArgs.at(-1));
+    assert.match(remoteLaunch, new RegExp(absoluteConfig.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(remoteLaunch, /~\/\.vibe\/codebuddy-mcp/);
+    assert.equal(events.some((event) => event.k === 'error'), false);
+  });
+
   it('terminates a child that never emits CodeBuddy protocol output', async () => {
     const child = new FakeChild();
     const events: LiveEvent[] = [];

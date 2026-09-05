@@ -100,8 +100,8 @@ interface McpConfigFile {
 /**
  * Materialize the session's MCP servers as a `--mcp-config` file.
  *
- * Local: `~/.vibe/codebuddy-mcp/<sessionId>.json`. Remote: the same path on
- * the session's host, uploaded as base64 over the SSH channel — the config is
+ * Local: `~/.vibe/codebuddy-mcp/<session-id-digest>.json`. Remote: the same path on
+ * the session's host, uploaded over SSH stdin — the config is
  * never inlined in a command line (env vars and headers carry secrets that
  * `ps` on the remote host would expose). This is a deliberate difference from
  * Claude's remote turns, which pass MCP through the Agent SDK's tunnel: here
@@ -113,10 +113,16 @@ interface McpConfigFile {
  * Best-effort: a failure logs and the turn runs without Vibe-managed MCP
  * (the CLI still loads the user's own config), like the other agents' applies.
  */
-async function deployMcpConfig(opts: CodebuddyRunOptions): Promise<McpConfigFile | undefined> {
+async function deployMcpConfig(
+  opts: CodebuddyRunOptions,
+  execSsh: typeof sshExec = sshExec,
+): Promise<McpConfigFile | undefined> {
   const defs = opts.mcpServers ?? [];
   if (!defs.length) return undefined;
-  const file = `${opts.vibeSessionId ?? crypto.randomUUID()}.json`;
+  // Session ids can contain host separators or vendor-controlled characters.
+  // A digest stays path-safe and stable across retries of the same turn.
+  const identity = opts.vibeSessionId ?? crypto.randomUUID();
+  const file = `${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 32)}.json`;
   let content: string;
   try {
     content = await toCliMcpConfig(defs);
@@ -142,27 +148,44 @@ async function deployMcpConfig(opts: CodebuddyRunOptions): Promise<McpConfigFile
     };
   }
 
-  const remotePath = `~/.vibe/codebuddy-mcp/${file}`;
   try {
-    const upload = await sshExec(
+    const uploadScript = [
+      'dir="$HOME/.vibe/codebuddy-mcp"',
+      `name=${shQuote(file)}`,
+      'mkdir -p "$dir"',
+      'target="$dir/$name"',
+      'tmp="$target.tmp.$$"',
+      'umask 077',
+      'cat > "$tmp" && mv "$tmp" "$target" && printf "MCP_OK:%s\\n" "$target"',
+    ].join('; ');
+    const upload = await execSsh(
       opts.remote.sshTarget,
-      `mkdir -p ~/.vibe/codebuddy-mcp && base64 -d > ${remotePath} && echo MCP_OK`,
-      { input: Buffer.from(content, 'utf8').toString('base64'), timeoutMs: 15_000 },
+      loginShellCommand(uploadScript),
+      { input: content, timeoutMs: 15_000 },
     );
-    if (upload.code !== 0 || !upload.stdout.includes('MCP_OK')) {
+    const marker = upload.stdout.split('\n').find((line) => line.startsWith('MCP_OK:'));
+    const absolutePath = marker?.slice('MCP_OK:'.length).trim();
+    if (upload.code !== 0 || !absolutePath?.startsWith('/') || /[\r\n\0]/.test(absolutePath)) {
       throw new Error(cleanRemoteStderr(upload.stderr) || 'upload failed');
     }
+    log.debug(`codebuddy MCP config ready (remote): ${defs.map((def) => def.name).join(', ')}`);
+    return {
+      // buildArgs quotes every argument. A quoted `~` stays literal, so pass
+      // the absolute path resolved by the remote shell above.
+      cliPath: absolutePath,
+      cleanup: () => {
+        execSsh(
+          opts.remote!.sshTarget,
+          loginShellCommand(`rm -f -- ${shQuote(absolutePath)}`),
+          { timeoutMs: 10_000 },
+        )
+          .catch((err) => log.debug('codebuddy remote mcp config cleanup failed', err));
+      },
+    };
   } catch (err) {
     log.warn('codebuddy remote mcp config upload failed', err);
     return undefined;
   }
-  return {
-    cliPath: remotePath,
-    cleanup: () => {
-      sshExec(opts.remote!.sshTarget, `rm -f ${remotePath}`, { timeoutMs: 10_000 })
-        .catch((err) => log.debug('codebuddy remote mcp config cleanup failed', err));
-    },
-  };
 }
 
 /** A permission decision as a control_response line (shape verified against the
@@ -268,7 +291,7 @@ async function runOnce(
   }
   // The MCP config file must exist before the child spawns (remote needs an
   // SSH round-trip first); it is removed once the child is gone.
-  const mcp = await deployMcpConfig(opts);
+  const mcp = await deployMcpConfig(opts, deps.sshExec ?? sshExec);
   const args = buildArgs(opts);
   if (mcp) args.push('--mcp-config', mcp.cliPath);
   return new Promise<Outcome>((resolve) => {
