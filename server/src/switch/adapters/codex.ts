@@ -3,6 +3,7 @@ import type { AgentKind } from '../../../../shared/protocol.js';
 import type { BuildContext, BuildResult, TargetAdapter } from '../types.js';
 import { joinPath } from '../fs.js';
 import { normalizeToolInput, renderAssistantText, renderTurnUserText } from '../canonical.js';
+import { codexCallIdAliases } from '../../codex/callIds.js';
 
 /**
  * Codex 原生会话重建（fidelity: full）。
@@ -44,13 +45,16 @@ export const codexAdapter: TargetAdapter = {
     const file = joinPath(dir, `rollout-${stampForFileName(ctx.now)}-${ctx.nativeId}.jsonl`);
 
     const lines: string[] = [];
+    const callIdAliases = codexCallIdAliases(
+      ctx.turns.flatMap((turn) => turn.assistants.flatMap((assistant) => assistant.tools.map((tool) => tool.toolUseId))),
+    );
     let clock = Math.max(ctx.now, 1);
     const nextClock = (preferred: number): void => {
       clock = preferred > clock ? preferred : clock + 1;
     };
     /** 写一行 `{timestamp, type, payload}`。 */
-    const push = (type: string, payload: Record<string, unknown>): void => {
-      lines.push(JSON.stringify({ timestamp: new Date(clock).toISOString(), type, payload }));
+    const push = (type: string, payload: Record<string, unknown>, extra?: Record<string, unknown>): void => {
+      lines.push(JSON.stringify({ timestamp: new Date(clock).toISOString(), type, payload, ...extra }));
     };
 
     // 首行必须是 session_meta：Codex 的发现逻辑（parseCodexRolloutHead）靠它取 id/cwd。
@@ -63,7 +67,12 @@ export const codexAdapter: TargetAdapter = {
       model_provider: 'openai',
       // CLI 版本只用于展示，缺了不影响 resume。
       cli_version: 'vibe-switch',
-    });
+    }, callIdAliases.size ? {
+      // Keep Vibe provenance outside payload: Codex sends only response_item
+      // payloads to its model. The production reader restores original IDs
+      // from this header during native-only round trips as well.
+      vibe: { callIdAliases: Object.fromEntries([...callIdAliases].map(([original, alias]) => [alias, original])) },
+    } : undefined);
     nextClock(ctx.now);
 
     for (const turn of ctx.turns) {
@@ -87,17 +96,18 @@ export const codexAdapter: TargetAdapter = {
           });
         }
         for (const tool of assistant.tools) {
+          const callId = callIdAliases.get(tool.toolUseId) ?? tool.toolUseId;
           nextClock(tool.ts);
           push('response_item', {
             type: 'function_call',
-            call_id: tool.toolUseId,
+            call_id: callId,
             name: tool.name,
             arguments: JSON.stringify(normalizeToolInput(tool.input)),
           });
           nextClock(tool.ts);
           push('response_item', {
             type: 'function_call_output',
-            call_id: tool.toolUseId,
+            call_id: callId,
             output: tool.result,
             ...(tool.isError ? { is_error: true } : {}),
           });

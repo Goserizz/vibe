@@ -17,6 +17,7 @@ import '../codebuddy/normalize.test.js';
 import '../codebuddy/runner.test.js';
 import '../cursor/normalize.test.js';
 import '../codex/normalize.test.js';
+import '../codex/callIds.test.js';
 import '../opencode/models.test.js';
 import '../zcode/transcript.test.js';
 import '../sessions/list.test.js';

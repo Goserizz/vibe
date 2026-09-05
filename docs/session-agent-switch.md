@@ -48,6 +48,23 @@ agent，与来源无关。
 其余 6 个目标不受影响。此时矩阵会动态变成 60 full / 40 partial，API 和 UI 展示的
 也是实际能力，不会虚报 full。可用 `VIBE_SWITCH_DISABLE_SQLITE=1` 重现并测试该路径。
 
+## Codex 工具调用 ID 兼容
+
+Codex 的 Responses 请求限制 `call_id` 最长 64 字符。部分来源历史使用超过 64 字符
+的复合工具 ID，不能原样写入 Codex 的 `function_call` / `function_call_output`。
+转换器为超长 ID 生成稳定的哈希别名，调用和结果共用一个别名；预先保留合法原始 ID，
+避免与已有 ID 冲突，也避免直接截断造成两个调用共用 ID。合法短 ID 不变。
+
+原始 ID 保留在 Vibe transcript，并在 rollout 的 `session_meta` 外层 `vibe.callIdAliases`
+中记录映射。该字段不进入模型的 response item payload，Vibe 原生解析器会据此还原 ID。
+因此经过 Codex 再切回其他 agent 时，工具名称、参数、结果、错误状态及原始 ID 都能保留。
+旧版本已写出的超长 ID 不会因重试请求自行消失；从保留的来源历史重新切到 Codex 后会生成
+符合限制的新原生会话。
+
+回归覆盖：64/65/86 字符边界、共同前缀、防止别名与已有 ID 冲突，以及含超长 ID 的
+全部 90 个 A → B → A 往返方向。额外使用隔离的 Codex CLI 与本地模拟 Responses 服务
+验证实际发出的调用/结果配对和长度，不向真实模型提交测试对话。
+
 ## opencode 原生写出
 
 `adapters/opencode.ts` 使用 `better-sqlite3` 事务式写入真实三表结构：

@@ -249,6 +249,30 @@ export function fixtureDanglingUser(): ChatBlock[] {
   ];
 }
 
+/** Composite source IDs reproduced with synthetic values only. Two IDs share
+ * their first 64 characters, so substring-based shortening would break pairs. */
+export function fixtureLongToolIds(): ChatBlock[] {
+  const prefix = `toolu_${'a'.repeat(36)}_${'b'.repeat(36)}`;
+  return [
+    user('Inspect two sample files.'),
+    thinking('Read each file and preserve the result associated with that call.'),
+    assistant('Reading both files.'),
+    ...['0', '1'].map((suffix, index): ChatBlock => ({
+      id: `long-tool-${suffix}`,
+      kind: 'tool',
+      toolUseId: `${prefix}_task_${suffix}`,
+      name: 'Read',
+      input: { file_path: `/workspace/example-${suffix}.txt` },
+      status: index === 0 ? 'done' : 'error',
+      result: index === 0 ? 'sample contents' : 'File not found',
+      isError: index !== 0,
+      ts: 1_700_000_001_500 + index,
+    })),
+    assistant('The first file exists; the second is missing.'),
+    result(),
+  ];
+}
+
 export const SYNTHETIC_FIXTURES: { name: string; blocks: () => ChatBlock[] }[] = [
   { name: 'multiTurn', blocks: fixtureMultiTurn },
   { name: 'withTools', blocks: fixtureWithTools },
@@ -260,6 +284,7 @@ export const SYNTHETIC_FIXTURES: { name: string; blocks: () => ChatBlock[] }[] =
   { name: 'consecutiveWakeTurns', blocks: fixtureConsecutiveWakeTurns },
   { name: 'consecutiveUsers', blocks: fixtureConsecutiveUsers },
   { name: 'danglingUser', blocks: fixtureDanglingUser },
+  { name: 'longToolIds', blocks: fixtureLongToolIds },
 ];
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   fixtureConsecutiveWakeTurns,
   fixtureConsecutiveUsers,
   fixtureDanglingUser,
+  fixtureLongToolIds,
   makeTempEnv,
   readBackNative,
   turnsForCompare,
@@ -62,6 +63,7 @@ describe('真实转换链语义：全部 90 个 A → B → A 双跳', () => {
         // 覆盖两份真实长历史暴露的关键形状：连续 user（前一轮无回复）、同一轮
         // 多段 assistant/thinking/tool，以及多个没有 user、工具先于正文的后台唤醒轮次。
         const source = [
+          ...fixtureLongToolIds(),
           ...fixtureConsecutiveUsers(),
           ...fixtureConsecutiveWakeTurns(),
           ...fixtureDanglingUser(),

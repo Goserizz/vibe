@@ -97,6 +97,7 @@ function findRollout(sessionId: string): string | undefined {
 function itemsToBlocks(lines: string[]): ChatBlock[] {
   const blocks: ChatBlock[] = [];
   const toolById = new Map<string, ToolBlock>();
+  const originalCallIds = new Map<string, string>();
   for (const line of lines) {
     if (!line.trim()) continue;
     let obj: any;
@@ -105,8 +106,19 @@ function itemsToBlocks(lines: string[]): ChatBlock[] {
     } catch {
       continue;
     }
-    const payload = obj?.type === 'response_item' ? obj.payload : null;
+    if (obj?.type === 'session_meta') {
+      const aliases: unknown = obj.vibe?.callIdAliases;
+      if (aliases && typeof aliases === 'object' && !Array.isArray(aliases)) {
+        for (const [alias, original] of Object.entries(aliases)) {
+          if (typeof original === 'string') originalCallIds.set(alias, original);
+        }
+      }
+    }
+    let payload = obj?.type === 'response_item' ? obj.payload : null;
     if (!payload) continue;
+    if (typeof payload.call_id === 'string' && originalCallIds.has(payload.call_id)) {
+      payload = { ...payload, call_id: originalCallIds.get(payload.call_id) };
+    }
     const parts = parseCodexResponseItem(payload);
     for (const p of parts) {
       if (p.kind === 'user') {
