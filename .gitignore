@@ -11,6 +11,10 @@ reference_projects/
 # Vibe runtime data (sessions index, token)
 .vibe-data/
 
+# Global skill definitions may contain embedded credentials (runtime data only).
+global-skills.json
+global-skills.json.*.tmp
+
 # Local secrets / notes — NEVER publish
 CLAUDE.md
 

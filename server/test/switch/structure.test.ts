@@ -9,6 +9,7 @@ import { transcriptFileFor } from '../../src/switch/paths.js';
 import type { StoredSession } from '../../src/sessions/store.js';
 import { AGENTS, loadFixture, makeTempEnv, findRecursive, hasRealData, type TempEnv } from './helpers.js';
 import { openSqlite } from '../../src/switch/sqlite.js';
+import { testNativeSqliteStructure } from './nativeSqliteStructure.js';
 
 /**
  * 结构校验：把转换产物与**各 agent 真实产生的文件**做字段级对比。
@@ -139,6 +140,12 @@ describe('产物结构 vs 真实 CLI 文件', () => {
   afterEach(() => env.cleanup());
 
   for (const target of AGENTS) {
+    if (target === 'opencode' || target === 'devin') {
+      it(`${target}：原生 SQLite schema、JSON 字段、关联与往返（新建库/已有库）`, async (t) => {
+        await testNativeSqliteStructure(target, t);
+      });
+      continue;
+    }
     it(`${target}：产物的每一行都是合法 JSON，且覆盖真实文件的稳定字段`, async (t) => {
       const real = sampleReal(target);
       const sqliteTarget = target === 'zcode' || target === 'cursor';

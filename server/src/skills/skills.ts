@@ -13,7 +13,7 @@ export function validateSkillName(name: string): boolean {
 }
 
 /**
- * Per-agent skill layout. All six agents share the Agent Skills standard
+ * Per-agent skill layout. Supported agents share the Agent Skills standard
  * (`<name>/SKILL.md` + YAML frontmatter); they differ only in directory.
  *  - `personalRel` is the remote path (`~` left bare so the remote login shell
  *    expands it; never interpolates user input).
@@ -98,6 +98,12 @@ const AGENT_SKILLS: Record<AgentKind, AgentSkills> = {
     system: [],
   },
 };
+
+/** Home-relative native path, shared by host-local CRUD and global deployment. */
+export function nativeSkillPath(agent: AgentKind, name: string): string {
+  if (!AGENT_SKILLS[agent] || !validateSkillName(name)) throw new Error('invalid skill target');
+  return `${AGENT_SKILLS[agent].personalRel}/${name}/SKILL.md`;
+}
 
 /** host name → SSH target (mirrors api.ts's private resolveFileTarget). */
 function resolveTarget(host?: string): { remote: boolean; target: string } {

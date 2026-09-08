@@ -8,6 +8,9 @@ import type {
   ChatBlock,
   EffortLevel,
   FileEntry,
+  GlobalSkillDetail,
+  GlobalSkillInput,
+  GlobalSkillSummary,
   HostStatus,
   LoginAgent,
   LoginRequest,
@@ -110,12 +113,12 @@ export const api = {
 
   // -- Durable monitors -----------------------------------------------------
 
-  listMonitors: () => request<{ monitors: Monitor[] }>('/monitors').then((r) => r.monitors),
+  listMonitors: (signal?: AbortSignal) => request<{ monitors: Monitor[] }>('/monitors', { signal }).then((r) => r.monitors),
 
-  listMonitorEvents: (monitorId?: string, limit = 100) => {
+  listMonitorEvents: (monitorId?: string, limit = 100, signal?: AbortSignal) => {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (monitorId) qs.set('monitorId', monitorId);
-    return request<{ events: MonitorEvent[] }>(`/monitor-events?${qs.toString()}`).then((r) => r.events);
+    return request<{ events: MonitorEvent[] }>(`/monitor-events?${qs.toString()}`, { signal }).then((r) => r.events);
   },
 
   createMonitor: (input: MonitorInput) =>
@@ -281,6 +284,14 @@ export const api = {
 
   saveSkill: (input: { agent: AgentKind; name: string; description: string; whenToUse?: string; body: string; host?: string }) =>
     request<{ skill: SkillDetail }>('/skills', { method: 'POST', body: JSON.stringify(input) }).then((r) => r.skill),
+
+  listGlobalSkills: () => request<{ skills: GlobalSkillSummary[] }>('/skills/global').then((r) => r.skills),
+  readGlobalSkill: (id: string) => request<{ skill: GlobalSkillDetail }>(`/skills/global/${encodeURIComponent(id)}`).then((r) => r.skill),
+  saveGlobalSkill: (input: GlobalSkillInput, id?: string) =>
+    request<{ skill: GlobalSkillSummary }>(`/skills/global${id ? `/${encodeURIComponent(id)}` : ''}`,
+      { method: id ? 'PUT' : 'POST', body: JSON.stringify(input) }).then((r) => r.skill),
+  retryGlobalSkill: (id: string) => request<{ ok: boolean }>(`/skills/global/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
+  stopGlobalSkill: (id: string) => request<{ ok: boolean; nativeCopiesRetained: boolean }>(`/skills/global/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   deleteSkill: (args: { agent: AgentKind; host?: string; name: string }) => {
     const qs = new URLSearchParams({ agent: args.agent, name: args.name });

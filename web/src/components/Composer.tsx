@@ -7,6 +7,7 @@ import { buildMessage } from '../lib/attachments';
 import { useComposerKeys } from '../lib/composerKeys';
 import { Glass } from './LiquidGlass';
 import { CliPromptTextarea } from './CliPromptTextarea';
+import { RequestQueuePane } from './RequestQueuePane';
 
 /** crypto.randomUUID needs a secure context; on plain-http LAN URLs it's
  *  undefined, so fall back (same pattern the store uses). */
@@ -30,6 +31,8 @@ interface PendingAttachment {
 
 export function Composer({ sessionId }: { sessionId: string }) {
   const running = useStore((s) => s.views[sessionId]?.running ?? false);
+  const connected = useStore((s) => s.status === 'open');
+  const queuedCount = useStore((s) => s.requestQueues[sessionId]?.items.length ?? 0);
   const activeTaskCount = useStore((s) => (s.tasks[sessionId] ?? []).filter((task) => (
     task.status === 'pending' || task.status === 'running' || task.status === 'paused'
   )).length);
@@ -53,6 +56,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // milliseconds of compositionend, whereas a real send comes much later.
   const composingRef = useRef(false);
   const endedAtRef = useRef(0);
+  const submittingRef = useRef(false);
 
   // Ctrl-U discards to line start, ↑/↓ walk the persisted prompt history, Esc
   // stops a running turn (same logic as the Stop button). History is bucketed
@@ -101,38 +105,46 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const removeAttachment = (id: string) => setAttachments((prev) => prev.filter((a) => a.id !== id));
 
   const submit = async () => {
-    if (running || uploading) return;
+    if (uploading || submittingRef.current) return;
     const value = text.trim();
     if (!value && !attachments.length) return;
-
-    // Stage attachments first, then fold the returned host paths into the prompt.
-    let paths: string[] = [];
-    if (attachments.length) {
-      setUploading(true);
-      try {
-        const results = await Promise.allSettled(
-          attachments.map((a) => api.uploadAttachment({ sessionId, file: a.file })),
-        );
-        paths = results
-          .filter((r): r is PromiseFulfilledResult<{ ok: boolean; path: string }> => r.status === 'fulfilled')
-          .map((r) => r.value.path);
-        const failed = results.filter((r) => r.status === 'rejected').length;
-        if (failed) {
-          const first = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-          const msg = first?.reason instanceof ApiError ? first.reason.message : 'Upload failed';
-          setToast(paths.length ? `Uploaded ${paths.length}, ${failed} failed` : msg);
+    const submittedText = text;
+    const submittedAttachments = new Set(attachments.map((attachment) => attachment.id));
+    submittingRef.current = true;
+    try {
+      // Stage attachments first, then fold the returned host paths into the prompt.
+      let paths: string[] = [];
+      if (attachments.length) {
+        setUploading(true);
+        try {
+          const results = await Promise.allSettled(
+            attachments.map((a) => api.uploadAttachment({ sessionId, file: a.file })),
+          );
+          paths = results
+            .filter((r): r is PromiseFulfilledResult<{ ok: boolean; path: string }> => r.status === 'fulfilled')
+            .map((r) => r.value.path);
+          const failed = results.filter((r) => r.status === 'rejected').length;
+          if (failed) {
+            const first = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+            const msg = first?.reason instanceof ApiError ? first.reason.message : 'Upload failed';
+            setToast(paths.length ? `Uploaded ${paths.length}, ${failed} failed` : msg);
+          }
+        } finally {
+          setUploading(false);
         }
-      } finally {
-        setUploading(false);
       }
-    }
 
-    const message = buildMessage(value, paths);
-    if (!message) return; // uploads failed and there was no text — nothing to send
-    sendMessage(message);
-    keys.commit(value);
-    setText('');
-    setAttachments([]);
+      const message = buildMessage(value, paths);
+      if (!message) return; // uploads failed and there was no text — nothing to send
+      // Uploads may finish after the user switches tabs. Never send to whatever
+      // happens to be active at that later moment.
+      if (!sendMessage(message, sessionId)) return;
+      keys.commit(value);
+      if (useStore.getState().activeId === sessionId) setText((current) => current === submittedText ? '' : current);
+      setAttachments((current) => current.filter((attachment) => !submittedAttachments.has(attachment.id)));
+    } finally {
+      submittingRef.current = false;
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -221,9 +233,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
     </div>
   );
 
-  const actionButton = running ? (
+  const queueing = running || queuedCount > 0;
+  const actionButton = <>
+    {running && (
     <button
       onClick={abort}
+      disabled={!connected}
       title="Stop current response"
       aria-label="Stop current response"
       className={cn(
@@ -233,22 +248,23 @@ export function Composer({ sessionId }: { sessionId: string }) {
     >
       {cli ? 'stop' : <Square className="h-4 w-4 fill-current" />}
     </button>
-  ) : (
+  )}
     <button
       onClick={() => void submit()}
-      disabled={busy || (!text.trim() && !hasAttachments)}
-      title="Send"
+      disabled={!connected || busy || (!text.trim() && !hasAttachments)}
+      title={queueing ? 'Queue message' : 'Send'}
+      aria-label={queueing ? 'Queue message' : 'Send'}
       className={cn(
         'flex shrink-0 items-center justify-center text-accent-fg transition hover:bg-accent-soft disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-slate-500',
         cli ? 'h-8 bg-accent px-2 font-mono text-[11px]' : 'h-9 w-9 rounded-xl bg-accent',
       )}
     >
-      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : cli ? 'send' : <ArrowUp className="h-4 w-4" />}
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : cli ? queueing ? 'queue' : 'send' : <ArrowUp className="h-4 w-4" />}
     </button>
-  );
+  </>;
 
   const placeholder = running
-    ? `${agentName} is working…`
+    ? `${agentName} is working — Enter to queue the next request`
     : activeTaskCount
       ? `Message ${agentName} — ${activeTaskCount} background task${activeTaskCount === 1 ? '' : 's'} still running`
       : isDesktop
@@ -271,6 +287,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
     return (
       <div className="shrink-0 bg-ink-950 px-4 pb-5 pt-2 md:px-6">
         <div className="mx-auto max-w-4xl">
+          <RequestQueuePane sessionId={sessionId} />
           <div {...dragHandlers} className="relative">
             {dragging && (
               <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-ink-900/70 font-mono text-[12px] text-accent-soft">
@@ -293,7 +310,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={running || uploading}
+                disabled={uploading}
                 title="Attach files"
                 className="flex h-8 w-8 shrink-0 items-center justify-center text-slate-400 transition hover:bg-ink-800 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -310,6 +327,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   return (
     <div className="shrink-0 px-4 pb-6 pt-1 md:px-6">
       <div className="mx-auto max-w-3xl">
+        <RequestQueuePane sessionId={sessionId} />
         <div {...dragHandlers}>
           <Glass
             className={cn(
@@ -345,7 +363,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={running || uploading}
+                disabled={uploading}
                 title="Attach files"
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-400 transition hover:bg-ink-800 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
               >

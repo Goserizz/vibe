@@ -148,6 +148,7 @@ function buildNodes(ctx: BuildContext): Node[] {
     message_id: crypto.randomUUID(),
     role,
     content,
+    ...(role === 'assistant' ? { tool_calls: [] } : {}),
     metadata: {
       num_tokens: null,
       is_user_input: role === 'user',

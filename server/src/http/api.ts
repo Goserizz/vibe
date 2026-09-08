@@ -98,6 +98,8 @@ import { mcpRegistry } from '../mcp/registry.js';
 import { oauthStore } from '../mcp/oauth.js';
 import { presetRegistry } from '../presets/registry.js';
 import { deleteSkill, listSkills, readSkill, validateSkillName, writeSkill } from '../skills/skills.js';
+import { globalSkillService, globalSkillStore } from '../skills/global.js';
+import { createGlobalSkillRouter } from '../skills/globalApi.js';
 import { listConfigFiles, readConfigFile, writeConfigFile } from '../agentconfig/registry.js';
 import { resolveRemoteSession } from '../remote/discovery.js';
 import { sshExec, loginShellCommand, shQuote } from '../remote/ssh.js';
@@ -547,6 +549,7 @@ export function createApiRouter(): Router {
   });
 
   router.use(requireAuth);
+  router.use('/skills/global', createGlobalSkillRouter(globalSkillService));
 
   // -- Durable monitors ------------------------------------------------------
 
@@ -728,6 +731,13 @@ export function createApiRouter(): Router {
   router.delete('/accounts/:name', requireAdmin, (req, res) => {
     try {
       const name = String(req.params.name);
+      if (name === 'admin' || !accountManager.list().some((account) => account.name === name)) {
+        // Reuse the existing account error without touching any skill data.
+        accountManager.remove(name);
+      }
+      // Remove credential-bearing definitions before deleting the identity;
+      // re-creating an account with the same name must not inherit old skills.
+      globalSkillStore.removeOwnedBy(name);
       accountManager.remove(name);
       // Accounts are peers — nobody inherits the deleted account's hosts, so
       // they (and their sessions) go away with it.

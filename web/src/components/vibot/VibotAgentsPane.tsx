@@ -4,6 +4,7 @@ import type { AgentKind, SessionMeta, VibotLinkedSession } from '@shared/protoco
 import { useStore } from '../../store/store';
 import { useVibotStore } from '../../store/vibot';
 import { SessionStatusIcon } from '../SessionStatusIcon';
+import { SessionMonitorBadge } from '../SessionMonitorBadge';
 import { agentLabel, cn } from '../../lib/format';
 
 const EMPTY_LINKED: VibotLinkedSession[] = [];
@@ -136,8 +137,9 @@ export function VibotAgentsPane({
                       cli={cli}
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[12.5px] text-slate-300" title={row.title}>
-                        {row.title}
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-[12.5px] text-slate-300" title={row.title}>{row.title}</span>
+                        <SessionMonitorBadge sessionId={row.id} />
                       </div>
                       <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-slate-500">
                         <span>

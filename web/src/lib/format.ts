@@ -1,5 +1,5 @@
 import { clsx, type ClassValue } from 'clsx';
-import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
+import type { AgentKind, EffortLevel, PermissionMode } from '../../../shared/protocol';
 
 export const cn = (...inputs: ClassValue[]) => clsx(inputs);
 
@@ -36,7 +36,7 @@ export function relativeTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
-/** End-of-turn clock, always Beijing time (UTC+8) regardless of viewer locale. */
+/** Compact notice clock, always Beijing time (UTC+8) regardless of viewer locale. */
 const beijingTime = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Asia/Shanghai',
   hour: '2-digit',
@@ -47,6 +47,24 @@ const beijingTime = new Intl.DateTimeFormat('en-GB', {
 
 export function beijingClock(ts: number): string {
   return Number.isFinite(ts) ? `${beijingTime.format(ts)} UTC+8` : '';
+}
+
+const beijingDateTimeFormat = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+/** End-of-turn timestamp: YYYY-MM-DD HH:mm:ss UTC+8, including the local date. */
+export function beijingDateTime(ts: number): string {
+  if (!Number.isFinite(ts) || Number.isNaN(new Date(ts).getTime())) return '';
+  const parts = Object.fromEntries(beijingDateTimeFormat.formatToParts(ts).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} UTC+8`;
 }
 
 /** Compact token count: 950 → "950", 84213 → "84.2k", 1250000 → "1.3M". */
@@ -135,9 +153,6 @@ export const GROK_MODELS: ModelOption[] = [
  *  `providerID/modelID` — the format ZCode's config uses for `model.main`. */
 export const ZCODE_MODELS: ModelOption[] = [
   { value: 'auto', label: 'Auto' },
-  { value: 'bigmodel/GLM-5.3', label: 'GLM-5.3' },
-  { value: 'bigmodel/GLM-5.2', label: 'GLM-5.2' },
-  { value: 'bigmodel/GLM-5-Turbo', label: 'GLM-5-Turbo' },
 ];
 
 /** Fallback CodeBuddy models until the live list from `codebuddy --help`

@@ -4,6 +4,9 @@ import { WebSocket } from 'ws';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { startRun, type RunHandle } from '../claude/runner.js';
+import type { RunCallbacks } from '../claude/types.js';
+import { requestQueueStore, type RequestQueueStore } from '../sessions/requestQueue.js';
+import type { RequestQueuePauseReason, SessionRequestQueueState } from '../../../shared/protocol.js';
 import { isContentEvent } from '../claude/retry.js';
 import { startCursorRun } from '../cursor/runner.js';
 import {
@@ -201,6 +204,12 @@ interface LoggedEvent {
 
 type MetaListener = () => void;
 
+export interface HubOptions {
+  queueStore?: RequestQueueStore;
+  /** Injectable launcher for isolated lifecycle tests; production uses native runners. */
+  runFactory?: (agent: AgentKind, prompt: string, callbacks: RunCallbacks) => RunHandle;
+}
+
 interface TurnPresentation {
   /** User turns render their original prompt. Monitor turns render only a
    * trusted system notice while the full incident envelope goes to the model. */
@@ -354,12 +363,21 @@ class SessionRuntime {
    *  land inside the 3s window still persists while the run sits open on a
    *  persistent background task (no further emits, no finishTurn). */
   private persistTimer?: NodeJS.Timeout;
+  private requestQueueTimer?: NodeJS.Immediate;
+  private drainingRequests = false;
+  private queueError?: string;
+  private foregroundFailed = false;
+  private foregroundStopped = false;
+  private shuttingDown = false;
+  private readonly requestQueues: RequestQueueStore;
 
   constructor(
     readonly sessionId: string,
     init: RuntimeInit,
     private readonly onMeta: MetaListener,
+    private readonly options: HubOptions = {},
   ) {
+    this.requestQueues = options.queueStore ?? requestQueueStore;
     this.cwd = init.cwd;
     this.model = init.model;
     this.permissionMode = init.permissionMode;
@@ -405,6 +423,8 @@ class SessionRuntime {
 
   private emit(ev: LiveEvent): void {
     if (this.retired) return;
+    if (ev.k === 'error') this.foregroundFailed = true;
+    if (ev.k === 'block' && ev.block.kind === 'result') this.foregroundFailed = Boolean(ev.block.isError);
     // Engine content with no user message since the last turn ended = a
     // background-task wake — mark it before the content renders. Result/error
     // blocks close a turn and re-arm the detector for the next one.
@@ -531,6 +551,7 @@ class SessionRuntime {
   }
 
   private upsertTask(task: BackgroundTask): void {
+    if (this.retired) return;
     const wasRunning = this.hasActiveBackgroundTasks();
     const previous = this.tasks.get(task.id);
     const merged: BackgroundTask = previous ? { ...previous, ...task } : task;
@@ -538,6 +559,7 @@ class SessionRuntime {
     this.lastActivity = Date.now();
     this.emit({ k: 'task_upsert', task: merged });
     if (wasRunning !== this.hasActiveBackgroundTasks()) this.onMeta();
+    if (!this.running) this.scheduleRequests();
   }
 
   /** A block is safe to append once nothing will mutate it again: streaming
@@ -608,11 +630,108 @@ class SessionRuntime {
   /** `running` means a foreground model turn is producing a reply. The agent
    *  transport can remain alive with this false while background tasks run. */
   private setForegroundRunning(running: boolean): void {
+    if (this.retired) return;
     if (this.running === running) return;
+    if (running) {
+      this.foregroundFailed = false;
+      this.foregroundStopped = false;
+    }
     this.running = running;
     this.lastActivity = Date.now();
     this.emit({ k: 'run_state', running });
+    if (!running) this.completeQueuedTurn();
     this.onMeta();
+    if (!running) this.scheduleRequests();
+  }
+
+  requestQueueState(): SessionRequestQueueState {
+    try { return { ...this.requestQueues.snapshot(this.sessionId), ...(this.queueError ? { error: this.queueError } : {}) }; }
+    catch (error) { return { items: [], paused: true, reason: 'unavailable', error: error instanceof Error ? error.message : 'Request queue unavailable' }; }
+  }
+
+  publishRequestQueue(): void {
+    const frame: ServerEvent = { t: 'request_queue', sessionId: this.sessionId, queue: this.requestQueueState() };
+    for (const conn of this.subscribers) if (sessionVisible(conn.account, this.sessionId)) conn.send(frame);
+  }
+
+  enqueueRequest(owner: string, id: string, text: string): void {
+    this.requestQueues.enqueue(this.sessionId, owner, id, text);
+    this.queueError = undefined;
+    this.publishRequestQueue();
+    // Idle sends still start synchronously for Telegram/delegate callers.
+    this.drainRequests();
+  }
+
+  changeQueue(action: 'remove' | 'pause' | 'resume', owner: string, id?: string): void {
+    if (action === 'remove' && !this.requestQueues.remove(this.sessionId, id ?? '')) throw new Error('Request already started or was removed.');
+    if (action === 'pause') this.requestQueues.pause(this.sessionId, 'manual');
+    if (action === 'resume') {
+      if (!this.running && this.foregroundFailed) this.requestQueues.complete(this.sessionId, 'error');
+      this.requestQueues.resume(this.sessionId, owner);
+    }
+    this.queueError = undefined;
+    this.publishRequestQueue();
+    if (action === 'resume') this.drainRequests();
+  }
+
+  private scheduleRequests(): void {
+    if (this.requestQueueTimer || this.retired || this.shuttingDown) return;
+    this.requestQueueTimer = setImmediate(() => {
+      this.requestQueueTimer = undefined;
+      this.drainRequests();
+    });
+  }
+
+  private drainRequests(): void {
+    if (this.running || this.drainingRequests || this.retired || this.shuttingDown) return;
+    // A completed foreground turn can still be closing its transport. Only
+    // reuse a live runner when it is actually managing background work.
+    if (this.run && !this.hasActiveBackgroundTasks()) return;
+    this.drainingRequests = true;
+    try {
+      const next = this.requestQueues.peek(this.sessionId);
+      if (!next) return;
+      if (!sessionVisible(next.owner, this.sessionId)) {
+        this.requestQueues.pause(this.sessionId, 'unavailable');
+        return;
+      }
+      const claimed = this.requestQueues.claim(this.sessionId);
+      if (!claimed) return;
+      try {
+        if (!this.startTurn(claimed.text, claimed.id)) this.requestQueues.restore(this.sessionId);
+      } catch (error) {
+        this.requestQueues.restore(this.sessionId, 'error');
+        this.foregroundFailed = true;
+        this.setForegroundRunning(false);
+        throw error;
+      }
+      this.queueError = undefined;
+    } catch (error) {
+      this.queueError = error instanceof Error ? error.message : 'Could not start the next request';
+    } finally {
+      this.drainingRequests = false;
+      this.publishRequestQueue();
+    }
+  }
+
+  private completeQueuedTurn(final = false): void {
+    if (this.shuttingDown || this.retired) return;
+    const reason: RequestQueuePauseReason | undefined = this.foregroundStopped ? 'stopped' : this.foregroundFailed ? 'error' : undefined;
+    try {
+      // A runner may retry a failed attempt inside the same RunHandle. Keep
+      // its active claim until it succeeds or the handle actually finishes.
+      if (reason === 'error' && !final) this.requestQueues.pause(this.sessionId, reason);
+      else this.requestQueues.complete(this.sessionId, reason);
+      this.queueError = undefined;
+    } catch (error) { this.queueError = error instanceof Error ? error.message : 'Request queue unavailable'; }
+    this.publishRequestQueue();
+  }
+
+  prepareForShutdown(): void {
+    this.shuttingDown = true;
+    if (this.requestQueueTimer) clearImmediate(this.requestQueueTimer);
+    this.requestQueueTimer = undefined;
+    try { this.requestQueues.pause(this.sessionId, 'restart'); } catch { /* The previously persisted queue remains recoverable. */ }
   }
 
   /** A background-task completion started an engine turn — content is about to
@@ -831,7 +950,9 @@ class SessionRuntime {
       onTurnState: (running: boolean) => this.setForegroundRunning(running),
     };
 
-    if (this.agent === 'cursor') {
+    if (this.options.runFactory) {
+      this.run = this.options.runFactory(this.agent, text, cb);
+    } else if (this.agent === 'cursor') {
       this.run = startCursorRun(
         {
           prompt: text,
@@ -967,7 +1088,11 @@ class SessionRuntime {
     }
 
     const activeRun = this.run;
-    void activeRun.done.then(() => this.finishTurn(activeRun));
+    void activeRun.done.then(() => this.finishTurn(activeRun), (error) => {
+      if (this.retired || this.run !== activeRun) return;
+      this.emit({ k: 'error', text: error instanceof Error ? error.message : 'Agent run failed' });
+      this.finishTurn(activeRun);
+    });
     return true;
   }
 
@@ -1044,6 +1169,8 @@ class SessionRuntime {
       });
     }
     this.onMeta();
+    this.completeQueuedTurn(true);
+    this.scheduleRequests();
   }
 
   private requestPermission(request: PermissionRequest): Promise<PermissionDecision> {
@@ -1071,6 +1198,9 @@ class SessionRuntime {
 
   abort(): void {
     if (!this.running) return;
+    this.foregroundStopped = true;
+    try { this.requestQueues.pause(this.sessionId, 'stopped'); } catch { /* Preserve existing disk state. */ }
+    this.publishRequestQueue();
     // A permission callback is part of the foreground turn. Resolve it before
     // interrupting so the runner cannot remain blocked on Vibe after Stop.
     for (const [requestId, pending] of this.pending) {
@@ -1090,6 +1220,9 @@ class SessionRuntime {
   /** Permanently detach this runtime after an agent/model switch. */
   retire(): void {
     this.retired = true;
+    if (this.requestQueueTimer) clearImmediate(this.requestQueueTimer);
+    this.requestQueueTimer = undefined;
+    try { this.requestQueues.pause(this.sessionId, 'manual'); } catch { /* Do not overwrite unavailable queue data. */ }
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = undefined;
@@ -1114,7 +1247,7 @@ class SessionRuntime {
   }
 
   hasActivity(): boolean {
-    return Boolean(this.run) || this.hasActiveBackgroundTasks() || this.subscribers.size > 0 || this.pending.size > 0;
+    return Boolean(this.run) || this.hasActiveBackgroundTasks() || this.subscribers.size > 0 || this.pending.size > 0 || this.requestQueueState().items.length > 0;
   }
 
   hasLiveRun(): boolean {
@@ -1123,6 +1256,7 @@ class SessionRuntime {
 }
 
 export class Hub {
+  constructor(private readonly options: HubOptions = {}) {}
   private runtimes = new Map<string, SessionRuntime>();
   private conns = new Set<Conn>();
   /** Serializes agent switches and prevents a message racing the SQLite build. */
@@ -1143,7 +1277,7 @@ export class Hub {
     const init = this.resolveInit(sessionId);
     if (!init) return undefined;
 
-    rt = new SessionRuntime(sessionId, init, () => this.broadcastMeta(sessionId));
+    rt = new SessionRuntime(sessionId, init, () => this.broadcastMeta(sessionId), this.options);
     this.runtimes.set(sessionId, rt);
     return rt;
   }
@@ -1358,6 +1492,7 @@ export class Hub {
       reset: !ok,
       pendingPermissions: rt.pendingRequests(),
       tasks: rt.taskList(),
+      requestQueue: rt.requestQueueState(),
     });
   }
 
@@ -1368,16 +1503,16 @@ export class Hub {
 
   send(conn: Conn, sessionId: string, clientMsgId: string, text: string): void {
     if (!sessionVisible(conn.account, sessionId)) {
-      conn.send({ t: 'error', message: 'session not found', sessionId });
+      conn.send({ t: 'error', message: 'session not found', sessionId, clientMsgId });
       return;
     }
     if (this.switchingSessions.has(sessionId)) {
-      conn.send({ t: 'error', message: 'session is switching agent — try again when it finishes', sessionId });
+      conn.send({ t: 'error', message: 'session is switching agent — try again when it finishes', sessionId, clientMsgId });
       return;
     }
     const rt = this.runtimeFor(sessionId);
     if (!rt) {
-      conn.send({ t: 'error', message: 'session not found', sessionId });
+      conn.send({ t: 'error', message: 'session not found', sessionId, clientMsgId });
       return;
     }
     // Continuing a discovered CLI session adopts it into Vibe so running state
@@ -1398,22 +1533,34 @@ export class Hub {
     }
     rt.subscribers.add(conn);
     conn.subscriptions.add(sessionId);
-    const started = rt.startTurn(text, clientMsgId);
-    if (!started) {
-      conn.send({
-        t: 'error',
-        message:
-          rt.turnRejectReason === 'transport-dead'
-            ? 'agent connection lost — resend to start a new run'
-            : 'a turn is already running',
-        sessionId,
-      });
+    try {
+      rt.enqueueRequest(conn.account, clientMsgId, text);
+      conn.send({ t: 'send_ack', sessionId, clientMsgId });
+    } catch (error) {
+      conn.send({ t: 'error', message: error instanceof Error ? error.message : 'Could not queue request', sessionId, clientMsgId });
       return;
     }
     // Sending a message counts as activity — refresh updatedAt now so the
     // sidebar reorders immediately instead of waiting for turn end.
     sessionStore.update(sessionId, {});
     this.broadcastMeta(sessionId);
+  }
+
+  changeRequestQueue(conn: Conn, sessionId: string, action: 'remove' | 'pause' | 'resume', clientMsgId?: string): void {
+    if (!sessionVisible(conn.account, sessionId)) {
+      conn.send({ t: 'error', message: 'session not found', sessionId });
+      return;
+    }
+    if (this.switchingSessions.has(sessionId)) {
+      conn.send({ t: 'error', message: 'session is switching agent', sessionId });
+      return;
+    }
+    const rt = this.runtimeFor(sessionId);
+    if (!rt) { conn.send({ t: 'error', message: 'session not found', sessionId }); return; }
+    rt.subscribers.add(conn);
+    conn.subscriptions.add(sessionId);
+    try { rt.changeQueue(action, conn.account, clientMsgId); }
+    catch (error) { conn.send({ t: 'error', message: error instanceof Error ? error.message : 'Queue action failed', sessionId }); }
   }
 
   /** Start a model turn caused by a durable Monitor. The incident envelope is
@@ -1431,7 +1578,7 @@ export class Hub {
     if (this.switchingSessions.has(input.sessionId)) return 'switching';
     const rt = this.runtimeFor(input.sessionId);
     if (!rt) return 'not-found';
-    if (rt.running) return 'busy';
+    if (rt.running || (!rt.requestQueueState().paused && rt.requestQueueState().items.length)) return 'busy';
 
     // A monitor may target a discovered native session that has not yet been
     // adopted through the browser. Adopt it before the unattended turn so its
@@ -1711,6 +1858,7 @@ export class Hub {
     if (this.switchingSessions.has(sessionId)) return false;
     const rt = this.runtimes.get(sessionId);
     if (rt?.hasLiveRun() || rt?.hasActiveBackgroundTasks()) return false;
+    if (rt && !rt.requestQueueState().paused && rt.requestQueueState().items.length) return false;
     this.switchingSessions.add(sessionId);
     return true;
   }
@@ -1724,7 +1872,7 @@ export class Hub {
     const init = this.resolveInit(sessionId);
     if (!init) throw new Error('switched session could not be resolved');
     const previous = this.runtimes.get(sessionId);
-    const next = new SessionRuntime(sessionId, init, () => this.broadcastMeta(sessionId));
+    const next = new SessionRuntime(sessionId, init, () => this.broadcastMeta(sessionId), this.options);
     if (previous) {
       next.seq = previous.seq;
       for (const conn of previous.subscribers) next.subscribers.add(conn);
@@ -1735,6 +1883,7 @@ export class Hub {
 
   endAgentSwitch(sessionId: string): void {
     this.switchingSessions.delete(sessionId);
+    this.runtimes.get(sessionId)?.publishRequestQueue();
   }
 
   /** Broadcast updated session metadata — only to connections whose account
@@ -1766,6 +1915,8 @@ export class Hub {
   }
 
   broadcastRemoved(sessionId: string): void {
+    this.runtimes.get(sessionId)?.retire();
+    (this.options.queueStore ?? requestQueueStore).drop(sessionId);
     this.runtimes.delete(sessionId);
     for (const conn of this.conns) {
       if (sessionVisible(conn.account, sessionId)) conn.send({ t: 'session_removed', sessionId });
@@ -1787,6 +1938,10 @@ export class Hub {
         this.runtimes.delete(id);
       }
     }
+  }
+
+  prepareForShutdown(): void {
+    for (const runtime of this.runtimes.values()) runtime.prepareForShutdown();
   }
 }
 

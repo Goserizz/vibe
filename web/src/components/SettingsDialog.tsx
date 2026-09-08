@@ -273,8 +273,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 <h3 className="text-xs font-medium text-slate-400">Skills</h3>
               </div>
               <p className="mb-3 text-[12px] leading-relaxed text-slate-600">
-                Author personal skills or browse installed ones for Claude, Cursor, Codex, Kimi, Kiro, Grok, and ZCode (all use the same{' '}
-                <span className="font-mono">SKILL.md</span> standard). Pick an agent + host; system/plugin skills are read-only.
+                Create global skills for all your hosts, or manage host-local skills across all agents (all use the same{' '}
+                <span className="font-mono">SKILL.md</span> standard). Global deployment tracks offline hosts and conflicts; system/plugin skills are read-only.
                 Skills compiled into an agent binary aren&apos;t on disk and can&apos;t be listed.
               </p>
               <SkillRegistry />

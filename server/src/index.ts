@@ -13,6 +13,7 @@ import { prefetchSessionList, startSessionListRefresher, stopSessionListRefreshe
 import { prefetchAgentModels } from './agents/prefetchModels.js';
 import { scheduleZcodeAutoUpdate, stopZcodeAutoUpdate } from './zcode/autoUpdate.js';
 import { monitorService } from './monitoring/service.js';
+import { globalSkillService } from './skills/global.js';
 import { hub } from './ws/hub.js';
 
 function localIPs(): string[] {
@@ -88,6 +89,7 @@ function main(): void {
     telegram = startTelegramBot();
     scheduleZcodeAutoUpdate();
     monitorService.start();
+    globalSkillService.start();
   });
 
   server.on('error', (err) => {
@@ -99,9 +101,11 @@ function main(): void {
   // systemd restart doesn't hang waiting for the old process.
   const shutdown = async (signal: string) => {
     log.info(`shutting down (${signal})…`);
+    hub.prepareForShutdown();
     stopSessionListRefresher();
     stopZcodeAutoUpdate();
     monitorService.stop();
+    globalSkillService.stop();
     try {
       await telegram?.stop();
     } catch (err) {

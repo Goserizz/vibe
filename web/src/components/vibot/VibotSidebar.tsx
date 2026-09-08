@@ -15,6 +15,7 @@ import { useVibotStore } from '../../store/vibot';
 import { useStore } from '../../store/store';
 import { Glass } from '../LiquidGlass';
 import { SessionStatusIcon } from '../SessionStatusIcon';
+import { SessionMonitorBadge } from '../SessionMonitorBadge';
 import { agentLabel, cn, relativeTime } from '../../lib/format';
 
 interface Props {
@@ -365,7 +366,10 @@ function LinkedSessionItem({
           />
         </div>
         <div className="min-w-0 flex-1">
-          <span className={cn('block truncate text-[12px]', previewing ? 'text-slate-100' : 'text-slate-300')}>{title}</span>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className={cn('min-w-0 flex-1 truncate text-[12px]', previewing ? 'text-slate-100' : 'text-slate-300')}>{title}</span>
+            <SessionMonitorBadge sessionId={session.id} />
+          </div>
           <div className="mt-0.5 truncate text-[10px] text-slate-600">
             {agentLabel(agent)} · {host}
           </div>

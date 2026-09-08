@@ -142,8 +142,9 @@ export function splitZcodeModel(value: string): { providerId: string; modelId: s
 
 /**
  * Build the `runtimeModel` param that clears the resumed-session
- * "model no longer available" restoreWarning. Needs the provider section from
- * ~/.zcode/cli/config.json; a minimal stub breaks the turn, so local-only.
+ * "model no longer available" restoreWarning. This legacy fallback reads the
+ * Vibe host's provider config and sends a session-scoped runtime model; it does
+ * not initialize a remote user's config or help a fresh session/create.
  */
 function buildRuntimeModel(model: string): Record<string, unknown> | null {
   const parsed = splitZcodeModel(model);
@@ -278,6 +279,9 @@ class ZcodeRpc {
 
   /** Graceful close: end stdin so ZCode can flush its SQLite store, then kill. */
   async close(): Promise<void> {
+    // Stop accepting queued prompts as soon as teardown starts, not only when
+    // the child eventually exits. Background-job state may be a poll behind.
+    this.closed = true;
     try {
       this.child.stdin?.end();
     } catch {

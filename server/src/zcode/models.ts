@@ -36,9 +36,6 @@ export const ZCODE_PERMISSIONS: ZcodePermissionOption[] = [
 
 const FALLBACK: ZcodeModelOption[] = [
   AUTO_MODEL,
-  { value: 'bigmodel/GLM-5.3', label: 'GLM-5.3' },
-  { value: 'bigmodel/GLM-5.2', label: 'GLM-5.2' },
-  { value: 'bigmodel/GLM-5-Turbo', label: 'GLM-5-Turbo' },
 ];
 
 /** Shape of ~/.zcode/cli/config.json (only the parts Vibe reads). */
@@ -118,7 +115,7 @@ async function fetchLocal(): Promise<ZcodeModelOption[] | null> {
   try {
     const raw = fs.readFileSync(config.zcodeConfigFile, 'utf8');
     const models = parseZcodeModels(raw);
-    if (models.length > 1) return models;
+    return models;
   } catch {
     /* config missing — fall through to fallback */
   }
@@ -133,7 +130,7 @@ async function fetchRemote(hostName: string): Promise<ZcodeModelOption[] | null>
   const res = await sshExec(host.ssh, cmd, { timeoutMs: 15_000 });
   if (res.code !== 0 || !res.stdout.trim()) return null;
   const models = parseZcodeModels(res.stdout);
-  return models.length > 1 ? models : null;
+  return models;
 }
 
 /** Models configured in the local ~/.zcode/cli/config.json. Never blocks. */

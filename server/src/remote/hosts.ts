@@ -50,6 +50,12 @@ export class HostRegistryError extends Error {
  */
 class HostRegistry {
   private hosts = new Map<string, RemoteHost>();
+  private changeListeners = new Set<() => void>();
+
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => { this.changeListeners.delete(listener); };
+  }
 
   constructor() {
     this.load();
@@ -91,6 +97,7 @@ class HostRegistry {
     } catch (err) {
       log.error('failed to persist hosts', err);
     }
+    for (const listener of this.changeListeners) listener();
   }
 
   list(): RemoteHost[] {

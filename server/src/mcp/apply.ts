@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { log } from '../log.js';
-import { config } from '../config.js';
 import { sshExec } from '../remote/ssh.js';
 import { oauthStore } from './oauth.js';
+import { reconcileZcodeMcp, type ZcodeConfigOptions, type ZcodeConfigState } from '../zcode/configFile.js';
 import type { McpServerDef } from '../../../shared/protocol.js';
 
 /**
@@ -199,12 +199,13 @@ function codexBlock(defs: McpServerDef[]): string {
         lines.push(`env = { ${Object.entries(d.env).map(([k, v]) => `${tomlStr(k)} = ${tomlStr(v)}`).join(', ')} }`);
     } else {
       if (d.url) lines.push(`url = ${tomlStr(d.url)}`);
-      // Codex reads per-server headers from a nested table (best-effort; some
-      // codex builds attach them to remote MCP requests, enabling OAuth bearer).
+      // Codex calls this map `http_headers`, unlike the `headers` field used
+      // by the other engines. Unknown `headers` entries are silently ignored,
+      // so using that spelling drops Authorization and causes MCP HTTP 401s.
       const headers = headersFor(d);
       if (headers && Object.keys(headers).length) {
         lines.push('');
-        for (const [k, v] of Object.entries(headers)) lines.push(`headers.${tomlStr(k)} = ${tomlStr(v)}`);
+        for (const [k, v] of Object.entries(headers)) lines.push(`http_headers.${tomlStr(k)} = ${tomlStr(v)}`);
       }
     }
     lines.push('');
@@ -213,15 +214,25 @@ function codexBlock(defs: McpServerDef[]): string {
   return lines.join('\n');
 }
 
+/** File IO is injectable so config regression tests never touch a real CLI home. */
+export interface CodexMcpApplyDeps {
+  readFile?: typeof readManagedFile;
+  writeFile?: typeof writeManagedFile;
+}
+
 /** Reconcile the Vibe-managed `[mcp_servers.*]` block in `~/.codex/config.toml`. */
-export async function applyCodexMcp(defs: McpServerDef[], remote?: RemoteTarget): Promise<void> {
+export async function applyCodexMcp(
+  defs: McpServerDef[],
+  remote?: RemoteTarget,
+  deps: CodexMcpApplyDeps = {},
+): Promise<void> {
   await refreshOauthTokens(defs);
   const block = defs.length ? codexBlock(defs) : '';
   const sig = block;
   if (sigCache.get(codexKey(remote)) === sig) return;
 
   try {
-    const raw = await readManagedFile('~/.codex/config.toml', remote);
+    const raw = await (deps.readFile ?? readManagedFile)('~/.codex/config.toml', remote);
     // Strip any previous managed block (markers + everything between).
     const stripped = raw.replace(CODEX_BLOCK, '').replace(/\n{3,}/g, '\n\n').trimEnd();
     const out = stripped ? `${stripped}\n\n${block}\n` : block ? `${block}\n` : '';
@@ -230,7 +241,7 @@ export async function applyCodexMcp(defs: McpServerDef[], remote?: RemoteTarget)
       sigCache.set(codexKey(remote), sig);
       return;
     }
-    await writeManagedFile('~/.codex/config.toml', out, remote);
+    await (deps.writeFile ?? writeManagedFile)('~/.codex/config.toml', out, remote);
     sigCache.set(codexKey(remote), sig);
   } catch (err) {
     log.warn('codex mcp apply failed', err);
@@ -262,84 +273,17 @@ function zcodeEntry(def: McpServerDef): Record<string, unknown> | undefined {
  * JSON config before starting app-server. The managed-name list lives in a
  * Vibe sidecar rather than an unknown config key that a strict ZCode build
  * could reject. User-authored MCP entries are preserved. */
-export async function applyZcodeMcp(defs: McpServerDef[], remote?: RemoteTarget): Promise<void> {
+export async function applyZcodeMcp(defs: McpServerDef[], remote?: RemoteTarget, options: ZcodeConfigOptions = {}): Promise<ZcodeConfigState | undefined> {
   await refreshOauthTokens(defs);
   const desired: Record<string, unknown> = {};
   for (const def of defs) {
     const entry = zcodeEntry(def);
     if (entry) desired[def.name] = entry;
   }
-  const sig = JSON.stringify(desired);
-  const key = `zcode:${remote?.sshTarget ?? 'local'}`;
-  if (sigCache.get(key) === sig) return;
-
   try {
-    let configRaw = '';
-    let managedRaw = '';
-    if (remote) {
-      const [cfg, managed] = await Promise.all([
-        sshExec(remote.sshTarget, 'cat ~/.zcode/cli/config.json 2>/dev/null', { timeoutMs: 15_000 }),
-        sshExec(remote.sshTarget, 'cat ~/.vibe/zcode-managed-mcp.json 2>/dev/null', { timeoutMs: 15_000 }),
-      ]);
-      configRaw = cfg.code === 0 ? cfg.stdout : '';
-      managedRaw = managed.code === 0 ? managed.stdout : '';
-    } else {
-      try { configRaw = fs.readFileSync(config.zcodeConfigFile, 'utf8'); } catch { /* first config */ }
-      try { managedRaw = fs.readFileSync(path.join(config.home, 'zcode-managed-mcp.json'), 'utf8'); } catch { /* first run */ }
-    }
-
-    let root: Record<string, unknown>;
-    if (!configRaw.trim()) {
-      root = {};
-    } else {
-      const parsed = JSON.parse(configRaw) as unknown;
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('ZCode config root is not a JSON object');
-      }
-      root = parsed as Record<string, unknown>;
-    }
-    const mcp = root.mcp && typeof root.mcp === 'object'
-      ? { ...(root.mcp as Record<string, unknown>) }
-      : {};
-    const servers = mcp.servers && typeof mcp.servers === 'object'
-      ? { ...(mcp.servers as Record<string, unknown>) }
-      : {};
-    let previous: string[] = [];
-    try {
-      const parsed = JSON.parse(managedRaw) as unknown;
-      if (Array.isArray(parsed)) previous = parsed.map(String);
-    } catch { /* absent/corrupt sidecar: merge without deleting user entries */ }
-    for (const name of previous) delete servers[name];
-    Object.assign(servers, desired);
-    mcp.servers = servers;
-    root.mcp = mcp;
-    const configOut = `${JSON.stringify(root, null, 2)}\n`;
-    const managedOut = `${JSON.stringify(Object.keys(desired), null, 2)}\n`;
-
-    if (remote) {
-      const cfgWrite = await sshExec(
-        remote.sshTarget,
-        'mkdir -p ~/.zcode/cli ~/.vibe && cfg=~/.zcode/cli/config.json.vibe-tmp && cat > "$cfg" && mv "$cfg" ~/.zcode/cli/config.json',
-        { input: configOut, timeoutMs: 15_000 },
-      );
-      if (cfgWrite.code !== 0) throw new Error(cfgWrite.stderr.trim() || 'remote ZCode config write failed');
-      const sideWrite = await sshExec(
-        remote.sshTarget,
-        'side=~/.vibe/zcode-managed-mcp.json.vibe-tmp && cat > "$side" && mv "$side" ~/.vibe/zcode-managed-mcp.json',
-        { input: managedOut, timeoutMs: 15_000 },
-      );
-      if (sideWrite.code !== 0) throw new Error(sideWrite.stderr.trim() || 'remote ZCode MCP sidecar write failed');
-    } else {
-      fs.mkdirSync(path.dirname(config.zcodeConfigFile), { recursive: true });
-      const cfgTmp = `${config.zcodeConfigFile}.vibe-tmp`;
-      fs.writeFileSync(cfgTmp, configOut);
-      fs.renameSync(cfgTmp, config.zcodeConfigFile);
-      const side = path.join(config.home, 'zcode-managed-mcp.json');
-      const sideTmp = `${side}.vibe-tmp`;
-      fs.writeFileSync(sideTmp, managedOut);
-      fs.renameSync(sideTmp, side);
-    }
-    sigCache.set(key, sig);
+    // Deliberately no signature shortcut: model/config files can change
+    // independently of MCP. The on-host transaction avoids redundant writes.
+    return await reconcileZcodeMcp(desired, remote, options);
   } catch (error) {
     log.warn('zcode mcp apply failed', error);
   }

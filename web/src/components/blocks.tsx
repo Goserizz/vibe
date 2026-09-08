@@ -30,7 +30,7 @@ import type {
   UserBlock,
 } from '@shared/protocol';
 import { Markdown } from './Markdown';
-import { beijingClock, cn, formatTokens } from '../lib/format';
+import { beijingClock, beijingDateTime, cn, formatTokens } from '../lib/format';
 import { stripAttachments } from '../lib/attachments';
 
 export const BlockView = memo(function BlockView({ block, sessionId }: { block: ChatBlock; sessionId?: string }) {
@@ -633,7 +633,7 @@ function ResultView({ block }: { block: ResultBlock }) {
   // message draws the boundary line, so this renders as a plain footnote.
   const parts: string[] = [];
   if (typeof block.durationMs === 'number') parts.push(`${(block.durationMs / 1000).toFixed(1)}s`);
-  const ended = beijingClock(block.ts);
+  const ended = beijingDateTime(block.ts);
   if (ended) parts.push(ended);
   const used = formatTokens(block.contextUsed ?? 0);
   if (used) {

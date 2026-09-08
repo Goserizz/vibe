@@ -31,6 +31,26 @@ compact composer stack on smaller screens). Expand a row to see the latest
 result, next check, wake count, and open incident; the row also provides Run
 now, pause/start, and full-settings controls.
 
+The right-side pane and conversation-list badges use the same in-memory,
+account-scoped definition snapshot. Incident history loads independently: an
+events failure or delay cannot hide known monitors. Concurrent refreshes are
+serialized and coalesced, but every completed valid snapshot is published even
+when another refresh is queued. Switching conversations immediately filters
+the cached definitions instead of blanking the pane while fetching again.
+
+Each browser read has a 20-second deadline and is aborted on timeout. Initial
+loading, definition errors, and event-history errors are shown in the pane with
+a retry action; a failed refresh preserves the last good data. These are UI
+read errors, not proof that a server-side monitor has stopped. Account changes
+clear the shared snapshot, and session/account changes cancel old event reads.
+
+Regression verification (2026-09-07): typecheck/build passed; 545 tests passed
+with no skips, including 11 new request-lifecycle cases. Firefox and Chromium
+browser checks cover a successful response arriving after the 15-second poll,
+independently hanging event reads, visible timeouts/retry, retained snapshots,
+cached session switching, deletion, compact layout, and light/dark CLI/chat UI.
+Browser fault injection uses synthetic API/WS data, without running real probes.
+
 Example Airflow probe:
 
 ```sh
@@ -40,6 +60,31 @@ python3 scripts/check_airflow_health.py
 The script should print a concise diagnosis and exit non-zero only when agent
 action is needed. Keep credentials in the host's environment/configuration,
 never in the monitor command or runbook.
+
+## Conversation list markers
+
+Coding conversation rows show a separate Monitor badge beside the title,
+including search results and linked coding sessions in Vibot:
+
+- Green: at least one Monitor is enabled, even when the agent itself is idle.
+- Amber: an enabled Monitor is firing or has a probe error. A recheck keeps
+  the warning until a successful probe confirms recovery.
+- Gray: all attached Monitors are paused or still drafts.
+- A number appears when multiple Monitors are attached; the tooltip and
+  accessible label give enabled/total and attention counts.
+
+The marker is independent of the existing running, unread, background-task
+and favorite indicators, so none of those is hidden by monitoring. It does not
+change list ordering or enable a Monitor. Binding uses the stable Vibe session
+id, so switching agents preserves the marker, while rebinding/deletion clears
+the old conversation's marker.
+
+The browser loads one account-scoped Monitor snapshot for the list and task pane,
+without requiring the Monitoring panel to be opened or blocking app startup.
+WebSocket changes and reconnection refresh it immediately; a single 30-second
+refresh (15 seconds while a conversation is open) covers transient failures or
+missed events. Concurrent requests are coalesced, and responses from a previous
+login are discarded. The list is never coupled to incident-history availability.
 
 ## Incident lifecycle
 
@@ -102,7 +147,40 @@ broad Vibe login token is never given to the agent. Without this setting,
 remote monitors still work and can be managed in the UI, but the remote agent
 will not receive the management tools.
 
+### Codex HTTP authentication
+
+Codex's TOML key is `mcp_servers.<name>.http_headers`, not `headers` (see the
+[official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)).
+Vibe uses that key for both scoped Monitor capabilities and OAuth HTTP headers.
+The other engines retain their own native `headers` representation.
+
+Before the 2026-09-05 fix, Vibe wrote `headers.Authorization`. Codex silently
+ignored it, so a valid, unexpired capability still produced HTTP 401 during MCP
+initialization. The message `invalid or expired monitor capability` does not
+by itself distinguish an expired token from a missing Authorization header.
+
+The managed block is regenerated before a new Codex run, including replacement
+of the old field name and rotation of per-turn capabilities. User-authored
+configuration outside Vibe's markers is preserved. Restart Vibe to load the
+fix, then send a new message so Codex reloads its MCP configuration. This does
+not enable, stop, rebind, or otherwise change any Monitor definition.
+
+Five regression tests cover local/remote header serialization, legacy managed
+block replacement, token rotation/cache behavior, and OAuth/stdio/public-HTTP
+compatibility. These tests inject file IO and never touch real CLI config.
+When inspecting `codex mcp get ... --json`, redact header values: the command
+can include the capability itself, which must not be copied into logs or chat.
+
+Remote CLI verification on 2026-09-05: Codex reported `authStatus: bearerToken`
+and all seven Monitor tools via `mcpServerStatus/list`; `monitor_list` using
+the effective CLI headers returned HTTP 200. No model prompt was sent and no
+Monitor definition or existing conversation history was changed.
+
 ## HTTP API
+
+For ZCode, MCP injection does not initialize model access. The safe on-host
+updater preserves provider/model settings and never creates an MCP-only config
+when the user config is absent; see [ZCode model configuration](zcode-model-configuration.md).
 
 All normal routes use the existing Vibe bearer authentication and are scoped to
 the current account:

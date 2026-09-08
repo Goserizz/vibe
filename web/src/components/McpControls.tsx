@@ -42,7 +42,9 @@ function summarize(def: McpServerDef): string {
 /** Checkbox list of all registered servers, toggling membership for `scope`. */
 export function McpEnableList({ scope, emptyHint }: { scope: string; emptyHint?: string }) {
   const servers = useStore((s) => s.mcp.servers);
-  const enabled = useStore((s) => s.mcp.enabled[scope] ?? []);
+  // Missing scopes are valid. Allocating [] inside a Zustand selector makes
+  // useSyncExternalStore see a different snapshot on every render and loop.
+  const enabled = useStore((s) => s.mcp.enabled[scope]) ?? [];
   const setMcpEnabled = useStore((s) => s.setMcpEnabled);
   const enabledSet = new Set(enabled);
 

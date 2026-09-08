@@ -55,6 +55,7 @@ import {
   Play as LucidePlay,
   Plug as LucidePlug,
   Plus as LucidePlus,
+  Radar as LucideRadar,
   RefreshCw as LucideRefreshCw,
   RotateCcw as LucideRotateCcw,
   Save as LucideSave,
@@ -136,6 +137,7 @@ const GLYPHS: Record<string, string | ((props: LucideProps) => string)> = {
   Play: '>',
   Plug: 'o',
   Plus: '+',
+  Radar: '◉',
   RefreshCw: 'o',
   RotateCcw: 'o',
   Save: '=',
@@ -259,6 +261,7 @@ export const Pencil = wrap('Pencil', LucidePencil);
 export const Play = wrap('Play', LucidePlay);
 export const Plug = wrap('Plug', LucidePlug);
 export const Plus = wrap('Plus', LucidePlus);
+export const Radar = wrap('Radar', LucideRadar);
 export const RefreshCw = wrap('RefreshCw', LucideRefreshCw);
 export const RotateCcw = wrap('RotateCcw', LucideRotateCcw);
 export const Save = wrap('Save', LucideSave);

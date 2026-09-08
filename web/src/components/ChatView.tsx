@@ -109,7 +109,7 @@ function ChatTaskRail({ sessionId, monitorState }: { sessionId: string; monitorS
   const blocks = useStore((s) => s.views[sessionId]?.blocks);
   const backgroundTasks = useStore((s) => s.tasks[sessionId]);
   const hasTodos = useMemo(() => Boolean(latestTodos(blocks)?.length), [blocks]);
-  if (!hasTodos && !backgroundTasks?.length && !monitorState.monitors.length) return null;
+  if (!hasTodos && !backgroundTasks?.length && !monitorState.monitors.length && !monitorState.loading && !monitorState.error) return null;
   return (
     <TaskRail aria-label="Session tasks">
       <BackgroundTasksPane sessionId={sessionId} layout="rail" />

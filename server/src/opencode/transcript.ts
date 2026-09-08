@@ -70,6 +70,8 @@ interface Row {
   id: string;
   data: string;
   time_created: number;
+  /** SQL column is authoritative; older Vibe dumps only embedded it in JSON. */
+  message_id?: string;
 }
 
 function parseData(raw: string): Record<string, unknown> | null {
@@ -107,7 +109,7 @@ export function opencodeNativeBlocksFromRows(msgRows: Row[], partRows: Row[]): C
   for (const row of partRows) {
     const data = parseData(row.data);
     if (!data) continue;
-    const messageId = typeof data.message_id === 'string' ? data.message_id : '';
+    const messageId = row.message_id ?? (typeof data.message_id === 'string' ? data.message_id : '');
     if (!messageId) continue;
     const list = partsByMessage.get(messageId) ?? [];
     list.push({ id: row.id, data, ts: row.time_created });
@@ -155,7 +157,9 @@ export function opencodeNativeBlocksFromRows(msgRows: Row[], partRows: Row[]): C
           name,
           input: (state.input ?? {}) as Record<string, unknown>,
           status: done ? 'done' : 'error',
-          result: outputText(state.output),
+          // Real OpenCode errors use `error`; pre-fix Vibe imports used
+          // `output` for both variants. Keep those old sessions readable.
+          result: outputText(done ? state.output : (state.error ?? state.output)),
           isError: !done,
           ts: tsOf(part.data, row.time_created),
         };
@@ -172,7 +176,7 @@ function queryRows(db: SqliteDb, sessionId: string): { msgs: Row[]; parts: Row[]
     .prepare('select id, data, time_created from message where session_id = ?')
     .all(sessionId) as Row[];
   const parts = db
-    .prepare('select id, data, time_created from part where session_id = ?')
+    .prepare('select id, message_id, data, time_created from part where session_id = ?')
     .all(sessionId) as Row[];
   return { msgs, parts };
 }

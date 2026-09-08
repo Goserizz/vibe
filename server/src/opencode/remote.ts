@@ -44,7 +44,7 @@ try:
     msgs = [dict(r) for r in con.execute(
         "select id, data, time_created from message where session_id = ?", (sid,))]
     parts = [dict(r) for r in con.execute(
-        "select id, data, time_created from part where session_id = ?", (sid,))]
+        "select id, message_id, data, time_created from part where session_id = ?", (sid,))]
     print(json.dumps({"msgs": msgs, "parts": parts}, ensure_ascii=True))
 except Exception as exc:
     print("VIBE_OPENCODE_ERROR:" + str(exc), file=sys.stderr)
@@ -100,7 +100,11 @@ export async function listRemoteOpencodeSessions(host: RemoteHost): Promise<Disc
 }
 
 /** Read a remote native opencode session into normalized blocks. */
-export async function readRemoteOpencodeTranscript(host: RemoteHost, sessionId: string): Promise<ChatBlock[]> {
+export async function readRemoteOpencodeTranscript(
+  host: RemoteHost,
+  sessionId: string,
+  deps: { ssh?: typeof sshExec } = {},
+): Promise<ChatBlock[]> {
   if (!isOpencodeSessionId(sessionId)) return [];
   const inner = [
     `export OPENCODE_DB=${DB_EXPR}`,
@@ -108,12 +112,12 @@ export async function readRemoteOpencodeTranscript(host: RemoteHost, sessionId: 
     READ_SCRIPT,
     'VIBE_OPENCODE_EOF',
   ].join('\n');
-  const res = await sshExec(host.ssh, loginShellCommand(inner), { timeoutMs: 25_000 });
+  const res = await (deps.ssh ?? sshExec)(host.ssh, loginShellCommand(inner), { timeoutMs: 25_000 });
   if (res.code !== 0 || !res.stdout.trim()) return [];
   try {
     const parsed = JSON.parse(res.stdout) as {
       msgs?: { id: string; data: string; time_created: number }[];
-      parts?: { id: string; data: string; time_created: number }[];
+      parts?: { id: string; message_id?: string; data: string; time_created: number }[];
     };
     if (!parsed.msgs?.length) return [];
     return opencodeNativeBlocksFromRows(parsed.msgs, parsed.parts ?? []);

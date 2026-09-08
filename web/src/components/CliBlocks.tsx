@@ -12,7 +12,7 @@ import type {
 import { Markdown } from './Markdown';
 import { CompactEditDiff, editChangeLines, toolKind, toolMeta, writeChangeLines } from './blocks';
 import { parseList, todoSnapshotFromBlock } from './TodoPane';
-import { beijingClock, cn, formatTokens } from '../lib/format';
+import { beijingClock, beijingDateTime, cn, formatTokens } from '../lib/format';
 import { stripAttachments } from '../lib/attachments';
 
 /**
@@ -362,7 +362,7 @@ function CliResultView({ block }: { block: ResultBlock }) {
   // and the API-reported context size.
   const parts: string[] = [];
   if (typeof block.durationMs === 'number') parts.push(`Worked for ${(block.durationMs / 1000).toFixed(1)}s`);
-  const ended = beijingClock(block.ts);
+  const ended = beijingDateTime(block.ts);
   if (ended) parts.push(ended);
   const used = formatTokens(block.contextUsed ?? 0);
   if (used) {

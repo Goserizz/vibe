@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { Plus, Trash2, Loader2, Pencil, Check, X, Sparkles, Package, Eye } from '../lib/icons';
-import type { AgentKind, SkillDetail, SkillEntry, SkillScope } from '@shared/protocol';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Plus, Trash2, Loader2, Pencil, Check, X, Sparkles, Package, Eye, Globe, RefreshCw } from '../lib/icons';
+import type { AgentKind, GlobalSkillSummary, SkillDetail, SkillEntry, SkillScope } from '@shared/protocol';
+import { api } from '../lib/api';
 import { useStore } from '../store/store';
 import { Markdown } from './Markdown';
 import { AGENTS } from '../lib/format';
@@ -36,11 +37,17 @@ export function SkillForm({
   agent,
   host,
   onDone,
+  globalMode = false,
+  globalId,
+  initialAgents,
 }: {
   def?: SkillDetail;
   agent: AgentKind;
   host?: string;
   onDone: () => void;
+  globalMode?: boolean;
+  globalId?: string;
+  initialAgents?: AgentKind[];
 }) {
   const saveSkillMulti = useStore((s) => s.saveSkillMulti);
   const setToast = useStore((s) => s.setToast);
@@ -53,9 +60,10 @@ export function SkillForm({
   // Create defaults to all agents; edit defaults to just the one being edited
   // (check others to sync the change to them too).
   const [targets, setTargets] = useState<Set<AgentKind>>(
-    () => new Set(def ? [agent] : AGENTS.map((a) => a.value)),
+    () => new Set(initialAgents ?? (def ? [agent] : AGENTS.map((a) => a.value))),
   );
   const [saving, setSaving] = useState(false);
+  const [replaceConflicts, setReplaceConflicts] = useState(false);
 
   const toggle = (a: AgentKind) =>
     setTargets((prev) => {
@@ -80,6 +88,17 @@ export function SkillForm({
       return;
     }
     setSaving(true);
+    if (globalMode) {
+      try {
+        await api.saveGlobalSkill({ name: trimmedName, description: description.trim(), whenToUse: whenToUse.trim() || undefined,
+          body, agents: [...targets], replaceConflicts }, globalId);
+        setToast('Global skill saved; deployment continues in the background.');
+        onDone();
+      } catch (error) {
+        setToast(error instanceof Error ? error.message : 'Failed to save global skill');
+      } finally { setSaving(false); }
+      return;
+    }
     const ok = await saveSkillMulti({
       agents: [...targets],
       name: trimmedName,
@@ -94,6 +113,7 @@ export function SkillForm({
 
   return (
     <div className="space-y-2 rounded-lg border border-white/5 bg-ink-900/30 p-3">
+      {globalMode && <p className="text-[12px] text-accent-soft">Deploy to all hosts in your account, including new hosts added later. Offline hosts retry automatically.</p>}
       <input
         value={name}
         onChange={(e) => setName(e.target.value)}
@@ -127,11 +147,12 @@ export function SkillForm({
         <div className="flex flex-wrap gap-1.5">
           {AGENTS.map((a) => {
             const on = targets.has(a.value);
-            const disabled = editing && a.value === agent;
+            const disabled = !globalMode && editing && a.value === agent;
             return (
               <button
                 type="button"
                 key={a.value}
+                aria-pressed={on}
                 disabled={disabled}
                 title={disabled ? 'Editing this skill' : undefined}
                 onClick={() => toggle(a.value)}
@@ -146,13 +167,19 @@ export function SkillForm({
             );
           })}
         </div>
-        {editing && (
+        {editing && !globalMode && (
           <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
             Checking another agent writes this content there too — overwriting a same-named skill if one exists. The
             directory name (<span className="font-mono">{def?.name}/SKILL.md</span>) stays fixed.
           </p>
         )}
       </div>
+      {globalMode && (
+        <label className="flex items-start gap-2 text-[12px] text-slate-400">
+          <input type="checkbox" checked={replaceConflicts} onChange={(e) => setReplaceConflicts(e.target.checked)} className="mt-0.5" />
+          Replace conflicting same-name skills for this version (back up first). Leave unchecked to protect existing or manually edited files.
+        </label>
+      )}
       <div className="flex justify-end gap-2 pt-1">
         <button
           type="button"
@@ -222,7 +249,7 @@ function ScopeBadge({ scope }: { scope: SkillScope }) {
 }
 
 /** Full skills panel: agent + host pickers, list of personal (editable) and system (read-only) skills. */
-export function SkillRegistry() {
+function HostSkillRegistry({ onPromote }: { onPromote: (skill: SkillDetail) => void }) {
   const skills = useStore((s) => s.skills);
   const skillsAgent = useStore((s) => s.skillsAgent);
   const skillsHost = useStore((s) => s.skillsHost);
@@ -281,8 +308,16 @@ export function SkillRegistry() {
 
   const synced = skillsAgent === agent && (skillsHost ?? '') === host;
 
+  const promote = async (entry: SkillEntry) => {
+    setBusyName(entry.name);
+    const detail = await readSkillDetail({ agent, host: hostArg, name: entry.name, scope: 'personal' });
+    setBusyName(null);
+    if (detail) onPromote(detail);
+  };
+
   return (
     <div className="space-y-2">
+      <p className="text-[12px] text-slate-500">This host only. Use the globe button to turn an existing personal skill into a global skill.</p>
       <div className="grid grid-cols-2 gap-2">
         <select value={agent} onChange={(e) => setAgent(e.target.value as AgentKind)} className={selectCls}>
           {AGENTS.map((a) => (
@@ -342,6 +377,10 @@ export function SkillRegistry() {
                 </button>
               ) : (
                 <>
+                  <button type="button" title="Deploy to all hosts" onClick={() => void promote(entry)}
+                    className="rounded p-1.5 text-slate-500 transition hover:bg-ink-700 hover:text-accent">
+                    <Globe className="h-3.5 w-3.5" />
+                  </button>
                   <button
                     type="button"
                     title="Edit"
@@ -378,9 +417,113 @@ export function SkillRegistry() {
           className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-700 text-[12px] text-slate-400 transition hover:border-accent/50 hover:text-accent"
         >
           <Plus className="h-3.5 w-3.5" />
-          Add skill
+          Add skill on this host only
         </button>
       )}
     </div>
   );
+}
+
+function GlobalSkillRegistry({ seed, clearSeed }: { seed: SkillDetail | null; clearSeed: () => void }) {
+  const [skills, setSkills] = useState<GlobalSkillSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [editor, setEditor] = useState<{ id?: string; def?: SkillDetail; agents: AgentKind[] } | null>(null);
+  const setToast = useStore((s) => s.setToast);
+  const generation = useRef(0);
+  const requestInFlight = useRef(false);
+  const refresh = useCallback(async () => {
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
+    const gen = ++generation.current;
+    try {
+      const next = await api.listGlobalSkills();
+      if (generation.current === gen) { setSkills(next); setError(''); }
+    } catch (err) {
+      if (generation.current === gen) setError(err instanceof Error ? err.message : 'Failed to load global skills');
+    } finally {
+      requestInFlight.current = false;
+      if (generation.current === gen) setLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 4000);
+    return () => { generation.current++; clearInterval(timer); };
+  }, [refresh]);
+  useEffect(() => {
+    if (seed) setEditor({ def: seed, agents: AGENTS.map((a) => a.value) });
+  }, [seed]);
+  const done = () => { setEditor(null); clearSeed(); void refresh(); };
+  const edit = async (skill: GlobalSkillSummary) => {
+    try {
+      const detail = await api.readGlobalSkill(skill.id);
+      setEditor({ id: detail.id, agents: detail.agents, def: { name: detail.name, agent: detail.agents[0]!, scope: 'personal',
+        description: detail.description, whenToUse: detail.whenToUse, body: detail.body, readOnly: false } });
+    } catch (err) { setToast(err instanceof Error ? err.message : 'Failed to read global skill'); }
+  };
+  const retry = async (id: string) => {
+    try { await api.retryGlobalSkill(id); setToast('Deployment retry queued.'); void refresh(); }
+    catch (err) { setToast(err instanceof Error ? err.message : 'Retry failed'); }
+  };
+  const stop = async (skill: GlobalSkillSummary) => {
+    if (!window.confirm(`Stop global synchronization for "${skill.name}"? Already deployed files are retained. No future hosts will receive this skill.`)) return;
+    try { await api.stopGlobalSkill(skill.id); done(); }
+    catch (err) { setToast(err instanceof Error ? err.message : 'Failed to stop synchronization'); }
+  };
+  return (
+    <div className="space-y-3">
+      <p className="text-[12px] leading-relaxed text-slate-500">One definition, all your hosts. Includes this machine for administrators. Choose target agents when saving; newly added hosts and temporarily offline hosts are handled automatically.</p>
+      {error && <p role="alert" className="text-[12px] text-rose-400">{error}</p>}
+      {loading && <p className="text-[12px] text-slate-500">Loading global skills…</p>}
+      {!loading && !error && !skills.length && !editor && <p className="text-[12px] text-slate-500">No global skills yet. Create one or promote a personal skill from “This host only”.</p>}
+      {skills.map((skill) => {
+        const count = (status: string) => skill.deployments.filter((d) => d.status === status).length;
+        return (
+          <div key={skill.id} className="space-y-2 rounded-lg border border-white/5 bg-ink-900/20 p-3">
+            <div className="flex items-center gap-2">
+              <Globe className="h-4 w-4 shrink-0 text-accent" />
+              <span className="min-w-0 flex-1 truncate text-[13px] text-slate-200">{skill.name}</span>
+              <span className="text-[10px] text-slate-500">v{skill.revision}</span>
+              <button type="button" title="Retry deployment" onClick={() => void retry(skill.id)} className="rounded p-1.5 text-slate-400 hover:bg-ink-700"><RefreshCw className="h-3.5 w-3.5" /></button>
+              <button type="button" title="Edit global skill" onClick={() => void edit(skill)} className="rounded p-1.5 text-slate-400 hover:bg-ink-700"><Pencil className="h-3.5 w-3.5" /></button>
+              <button type="button" title="Stop global synchronization (keep deployed copies)" onClick={() => void stop(skill)} className="rounded p-1.5 text-slate-500 hover:bg-ink-700 hover:text-rose-400"><Trash2 className="h-3.5 w-3.5" /></button>
+            </div>
+            <p className="text-[12px] text-slate-400">{count('synced')}/{skill.deployments.length} deployed · {count('pending')} pending · {count('failed')} failed/offline · {count('conflict')} conflicts</p>
+            <details className="text-[11px] text-slate-500">
+              <summary className="cursor-pointer">Deployment details</summary>
+              <div className="mt-2 max-h-56 space-y-1 overflow-y-auto">
+                {skill.deployments.map((d) => <div key={`${d.local ? 'local' : d.host}/${d.agent}`} className="flex gap-2" title={d.message}>
+                  <span className="min-w-0 flex-1 truncate">{d.local ? 'This machine' : d.host} · {d.agent}</span>
+                  <span className={cn(d.status === 'synced' ? 'text-emerald-500' : d.status === 'conflict' ? 'text-amber-500' : d.status === 'failed' ? 'text-rose-400' : '')}>{d.status}</span>
+                </div>)}
+              </div>
+            </details>
+          </div>
+        );
+      })}
+      {editor ? <SkillForm key={editor.id ?? editor.def?.name ?? 'new'} def={editor.def} agent={editor.agents[0] ?? 'claude'}
+        globalMode globalId={editor.id} initialAgents={editor.agents} onDone={done} /> : (
+        <button type="button" onClick={() => setEditor({ agents: AGENTS.map((a) => a.value) })}
+          className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-accent/40 text-[12px] text-accent-soft hover:bg-accent/10">
+          <Plus className="h-3.5 w-3.5" /> Add global skill
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** New skills default to all-host deployment; host-local editing stays explicit. */
+export function SkillRegistry() {
+  const [scope, setScope] = useState<'global' | 'host'>('global');
+  const [seed, setSeed] = useState<SkillDetail | null>(null);
+  return <div className="space-y-3">
+    <div className="flex gap-2">
+      {(['global', 'host'] as const).map((value) => <button type="button" key={value} aria-pressed={scope === value}
+        onClick={() => { setScope(value); setSeed(null); }} className={cn('rounded-md border px-3 py-1.5 text-[12px]', scope === value ? 'border-accent/40 bg-accent/10 text-accent-soft' : 'border-ink-700 text-slate-500')}>
+        {value === 'global' ? 'Global · all hosts' : 'This host only'}
+      </button>)}
+    </div>
+    {scope === 'global' ? <GlobalSkillRegistry seed={seed} clearSeed={() => setSeed(null)} /> : <HostSkillRegistry onPromote={(skill) => { setSeed(skill); setScope('global'); }} />}
+  </div>;
 }

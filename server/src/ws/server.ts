@@ -22,6 +22,9 @@ const clientMessageSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('subscribe'), sessionId: z.string(), lastSeq: z.number() }),
   z.object({ t: z.literal('unsubscribe'), sessionId: z.string() }),
   z.object({ t: z.literal('send'), sessionId: z.string(), clientMsgId: z.string(), text: z.string() }),
+  z.object({ t: z.literal('queue_remove'), sessionId: z.string(), clientMsgId: z.string() }),
+  z.object({ t: z.literal('queue_pause'), sessionId: z.string() }),
+  z.object({ t: z.literal('queue_resume'), sessionId: z.string() }),
   z.object({ t: z.literal('abort'), sessionId: z.string() }),
   z.object({ t: z.literal('task_stop'), sessionId: z.string(), taskId: z.string() }),
   z.object({ t: z.literal('permission'), sessionId: z.string(), requestId: z.string(), decision: decisionSchema }),
@@ -82,7 +85,7 @@ export function attachWsServer(server: Server): void {
     const conn = new WsConn(ws, account.name);
     hub.addConn(conn);
     vibotHub.addConn(conn);
-    conn.send({ t: 'hello', protocolVersion: PROTOCOL_VERSION, serverVersion: config.serverVersion });
+    conn.send({ t: 'hello', protocolVersion: PROTOCOL_VERSION, serverVersion: config.serverVersion, requestQueueVersion: 1 });
 
     (ws as WsWithLiveness).isAlive = true;
     ws.on('pong', () => {
@@ -111,6 +114,15 @@ export function attachWsServer(server: Server): void {
           break;
         case 'send':
           hub.send(conn, msg.sessionId, msg.clientMsgId, msg.text);
+          break;
+        case 'queue_remove':
+          hub.changeRequestQueue(conn, msg.sessionId, 'remove', msg.clientMsgId);
+          break;
+        case 'queue_pause':
+          hub.changeRequestQueue(conn, msg.sessionId, 'pause');
+          break;
+        case 'queue_resume':
+          hub.changeRequestQueue(conn, msg.sessionId, 'resume');
           break;
         case 'abort':
           if (!hub.abort(msg.sessionId, conn.account)) {

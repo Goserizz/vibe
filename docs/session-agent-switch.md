@@ -76,6 +76,10 @@ Codex 的 Responses 请求限制 `call_id` 最长 64 字符。部分来源历史
 - `part`：`text` / `reasoning`（仅有可读文本的）/ `tool`（`tool/callID/state`，
   调用 id 原样保留）/ `step-start` / `step-finish`，调用与结果保持配对；
 - 建库时载入与真实 opencode 1.18.27 一致的四表结构（含外键与会话/消息索引）；
+- `part.message_id` SQL 列承载消息关联，不要求 `data` JSON 冗余携带 id；本地与
+  远端生产 reader 均读取该列，并兼容旧 Vibe 写入的 JSON 内嵌关联；
+- 工具成功状态写 `state.output` / `state.title` / `state.metadata`，失败状态写
+  `state.error`；reader 同时兼容旧导入文件在 error 状态下的 `state.output`，不丢失失败原因；
   提交前执行 `foreign_key_check`；已有数据库则只追加会话；
 - **模型必填**：opencode 的 loader 不接受空 model（`Model not found: opencode/.`），
   因此具名目标直接写出，`auto` 目标借用本机库最近使用过的具体 model
@@ -307,30 +311,58 @@ npm run build
 npm test
 ```
 
-当前完整测试：**458 tests / 456 pass / 0 fail / 2 skip**。两处 skip 仅因测试机缺少
-Devin/opencode 的真实原生会话样本；两者的合成往返、结构、远端连续事务合并仍全部
-执行。ZCode/Cursor 的真实结构对比均已执行，不再跳过。
+2026-09-07 完整测试：**534 tests / 534 pass / 0 fail / 0 skip**；typecheck、build
+均通过。此前两处 skip 实际是结构测试只接入了 JSON/JSONL 与 ZCode/Cursor，漏掉了
+Devin/OpenCode 的 SQLite 入口，并非本机没有它们的原生数据库；现已补齐。
 
 | 套件 | 数量 | 重点 |
 |---|---:|---|
-| adapter 往返与边界 | 180 | 合成夹具 + 真实夹具 × 10 目标；thinking 开/关、连续 user/后台唤醒、末尾未回答 user、多段 assistant、孤儿工具、256 KiB 输出、动态降级 |
+| adapter 往返与边界 | 190 | 合成夹具 + 真实夹具 × 10 目标；thinking 开/关、连续 user/后台唤醒、末尾未回答 user、多段 assistant、孤儿工具、256 KiB 输出、超长工具 ID、动态降级 |
 | CodeBuddy 旧格式修复 | 4 | assistant→user 档案迁移、Vibe transcript 恢复、幂等/误判保护/未知行保留、临时文件原子落盘 |
 | 全 agent 双跳 | 90 | 全部有向 `A → B → A`；每一跳均由生产 adapter 写原生存储、生产解析器读回，逐 assistant 校验 user/text/thinking/tool |
 | 10×10 矩阵 | 103 | 100 个方向逐一原生写出、生产解析器读回；矩阵 100/0；同 agent 换模型 |
-| 原生结构 | 15 | 真实字段对比；ZCode 19 表/FK/integrity；Cursor hash/protobuf/meta/integrity、chats/ACP 双库一致 |
+| 原生结构 | 15 | 真实字段对比；ZCode 19 表/FK/integrity；Cursor hash/protobuf/meta/integrity、chats/ACP 双库一致；OpenCode/Devin 原生 schema、JSON、链路与新建/已有库写入 |
 | 远端 | 9 | 非 root HOME/agent home、本地/远端 IO 隔离、上传截断与非 POSIX 登录 shell 防护、10 家远端写出及保真一致、ZCode/Devin/opencode 共享库连续事务合并（含 opencode project 幂等与空 model 回填）、失败传播且不回退 `/root` |
 | HTTP 端点 | 7 | 完整 620-block 快照、blob/旧 line 全文还原、原生 id、原子持久化、旧 runtime 原子替换、目标默认模型、Cursor 映射自愈与 ACP 镜像、鉴权/校验、100 项 fidelity API |
 | 流式归一化 / token usage | 18 | Claude/CodeBuddy/Cursor/Codex/OpenAI 字段族；显式 total 优先；Codex App Server duration/last-context/window；跨 turn 用量隔离；cache 子集不重复；Cursor cache 额外桶；CodeBuddy 流式块去重 |
 | Codex fileChange 回归 | 4 | 编辑 diff 与对象型 kind 的归一化（全仓单进程测试入口附带） |
+| Codex call ID 回归 | 3 | 超长 ID 缩短至 64 字符、碰撞保护、调用/结果配对与原 ID 可逆恢复 |
+| OpenCode 原生读取回归 | 4 | SQL 关联列、本地/远端一致、失败结果文本、兼容旧 JSON 内嵌关联与 output 格式 |
+| OpenCode 模型/effort 回归 | 9 | verbose 模型列表解析、effort→variant、上下文窗口查询 |
 | ZCode 原生读取回归 | 1 | `session/list → session/resume → session/messages` 前置顺序；未激活会话不再误判为空历史 |
+| ZCode 模型配置/MCP 回归 | 15 | 模型配置保留、缺失/读取失败不覆盖、并发合并/备份/0600、项目覆盖、新会话预检/取消、前后端模型列表 |
 | 会话列表竞态回归 | 1 | 切换期间完成的旧 discovery 快照必须叠加最新 SessionStore，不能把新原生 id 短暂覆盖回旧值 |
 | transcript 持久化公共回归 | 6 | 中断工具收尾、块时间顺序恢复、稳定排序且不修改输入 |
-| CodeBuddy resume 回归 | 8 | CLI 精确 cwd key/超长 UTF-8、末尾未回答 user、已有目录复用、本地与远端旧路径无损复制、无输出/仅 init 超时、正常 result 清理看门狗 |
+| CodeBuddy resume 回归 | 9 | CLI 精确 cwd key/超长 UTF-8、末尾未回答 user、已有目录复用、本地与远端旧路径无损复制、无输出/仅 init 超时、正常 result 清理看门狗、远端 MCP 配置绝对路径 |
 | Telegram plan tool 回归 | 3 | 进入/退出 plan 别名与权限详情 |
+| Monitor 回归 | 12 | 持久化 incident 状态、探测器、调度与恢复、HTTP API/MCP 工具发现 |
+| Monitor 列表标记回归 | 9 | 绑定/聚合、启停/异常恢复、删除/改绑、WS 请求合并、账号切换及失败重试 |
+| Codex MCP 配置回归 | 5 | 本地/远端 `http_headers`、旧 managed block 替换、凭证轮换、OAuth/stdio/无认证 HTTP 兼容 |
+| 全局 Skill 部署回归 | 17 | 所属账号全部 host × agent、持久化/重试/新 host、版本竞态、冲突保护、原子写/备份、路径及 API/账号删除隔离 |
 
 测试统一通过 `server/test/switch/setup.ts` 把 `VIBE_HOME` 和 `VIBE_SWITCH_ROOT`
 指向一次性临时目录，绝不写真实 `~/.zcode`、`~/.cursor` 或 `~/.vibe/sessions.json`。
 ZCode/Cursor/Devin/opencode 往返都调用各自生产 transcript 解析器，而不是只用测试专用解码器。
+
+### OpenCode / Devin 原生结构对照
+
+两项测试各自覆盖从零建库、向已有原生 schema 追加会话，校验列类型/约束/外键、
+JSON 稳定字段、会话/消息关联、工具成功和失败配对、旧数据不被覆盖，以及
+`foreign_key_check` / `integrity_check` 和生产解析器往返。
+
+本机对照基准为 OpenCode 1.18.27 与 Devin migration 16 的原生数据库，只读采样。
+测试仓库仅保存核心表的 schema-only 夹具，不包含真实会话、账号、凭据或迁移
+校验码。没有本机数据库时仍执行夹具结构与关联检查，不再跳过；存在数据库时
+额外比较当前 CLI schema 和消息字段。
+
+这次独立对照发现并修复了 OpenCode 工具状态字段、原生 part 关联列遗漏的问题，
+并给 Devin 无工具的 assistant 补齐原生 `tool_calls: []`。另有四条 OpenCode
+读取回归使用独立合成的原生行，避免 adapter 和 reader 共享错误格式却互相通过。
+远端读取回归实际执行生产 Python SQL，但只访问临时库，不连接真实主机。
+
+覆盖边界：本机 Devin 样本只有 user/assistant/system，没有工具调用；工具节点与
+结果配对由合成数据验证。这些是存储结构和读取测试，不等同于所有在线模型的
+真实 API 续聊验证，也没有向模型发送用户的历史。
 
 ### 当前“vibe”真实历史的全向双跳
 

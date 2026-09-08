@@ -254,7 +254,8 @@ function buildRows(ctx: BuildContext, nativeId: string, stored: StoredModel): { 
     rows.push({ table: 'message', id, sessionId: nativeId, messageId: id, ts, data });
   };
   const pushPart = (id: string, messageId: string, ts: number, data: Record<string, unknown>): void => {
-    rows.push({ table: 'part', id, sessionId: nativeId, messageId, ts, data: { id, message_id: messageId, session_id: nativeId, ...data } });
+    // Native OpenCode stores the relationship in SQL columns, not data JSON.
+    rows.push({ table: 'part', id, sessionId: nativeId, messageId, ts, data });
   };
 
   for (const turn of ctx.turns) {
@@ -305,8 +306,11 @@ function buildRows(ctx: BuildContext, nativeId: string, stored: StoredModel): { 
           state: {
             status: tool.isError ? 'error' : 'completed',
             input: normalizeToolInput(tool.input),
-            output: tool.result ?? '',
-            metadata: { title: tool.name },
+            // These are distinct native variants. A failed tool has `error`,
+            // while a completed tool requires output/title/metadata siblings.
+            ...(tool.isError
+              ? { error: tool.result ?? '' }
+              : { output: tool.result ?? '', title: tool.name, metadata: {} }),
             time: { start: tool.ts, end: tool.ts },
           },
         });

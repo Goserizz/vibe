@@ -5,6 +5,7 @@ import type {
   EffortLevel,
   McpConfigSnapshot,
   McpServerDef,
+  Monitor,
   PermissionDecision,
   PermissionMode,
   PermissionRequest,
@@ -20,8 +21,12 @@ import type {
   ConfigFileDetail,
   ConfigFileEntry,
   SwitchFidelity,
+  QueuedSessionRequest,
+  SessionRequestQueueState,
 } from '@shared/protocol';
 import { compareSessions } from '@shared/protocol';
+import type { SessionMonitorSummary } from '@shared/monitorSummary';
+import { createMonitorSummaryLoader } from './monitorSummaries';
 import { api, ApiError, setApiToken } from '../lib/api';
 import type { ModelOption, PermissionOption } from '../lib/format';
 import { VibeSocket, type ConnStatus } from '../lib/ws';
@@ -40,6 +45,11 @@ import { emptyView, prependPage, reduceView, viewFromBlocks, type SessionView } 
 import { useVibotStore, vibotHandleBatch } from './vibot';
 
 let socket: VibeSocket | null = null;
+
+export interface PendingSessionSend extends QueuedSessionRequest {
+  state: 'sending' | 'failed';
+  error?: string;
+}
 /** The single VibeSocket, owned here, is shared by the separate Vibot store. */
 export function getSocket(): VibeSocket | null {
   return socket;
@@ -120,6 +130,13 @@ interface StoreState {
   contrast: Contrast;
 
   sessions: SessionMeta[];
+  /** Account-scoped durable Monitor state, independent of live agent runtimes. */
+  sessionMonitors: Record<string, SessionMonitorSummary>;
+  /** The rail and sidebar derive from the same account-scoped list snapshot. */
+  monitorRecords: Monitor[];
+  monitorLoaded: boolean;
+  monitorLoading: boolean;
+  monitorError: string | null;
   projects: ProjectDir[];
   hosts: RemoteHost[];
   /** MCP server registry + per-scope enable lists. */
@@ -146,6 +163,8 @@ interface StoreState {
   pending: Record<string, PermissionRequest[]>;
   /** Native background tasks keyed by session. */
   tasks: Record<string, BackgroundTask[]>;
+  requestQueues: Record<string, SessionRequestQueueState>;
+  requestOutbox: Record<string, PendingSessionSend[]>;
   /** Sessions whose last turn finished while they weren't the active one — i.e.
    *  "has a reply you haven't seen yet". Cleared by opening the session. Lives
    *  only in memory: it tracks live running→idle transitions, not history. */
@@ -172,6 +191,7 @@ interface StoreState {
   init: (token: string) => Promise<void>;
   signOut: () => void;
   refreshSessions: () => Promise<void>;
+  loadSessionMonitors: () => Promise<void>;
   loadProjects: () => Promise<void>;
   loadHosts: () => Promise<void>;
   /** Load Cursor models for the local CLI, or for a remote host (with its proxy). */
@@ -235,7 +255,10 @@ interface StoreState {
   ) => Promise<SwitchFidelity | null>;
   deleteSession: (id: string) => Promise<void>;
   togglePin: (id: string) => Promise<void>;
-  sendMessage: (text: string) => void;
+  sendMessage: (text: string, sessionId?: string) => boolean;
+  retryPendingRequest: (sessionId: string, clientMsgId: string) => void;
+  removeQueuedRequest: (sessionId: string, clientMsgId: string) => void;
+  controlRequestQueue: (sessionId: string, action: 'pause' | 'resume') => void;
   abort: () => void;
   stopTask: (taskId: string) => void;
   respondPermission: (requestId: string, decision: PermissionDecision) => void;
@@ -248,6 +271,12 @@ interface StoreState {
 }
 
 export const useStore = create<StoreState>((set, get) => {
+  const monitorLoader = createMonitorSummaryLoader(
+    api.listMonitors,
+    (sessionMonitors, monitorRecords) => set({ sessionMonitors, monitorRecords, monitorLoaded: true }),
+    ({ loading, error }) => set({ monitorLoading: loading, monitorError: error }),
+  );
+  let monitorRefreshTimer: ReturnType<typeof setInterval> | undefined;
   // -- socket event handling -------------------------------------------------
 
   /** Send subscribe and mark the session as replaying until `subscribed`
@@ -267,7 +296,17 @@ export const useStore = create<StoreState>((set, get) => {
     if (status === 'open') {
       const { activeId } = get();
       if (activeId) resubscribe(activeId);
-      if (opts.reconnected) void get().refreshSessions();
+      // Only unacknowledged sends are retried. Server-side message-id dedupe
+      // covers a connection lost after durable acceptance but before the ACK.
+      for (const [sessionId, items] of Object.entries(get().requestOutbox)) {
+        for (const item of items) if (item.state === 'sending') {
+          socket?.send({ t: 'send', sessionId, clientMsgId: item.id, text: item.text });
+        }
+      }
+      if (opts.reconnected) {
+        void get().refreshSessions();
+        void get().loadSessionMonitors();
+      }
       // Every open (first connect + reconnect): Vibot must resubscribe. A
       // subscribe sent while the socket was still connecting was previously
       // dropped on the floor — wake notes then never arrived until refresh.
@@ -292,6 +331,15 @@ export const useStore = create<StoreState>((set, get) => {
     let playDoneSound = false;
     const finishedUnreadIds: string[] = [];
     let monitorToast: string | undefined;
+    let monitorsDirty = false;
+    let requestQueues = state.requestQueues;
+    let requestOutbox = state.requestOutbox;
+    const acknowledge = (sessionId: string, id: string) => {
+      const items = requestOutbox[sessionId];
+      if (items?.some((item) => item.id === id)) {
+        requestOutbox = { ...requestOutbox, [sessionId]: items.filter((item) => item.id !== id) };
+      }
+    };
 
     const push = (sid: string, seq: number, ev: import('@shared/protocol').LiveEvent) => {
       let arr = eventsBySession.get(sid);
@@ -305,6 +353,7 @@ export const useStore = create<StoreState>((set, get) => {
     for (const msg of events) {
       switch (msg.t) {
         case 'event':
+          if (msg.ev.k === 'block' && msg.ev.block.kind === 'user') acknowledge(msg.sessionId, msg.ev.block.id);
           if (msg.ev.k === 'task_upsert') {
             const task = msg.ev.task;
             const current = taskPatch[msg.sessionId] ?? state.tasks[msg.sessionId] ?? [];
@@ -332,6 +381,8 @@ export const useStore = create<StoreState>((set, get) => {
           push(msg.sessionId, msg.seq, msg.ev);
           break;
         case 'subscribed':
+          requestQueues = { ...requestQueues, [msg.sessionId]: msg.requestQueue ?? { items: [], paused: false } };
+          for (const item of msg.requestQueue?.items ?? []) acknowledge(msg.sessionId, item.id);
           // Replay (if any) landed ahead of this frame — back to live events.
           replayingSubs.delete(msg.sessionId);
           setRunning[msg.sessionId] = msg.running;
@@ -364,10 +415,19 @@ export const useStore = create<StoreState>((set, get) => {
           sessionsDirty = true;
           break;
         }
+        case 'send_ack':
+          acknowledge(msg.sessionId, msg.clientMsgId);
+          break;
+        case 'request_queue':
+          requestQueues = { ...requestQueues, [msg.sessionId]: msg.queue };
+          for (const item of msg.queue.items) acknowledge(msg.sessionId, item.id);
+          break;
         case 'monitor_changed':
+          monitorsDirty = true;
           window.dispatchEvent(new CustomEvent('vibe-monitor-changed', { detail: { monitorId: msg.monitorId } }));
           break;
         case 'monitor_notice':
+          monitorsDirty = true;
           window.dispatchEvent(new CustomEvent('vibe-monitor-changed', { detail: { monitorId: msg.monitorId } }));
           if (msg.sessionId !== state.activeId) {
             finishedUnreadIds.push(msg.sessionId);
@@ -376,6 +436,10 @@ export const useStore = create<StoreState>((set, get) => {
           }
           break;
         case 'session_removed':
+          requestQueues = { ...requestQueues };
+          requestOutbox = { ...requestOutbox };
+          delete requestQueues[msg.sessionId];
+          delete requestOutbox[msg.sessionId];
           sessions = sessions.filter((s) => s.id !== msg.sessionId);
           sessionsDirty = true;
           break;
@@ -383,6 +447,11 @@ export const useStore = create<StoreState>((set, get) => {
           set({ serverVersion: msg.serverVersion });
           break;
         case 'error':
+          if (msg.sessionId && msg.clientMsgId) {
+            requestOutbox = { ...requestOutbox, [msg.sessionId]: (requestOutbox[msg.sessionId] ?? []).map((item) => (
+              item.id === msg.clientMsgId ? { ...item, state: 'failed', error: msg.message } : item
+            )) };
+          }
           set({ toast: msg.message });
           break;
       }
@@ -407,6 +476,8 @@ export const useStore = create<StoreState>((set, get) => {
         views,
         pending,
         tasks,
+        requestQueues,
+        requestOutbox,
         unread,
         ...(monitorToast ? { toast: monitorToast } : {}),
         sessions: sessionsDirty ? sessions : s.sessions,
@@ -414,6 +485,7 @@ export const useStore = create<StoreState>((set, get) => {
     });
 
     if (playDoneSound) playNotifySound(get().notifySound);
+    if (monitorsDirty) void get().loadSessionMonitors();
 
     // Stale-replay recovery: reload transcript then resubscribe.
     for (const sid of resetIds) {
@@ -458,6 +530,11 @@ export const useStore = create<StoreState>((set, get) => {
     accent: loadAccentPreference(),
     contrast: loadContrast(),
     sessions: [],
+    sessionMonitors: {},
+    monitorRecords: [],
+    monitorLoaded: false,
+    monitorLoading: false,
+    monitorError: null,
     projects: [],
     hosts: [],
     mcp: { servers: [], enabled: {}, oauth: {} },
@@ -473,6 +550,8 @@ export const useStore = create<StoreState>((set, get) => {
     views: {},
     pending: {},
     tasks: {},
+    requestQueues: {},
+    requestOutbox: {},
     unread: {},
     rightTabs: {},
     toast: null,
@@ -482,6 +561,9 @@ export const useStore = create<StoreState>((set, get) => {
     searchLoading: false,
 
     async init(token: string) {
+      monitorLoader.reset();
+      clearInterval(monitorRefreshTimer);
+      set({ sessionMonitors: {}, monitorRecords: [], monitorLoaded: false, monitorLoading: false, monitorError: null, requestQueues: {}, requestOutbox: {} });
       setApiToken(token);
       try {
         const me = await api.me();
@@ -496,6 +578,8 @@ export const useStore = create<StoreState>((set, get) => {
 
       socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus, onVibotBatch: vibotHandleBatch });
       socket.connect(token);
+      // Badges should not hold up opening the app if the Monitor endpoint is slow.
+      void get().loadSessionMonitors();
 
       const admin = get().isAdmin;
       await Promise.all([
@@ -507,6 +591,10 @@ export const useStore = create<StoreState>((set, get) => {
         get().loadPresets(),
       ]);
       set({ phase: 'ready' });
+      // One low-frequency refresh for the whole list also covers an API error
+      // or a browser that slept through a WS change; never one request per row.
+      clearInterval(monitorRefreshTimer);
+      monitorRefreshTimer = setInterval(() => { void get().loadSessionMonitors(); }, 30_000);
 
       // Model lists never gate the splash — server serves cache/fallback instantly
       // and refreshes CLIs in the background; these fill the pickers when ready.
@@ -529,10 +617,18 @@ export const useStore = create<StoreState>((set, get) => {
     },
 
     signOut() {
+      monitorLoader.reset();
+      clearInterval(monitorRefreshTimer);
       socket?.close();
       socket = null;
       clearToken();
-      set({ phase: 'unauthorized', sessions: [], views: {}, tasks: {}, rightTabs: {}, unread: {}, activeId: null, filePreview: null, searchQuery: '', searchResults: [], searchLoading: false });
+      set({ requestQueues: {}, requestOutbox: {} });
+      set({ phase: 'unauthorized', account: '', isAdmin: false, sessions: [], sessionMonitors: {}, monitorRecords: [], monitorLoaded: false, monitorLoading: false, monitorError: null, views: {}, tasks: {}, rightTabs: {}, unread: {}, activeId: null, filePreview: null, searchQuery: '', searchResults: [], searchLoading: false });
+    },
+
+    async loadSessionMonitors() {
+      if (!get().account) return;
+      await monitorLoader.refresh();
     },
 
     async refreshSessions() {
@@ -1024,8 +1120,12 @@ export const useStore = create<StoreState>((set, get) => {
         delete unread[id];
         const tasks = { ...s.tasks };
         delete tasks[id];
+        const requestQueues = { ...s.requestQueues };
+        const requestOutbox = { ...s.requestOutbox };
+        delete requestQueues[id];
+        delete requestOutbox[id];
         const activeId = s.activeId === id ? (sessions[0]?.id ?? null) : s.activeId;
-        return { sessions, views, tasks, rightTabs, unread, activeId };
+        return { sessions, views, tasks, rightTabs, unread, activeId, requestQueues, requestOutbox };
       });
       const next = get().activeId;
       if (next) void get().openSession(next);
@@ -1044,30 +1144,53 @@ export const useStore = create<StoreState>((set, get) => {
       }
     },
 
-    sendMessage(text) {
+    sendMessage(text, sessionId) {
       const trimmed = text.trim();
-      const id = get().activeId;
-      if (!trimmed || !id) return;
+      const id = sessionId ?? get().activeId;
+      if (!trimmed || !id) return false;
+      if (get().status !== 'open') { set({ toast: 'Connection is not ready. Your message was not sent.' }); return false; }
       const clientMsgId = uid();
-      // Optimistic: show the user's message and the running state immediately.
-      set((s) => {
-        const view = s.views[id] ?? emptyView();
-        const seq = view.lastSeq;
-        const next = reduceView(view, [
-          { seq, ev: { k: 'block', block: { id: clientMsgId, kind: 'user', text: trimmed, ts: Date.now() } } },
-          { seq, ev: { k: 'run_state', running: true } },
-        ]);
-        return { views: { ...s.views, [id]: next } };
-      });
-      socket?.send({ t: 'send', sessionId: id, clientMsgId, text: trimmed });
+      // Pending text stays OUT of the transcript until the server starts it;
+      // otherwise a queued user bubble would interrupt the current reply.
+      set((s) => ({ requestOutbox: { ...s.requestOutbox, [id]: [
+        ...(s.requestOutbox[id] ?? []), { id: clientMsgId, text: trimmed, queuedAt: Date.now(), state: 'sending' },
+      ] } }));
+      if (socket?.send({ t: 'send', sessionId: id, clientMsgId, text: trimmed })) return true;
+      set((s) => ({ requestOutbox: { ...s.requestOutbox, [id]: (s.requestOutbox[id] ?? []).filter((item) => item.id !== clientMsgId) }, toast: 'Connection is not ready. Your message was not sent.' }));
+      return false;
+    },
+
+    retryPendingRequest(sessionId, clientMsgId) {
+      const item = get().requestOutbox[sessionId]?.find((entry) => entry.id === clientMsgId);
+      if (!item) return;
+      if (!socket?.send({ t: 'send', sessionId, clientMsgId, text: item.text })) {
+        set({ toast: 'Connection is not ready. Please retry after reconnecting.' });
+        return;
+      }
+      set((s) => ({ requestOutbox: { ...s.requestOutbox, [sessionId]: (s.requestOutbox[sessionId] ?? []).map((entry) => (
+        entry.id === clientMsgId ? { ...entry, state: 'sending', error: undefined } : entry
+      )) } }));
+    },
+
+    removeQueuedRequest(sessionId, clientMsgId) {
+      const local = get().requestOutbox[sessionId]?.find((entry) => entry.id === clientMsgId);
+      if (local?.state === 'failed') {
+        set((s) => ({ requestOutbox: { ...s.requestOutbox, [sessionId]: (s.requestOutbox[sessionId] ?? []).filter((entry) => entry.id !== clientMsgId) } }));
+        return;
+      }
+      if (!socket?.send({ t: 'queue_remove', sessionId, clientMsgId })) set({ toast: 'Reconnect before changing the queue.' });
+    },
+
+    controlRequestQueue(sessionId, action) {
+      if (!socket?.send({ t: action === 'pause' ? 'queue_pause' : 'queue_resume', sessionId })) set({ toast: 'Reconnect before changing the queue.' });
     },
 
     abort() {
       const id = get().activeId;
       if (id) {
         // The user stopped this turn themselves — suppress its completion chime.
-        abortedSessions.add(id);
-        socket?.send({ t: 'abort', sessionId: id });
+        if (socket?.send({ t: 'abort', sessionId: id })) abortedSessions.add(id);
+        else set({ toast: 'Reconnect before stopping the response.' });
       }
     },
 

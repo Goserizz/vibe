@@ -3,6 +3,12 @@ import { ZcodeAppServerClient, type ZcodeRunOptions } from './appServer.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
 import { applyZcodeMcp } from '../mcp/apply.js';
+import { assertZcodeStartupConfig } from './configFile.js';
+
+export interface ZcodeRunnerDeps {
+  prepareMcp?: typeof applyZcodeMcp;
+  createClient?: (opts: ZcodeRunOptions, cb: RunCallbacks) => Pick<ZcodeAppServerClient, 'run' | 'abort' | 'stopTask' | 'queueMessage'>;
+}
 
 /** SSH link corruption (bad packets) that kills the transport mid-stream —
  *  retry is safe (session state persists remotely, client re-resumes).
@@ -18,9 +24,9 @@ interface Outcome {
 }
 
 /** Drive a ZCode turn through the app-server protocol (streaming + approvals). */
-export function startZcodeRun(opts: ZcodeRunOptions, cb: RunCallbacks): RunHandle {
+export function startZcodeRun(opts: ZcodeRunOptions, cb: RunCallbacks, deps: ZcodeRunnerDeps = {}): RunHandle {
   const abortController = new AbortController();
-  let client: ZcodeAppServerClient | undefined;
+  let client: ReturnType<NonNullable<ZcodeRunnerDeps['createClient']>> | undefined;
   let aborted = false;
   let producedAny = false;
   let resume = opts.resume;
@@ -38,13 +44,26 @@ export function startZcodeRun(opts: ZcodeRunOptions, cb: RunCallbacks): RunHandl
 
   const done = (async () => {
     // ZCode reads MCP from its JSON config when app-server starts.
-    await applyZcodeMcp(
-      opts.mcpServers ?? [],
-      opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined,
-    );
+    const prepareStarted = Date.now();
+    try {
+      const state = await (deps.prepareMcp ?? applyZcodeMcp)(
+        opts.mcpServers ?? [],
+        opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined,
+        { cwd: opts.remote?.cwd ?? opts.cwd },
+      );
+      if (aborted) return;
+      assertZcodeStartupConfig(state, resume);
+    } catch (error) {
+      if (aborted) return;
+      const text = error instanceof Error ? error.message : String(error);
+      wrappedCb.onEvent({ k: 'block', block: { id: `zcode_result_${Date.now()}`, kind: 'result',
+        durationMs: Date.now() - prepareStarted, isError: true, subtype: 'error', ts: Date.now() } });
+      wrappedCb.onEvent({ k: 'error', text });
+      return;
+    }
     for (let attempt = 0; ; attempt++) {
       const startedAt = Date.now();
-      client = new ZcodeAppServerClient({ ...opts, resume }, wrappedCb);
+      client = deps.createClient?.({ ...opts, resume }, wrappedCb) ?? new ZcodeAppServerClient({ ...opts, resume }, wrappedCb);
       const outcome: Outcome = { transient: false, durationMs: 0, error: undefined };
       let usage: Awaited<ReturnType<ZcodeAppServerClient['run']>>['usage'];
       let turnResults = 0;

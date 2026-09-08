@@ -752,6 +752,46 @@ export interface BackgroundTask {
 }
 
 // ---------------------------------------------------------------------------
+// Global skill deployment
+// ---------------------------------------------------------------------------
+
+export interface GlobalSkillInput {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  body: string;
+  agents: AgentKind[];
+  /** Explicit opt-in for this revision; differing unmanaged files are backed up. */
+  replaceConflicts?: boolean;
+}
+
+export interface GlobalSkillDeployment {
+  host: string;
+  local: boolean;
+  agent: AgentKind;
+  status: 'pending' | 'synced' | 'conflict' | 'failed';
+  revision: number;
+  attemptedAt?: number;
+  message?: string;
+}
+
+export interface GlobalSkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  whenToUse?: string;
+  agents: AgentKind[];
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  deployments: GlobalSkillDeployment[];
+}
+
+export interface GlobalSkillDetail extends GlobalSkillSummary {
+  body: string;
+}
+
+// ---------------------------------------------------------------------------
 // Durable monitors
 // ---------------------------------------------------------------------------
 
@@ -866,10 +906,30 @@ export type LiveEvent =
 // WebSocket: client -> server
 // ---------------------------------------------------------------------------
 
+export interface QueuedSessionRequest {
+  id: string;
+  text: string;
+  queuedAt: number;
+  /** A server restart interrupted dispatch; explicit resume may repeat work. */
+  interrupted?: boolean;
+}
+
+export type RequestQueuePauseReason = 'manual' | 'stopped' | 'error' | 'restart' | 'unavailable';
+
+export interface SessionRequestQueueState {
+  items: QueuedSessionRequest[];
+  paused: boolean;
+  reason?: RequestQueuePauseReason;
+  error?: string;
+}
+
 export type ClientMessage =
   | { t: 'subscribe'; sessionId: string; lastSeq: number }
   | { t: 'unsubscribe'; sessionId: string }
   | { t: 'send'; sessionId: string; clientMsgId: string; text: string }
+  | { t: 'queue_remove'; sessionId: string; clientMsgId: string }
+  | { t: 'queue_pause'; sessionId: string }
+  | { t: 'queue_resume'; sessionId: string }
   | { t: 'abort'; sessionId: string }
   | { t: 'task_stop'; sessionId: string; taskId: string }
   | { t: 'permission'; sessionId: string; requestId: string; decision: PermissionDecision }
@@ -885,7 +945,7 @@ export type ClientMessage =
 // ---------------------------------------------------------------------------
 
 export type ServerEvent =
-  | { t: 'hello'; protocolVersion: number; serverVersion: string }
+  | { t: 'hello'; protocolVersion: number; serverVersion: string; requestQueueVersion?: 1 }
   | {
       t: 'subscribed';
       sessionId: string;
@@ -896,8 +956,11 @@ export type ServerEvent =
       reset: boolean;
       pendingPermissions: PermissionRequest[];
       tasks: BackgroundTask[];
+      requestQueue?: SessionRequestQueueState;
     }
   | { t: 'event'; sessionId: string; seq: number; ev: LiveEvent }
+  | { t: 'send_ack'; sessionId: string; clientMsgId: string }
+  | { t: 'request_queue'; sessionId: string; queue: SessionRequestQueueState }
   | { t: 'permission_request'; sessionId: string; request: PermissionRequest }
   | {
       t: 'permission_resolved';
@@ -936,4 +999,4 @@ export type ServerEvent =
   | { t: 'vibot_conv_removed'; convId: string }
   | { t: 'vibot_conv_list'; convs: VibotConvMeta[] }
   | { t: 'pong' }
-  | { t: 'error'; message: string; sessionId?: string };
+  | { t: 'error'; message: string; sessionId?: string; clientMsgId?: string };

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Monitor as MonitorRecord, MonitorEvent, MonitorStatus } from '@shared/protocol';
 import {
   CheckCircle2,
@@ -14,66 +14,74 @@ import {
 import { api } from '../lib/api';
 import { cn } from '../lib/format';
 import { useStore } from '../store/store';
+import { createMonitorRequestLoader } from '../store/monitorRequests';
 import { MonitorDialog } from './MonitorDialog';
 
 export interface SessionMonitorState {
   monitors: MonitorRecord[];
   events: MonitorEvent[];
   loading: boolean;
+  error: string | null;
+  eventsError: string | null;
   refresh: () => Promise<void>;
 }
 
-/** One REST snapshot shared by the compact composer pane and desktop task rail.
- * WebSocket invalidations refresh immediately; the slow poll covers a browser
- * that slept through a frame or reconnected after an event. */
+/** Definitions share the sidebar's account-scoped snapshot. Incident history
+ * refreshes independently: a slow/failed events request must never hide a known
+ * monitor. Both layouts share this hook; changing sessions is an instant filter.
+ */
 export function useSessionMonitors(sessionId: string | null): SessionMonitorState {
-  const [monitors, setMonitors] = useState<MonitorRecord[]>([]);
-  const [events, setEvents] = useState<MonitorEvent[]>([]);
-  const [loading, setLoading] = useState(Boolean(sessionId));
-  const generation = useRef(0);
+  const account = useStore((store) => store.account);
+  const records = useStore((store) => store.monitorRecords);
+  const loaded = useStore((store) => store.monitorLoaded);
+  const loading = useStore((store) => store.monitorLoading);
+  const error = useStore((store) => store.monitorError);
+  const loadMonitors = useStore((store) => store.loadSessionMonitors);
+  const scope = JSON.stringify([account, sessionId]);
+  const [history, setHistory] = useState<{ scope: string; events: MonitorEvent[]; error: string | null }>({
+    scope: '', events: [], error: null,
+  });
+  const eventLoader = useMemo(() => createMonitorRequestLoader(
+    (signal) => api.listMonitorEvents(undefined, 200, signal),
+    (events) => setHistory({ scope, events, error: null }),
+    ({ error: eventError }) => setHistory((previous) => ({
+      scope, events: previous.scope === scope ? previous.events : [], error: eventError,
+    })),
+  ), [scope]);
 
   const refresh = useCallback(async () => {
-    const request = ++generation.current;
-    if (!sessionId) {
-      setMonitors([]);
-      setEvents([]);
-      setLoading(false);
-      return;
-    }
-    try {
-      const [allMonitors, allEvents] = await Promise.all([
-        api.listMonitors(),
-        api.listMonitorEvents(undefined, 200),
-      ]);
-      if (generation.current !== request) return;
-      const matching = allMonitors.filter((monitor) => monitor.sessionId === sessionId);
-      const ids = new Set(matching.map((monitor) => monitor.id));
-      setMonitors(matching);
-      setEvents(allEvents.filter((event) => ids.has(event.monitorId)));
-    } catch {
-      // Keep the last good snapshot. Individual actions surface their errors;
-      // a transient refresh failure should not make the rail disappear.
-    } finally {
-      if (generation.current === request) setLoading(false);
-    }
-  }, [sessionId]);
+    if (!sessionId || !account) return;
+    await Promise.all([loadMonitors(), eventLoader.refresh()]);
+  }, [sessionId, account, loadMonitors, eventLoader]);
 
   useEffect(() => {
-    setLoading(Boolean(sessionId));
-    setMonitors([]);
-    setEvents([]);
-    void refresh();
-    const changed = () => void refresh();
+    if (!sessionId || !account) return;
+    // The global store starts the list read during login. Joining it here as
+    // an invalidation would unnecessarily queue a second identical request.
+    const store = useStore.getState();
+    if (!store.monitorLoaded && !store.monitorLoading) void loadMonitors();
+    void eventLoader.refresh();
+    // List invalidation is already handled once by the global WS handler.
+    const changed = () => void eventLoader.refresh();
     const timer = window.setInterval(() => void refresh(), 15_000);
     window.addEventListener('vibe-monitor-changed', changed);
     return () => {
-      generation.current += 1;
+      eventLoader.reset();
       window.clearInterval(timer);
       window.removeEventListener('vibe-monitor-changed', changed);
     };
-  }, [refresh, sessionId]);
+  }, [refresh, sessionId, account, loadMonitors, eventLoader]);
 
-  return { monitors, events, loading, refresh };
+  const monitors = useMemo(() => records.filter((monitor) => monitor.sessionId === sessionId), [records, sessionId]);
+  const events = useMemo(() => {
+    if (history.scope !== scope) return [];
+    const ids = new Set(monitors.map((monitor) => monitor.id));
+    return history.events.filter((event) => ids.has(event.monitorId));
+  }, [history, scope, monitors]);
+  return {
+    monitors, events, loading: !loaded && loading, error,
+    eventsError: history.scope === scope ? history.error : null, refresh,
+  };
 }
 
 function activeStatus(status: MonitorStatus): boolean {
@@ -226,7 +234,7 @@ export function MonitorPane({
     () => new Map(state.events.map((event) => [event.id, event])),
     [state.events],
   );
-  if (!state.monitors.length) return null;
+  if (!state.monitors.length && !state.loading && !state.error) return null;
 
   const enabled = state.monitors.filter((monitor) => monitor.enabled && activeStatus(monitor.status)).length;
   const alerts = state.monitors.filter((monitor) => monitor.status === 'firing' || monitor.status === 'error').length;
@@ -268,11 +276,34 @@ export function MonitorPane({
               'rounded-full px-1.5 py-px text-[10px] font-medium',
               alerts ? 'bg-rose-500/10 text-rose-300' : 'bg-white/5 text-slate-400',
             )}>
-              {alerts ? `${alerts} alert${alerts === 1 ? '' : 's'}` : `${enabled} active`}
+              {!state.monitors.length && (state.error || state.loading)
+                ? state.error ? 'Unavailable' : 'Loading…'
+                : alerts ? `${alerts} alert${alerts === 1 ? '' : 's'}` : `${enabled} active`}
             </span>
             <ChevronRight className={cn('ml-auto h-3.5 w-3.5 text-slate-600 transition-transform', open && 'rotate-90')} />
           </button>
-          {open && (
+          {(state.error || state.eventsError) && (
+            <div role="status" className="border-t border-white/5 px-3 py-2 text-[11px] text-amber-600 dark:text-amber-300">
+              <p>
+                {state.error ? 'Monitor list unavailable. ' : 'Event history unavailable; monitors remain visible. '}
+                {state.error || state.eventsError}
+              </p>
+              <p className="mt-1">Background monitoring continues independently of this panel.</p>
+              <button
+                type="button"
+                onClick={() => void state.refresh()}
+                className="mt-1 inline-flex items-center gap-1 rounded px-1 py-0.5 underline hover:bg-white/5"
+              >
+                <RefreshCw className="h-3 w-3" /> Retry monitor loading
+              </button>
+            </div>
+          )}
+          {!state.monitors.length && state.loading && !state.error && (
+            <div role="status" className="flex items-center gap-2 border-t border-white/5 px-3 py-2 text-[11px] text-slate-500">
+              <Loader2 className="h-3 w-3 animate-spin" /> Loading monitors…
+            </div>
+          )}
+          {open && state.monitors.length > 0 && (
             <ul className={cn('border-t border-white/5 px-1.5 py-1', layout === 'composer' && 'max-h-[28rem] overflow-y-auto')}>
               {state.monitors.map((monitor) => (
                 <MonitorRow

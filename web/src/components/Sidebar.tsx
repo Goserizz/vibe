@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
-import { Plus, Trash2, Check, X, Pencil, ArrowLeftRight, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users, Monitor } from '../lib/icons';
+import { Plus, Trash2, Check, X, Pencil, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users, Monitor } from '../lib/icons';
 import { SessionStatusIcon } from './SessionStatusIcon';
+import { SessionMonitorBadge } from './SessionMonitorBadge';
 import type { SearchResult, SessionMeta } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { Logo } from './Logo';
@@ -9,7 +10,6 @@ import { HostsDialog } from './HostsDialog';
 import { AccountsDialog } from './AccountsDialog';
 import { SettingsDialog } from './SettingsDialog';
 import { Menu } from './Menu';
-import { SwitchAgentDialog } from './SwitchAgentDialog';
 import { agentLabel, basename, cn, modelLabel, relativeTime } from '../lib/format';
 import { Glass } from './LiquidGlass';
 import { MonitorDialog } from './MonitorDialog';
@@ -33,7 +33,6 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
   const [monitorsOpen, setMonitorsOpen] = useState(false);
-  const [monitorSessionId, setMonitorSessionId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const account = useStore((s) => s.account);
   const isAdmin = useStore((s) => s.isAdmin);
@@ -55,10 +54,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
   const handleMenuSelect = (value: string) => {
     if (value === 'servers') setHostsOpen(true);
     else if (value === 'accounts') setAccountsOpen(true);
-    else if (value === 'monitors') {
-      setMonitorSessionId(null);
-      setMonitorsOpen(true);
-    }
+    else if (value === 'monitors') setMonitorsOpen(true);
     else if (value === 'settings') setSettingsOpen(true);
     else if (value === 'signout') signOut();
   };
@@ -118,10 +114,6 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
                     session={s}
                     active={s.id === activeId}
                     onClose={onClose}
-                    onCreateMonitor={() => {
-                      setMonitorSessionId(s.id);
-                      setMonitorsOpen(true);
-                    }}
                   />
                 ))}
               </ul>
@@ -282,15 +274,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
       {hostsOpen && <HostsDialog onClose={() => setHostsOpen(false)} />}
       {accountsOpen && <AccountsDialog onClose={() => setAccountsOpen(false)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
-      {monitorsOpen && (
-        <MonitorDialog
-          initialSessionId={monitorSessionId ?? undefined}
-          onClose={() => {
-            setMonitorsOpen(false);
-            setMonitorSessionId(null);
-          }}
-        />
-      )}
+      {monitorsOpen && <MonitorDialog onClose={() => setMonitorsOpen(false)} />}
     </>
   );
 }
@@ -376,6 +360,7 @@ function SearchResults({
                 <span className={cn('truncate text-[13px]', active ? 'text-slate-100' : 'text-slate-300')}>
                   {r.title}
                 </span>
+                <SessionMonitorBadge sessionId={r.sessionId} />
               </div>
               <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-600">
                 <HostChip host={r.host} />
@@ -405,17 +390,14 @@ function SessionItem({
   session,
   active,
   onClose,
-  onCreateMonitor,
 }: {
   session: SessionMeta;
   active: boolean;
   onClose: () => void;
-  onCreateMonitor: () => void;
 }) {
   const openSession = useStore((s) => s.openSession);
   const renameSession = useStore((s) => s.renameSession);
   const deleteSession = useStore((s) => s.deleteSession);
-  const togglePin = useStore((s) => s.togglePin);
   const unread = useStore((s) => !!s.unread[session.id]);
   const cursorModels = useStore((s) => s.cursorModels);
   const codexModels = useStore((s) => s.codexModels);
@@ -429,7 +411,6 @@ function SessionItem({
   const cli = useStore((s) => s.viewMode) === 'cli';
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [switching, setSwitching] = useState(false);
   const [title, setTitle] = useState(session.title);
   const agent = session.agent ?? 'claude';
   const model = modelLabel(session.model, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels);
@@ -444,14 +425,6 @@ function SessionItem({
 
   return (
     <li>
-      {switching && (
-        <SwitchAgentDialog
-          sessionId={session.id}
-          currentAgent={agent}
-          currentModel={session.model}
-          onClose={() => setSwitching(false)}
-        />
-      )}
       <div
         className={cn(
           'group relative flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 transition',
@@ -471,22 +444,10 @@ function SessionItem({
             active={active}
             cli={cli}
           />
-          {!editing && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                void togglePin(session.id);
-              }}
-              title={session.pinned ? 'Remove favorite' : 'Favorite'}
-              className={cn(
-                'rounded p-0 hover:bg-ink-700',
-                session.pinned
-                  ? 'text-accent'
-                  : 'text-slate-400 opacity-0 group-hover:opacity-100 hover:text-slate-200',
-              )}
-            >
-              <Star className="h-3.5 w-3.5" fill={session.pinned ? 'currentColor' : 'none'} />
-            </button>
+          {session.pinned && (
+            <span title="Favorite" className="text-accent">
+              <Star className="h-3.5 w-3.5" fill="currentColor" />
+            </span>
           )}
         </div>
 
@@ -518,6 +479,7 @@ function SessionItem({
               >
                 {session.title}
               </span>
+              <SessionMonitorBadge sessionId={session.id} />
               <HostChip host={session.host} />
             </div>
           )}
@@ -545,25 +507,19 @@ function SessionItem({
             <div className={cn('items-center gap-0.5', confirming ? 'flex' : 'hidden group-hover:flex')}>
               {confirming ? (
                 <>
-                  <button onClick={() => void deleteSession(session.id)} className="rounded p-1 text-rose-400 hover:bg-rose-500/15" title="Confirm delete">
+                  <button onClick={() => void deleteSession(session.id)} className="rounded p-1 text-rose-400 hover:bg-rose-500/15" title="Confirm delete" aria-label="Confirm delete">
                     <Check className="h-3.5 w-3.5" />
                   </button>
-                  <button onClick={() => setConfirming(false)} className="rounded p-1 text-slate-400 hover:bg-ink-700">
+                  <button onClick={() => setConfirming(false)} className="rounded p-1 text-slate-400 hover:bg-ink-700" title="Cancel delete" aria-label="Cancel delete">
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </>
               ) : (
                 <>
-                  <button onClick={() => setEditing(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-slate-200" title="Rename">
+                  <button onClick={() => setEditing(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-slate-200" title="Rename" aria-label="Rename">
                     <Pencil className="h-3.5 w-3.5" />
                   </button>
-                  <button onClick={() => setSwitching(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-accent-soft" title="切换 Agent / 模型">
-                    <ArrowLeftRight className="h-3.5 w-3.5" />
-                  </button>
-                  <button onClick={onCreateMonitor} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-accent-soft" title="创建监控">
-                    <Monitor className="h-3.5 w-3.5" />
-                  </button>
-                  <button onClick={() => setConfirming(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-rose-400" title="Delete">
+                  <button onClick={() => setConfirming(true)} className="rounded p-1 text-slate-400 hover:bg-ink-700 hover:text-rose-400" title="Delete" aria-label="Delete">
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
                 </>
