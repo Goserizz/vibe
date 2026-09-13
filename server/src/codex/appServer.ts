@@ -21,6 +21,12 @@ interface PendingRpc {
   reject: (error: Error) => void;
 }
 
+export interface CodexAppServerDeps {
+  spawn?: typeof spawn;
+  prepareMcp?: typeof applyCodexMcp;
+  answerTimeoutMs?: number;
+}
+
 interface BackgroundTerminal {
   itemId: string;
   processId: string;
@@ -87,6 +93,7 @@ class CodexAppServerRun {
   constructor(
     private readonly opts: CodexRunOptions,
     private readonly cb: RunCallbacks,
+    private readonly deps: CodexAppServerDeps = {},
   ) {
     this.normalizer = new CodexStreamNormalizer(cb);
   }
@@ -95,6 +102,7 @@ class CodexAppServerRun {
     return {
       abort: () => this.abort(),
       sendMessage: (text) => this.queueMessage(text),
+      steerMessage: (text, clientMessageId) => this.steerMessage(text, clientMessageId),
       stopTask: (taskId) => this.stopTask(taskId),
       done: this.run(),
     };
@@ -136,7 +144,7 @@ class CodexAppServerRun {
 
   private async run(): Promise<void> {
     try {
-      await applyCodexMcp(
+      await (this.deps.prepareMcp ?? applyCodexMcp)(
         this.opts.mcpServers ?? [],
         this.opts.remote ? { sshTarget: this.opts.remote.sshTarget } : undefined,
       );
@@ -187,8 +195,9 @@ class CodexAppServerRun {
 
   private spawn(): void {
     const spec = buildSpawn(this.opts);
-    if (!spec.bin) throw new Error('codex not found — install the Codex CLI or set CODEX_CLI_PATH');
-    this.child = spawn(spec.bin, spec.args, {
+    const bin = spec.bin ?? (this.deps.spawn ? 'codex' : undefined);
+    if (!bin) throw new Error('codex not found — install the Codex CLI or set CODEX_CLI_PATH');
+    this.child = (this.deps.spawn ?? spawn)(bin, spec.args, {
       cwd: spec.remote ? undefined : spec.cwd,
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -273,6 +282,22 @@ class CodexAppServerRun {
     this.promptQueue.push(text);
     this.wakeIdle?.();
     return true;
+  }
+
+  private async steerMessage(text: string, clientMessageId: string): Promise<boolean> {
+    if (!text.trim() || !this.acceptingPrompts || this.aborted || this.closed || !this.currentTurnId) return false;
+    try {
+      await this.request('turn/steer', {
+        threadId: this.threadId, expectedTurnId: this.currentTurnId, clientUserMessageId: clientMessageId,
+        input: [{ type: 'text', text, text_elements: [] }],
+      }, this.deps.answerTimeoutMs ?? 15_000);
+      return true;
+    } catch (error) {
+      // An explicit protocol rejection did not accept input (including a turn
+      // that ended during the click). A lost ACK/transport is ambiguous.
+      if ((error as { codexRpcRejected?: boolean }).codexRpcRejected) return false;
+      throw error;
+    }
   }
 
   private waitForWork(timeoutMs: number): Promise<void> {
@@ -375,7 +400,7 @@ class CodexAppServerRun {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(String(message.error.message ?? message.error)));
+      if (message.error) pending.reject(Object.assign(new Error(String(message.error.message ?? message.error)), { codexRpcRejected: true }));
       else pending.resolve(message.result);
       return;
     }
@@ -390,9 +415,10 @@ class CodexAppServerRun {
   }
 
   private onNotification(method: string, params: any): void {
+    if (this.threadId && typeof params.threadId === 'string' && params.threadId !== this.threadId) return;
     if (method === 'thread/started') {
       const id = params?.thread?.id;
-      if (typeof id === 'string' && id) {
+      if (typeof id === 'string' && id && (!this.threadId || this.threadId === id)) {
         this.threadId = id;
         this.cb.onClaudeSessionId(id);
       }
@@ -476,15 +502,24 @@ class CodexAppServerRun {
     }
   }
 
-  private request(method: string, params: unknown): Promise<any> {
+  private request(method: string, params: unknown, timeoutMs?: number): Promise<any> {
     if (this.closed || !this.child?.stdin?.writable) return Promise.reject(new Error('Codex App Server is closed'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const pending: PendingRpc = {
+        resolve: value => { clearTimeout(timer); resolve(value); },
+        reject: error => { clearTimeout(timer); reject(error); },
+      };
+      this.pending.set(id, pending);
+      if (timeoutMs) timer = setTimeout(() => {
+        this.pending.delete(id);
+        pending.reject(new Error('Codex did not confirm the answer in time; delivery is uncertain.'));
+      }, timeoutMs);
       this.child!.stdin!.write(`${JSON.stringify({ method, id, params })}\n`, (error) => {
         if (!error) return;
         this.pending.delete(id);
-        reject(error);
+        pending.reject(error);
       });
     });
   }
@@ -503,6 +538,6 @@ class CodexAppServerRun {
   }
 }
 
-export function startCodexAppServerRun(opts: CodexRunOptions, cb: RunCallbacks): RunHandle {
-  return new CodexAppServerRun(opts, cb).handle();
+export function startCodexAppServerRun(opts: CodexRunOptions, cb: RunCallbacks, deps: CodexAppServerDeps = {}): RunHandle {
+  return new CodexAppServerRun(opts, cb, deps).handle();
 }

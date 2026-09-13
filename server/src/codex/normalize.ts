@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { type NormalizerCallbacks, usageContextTokens } from '../claude/normalize.js';
+import type { RunCallbacks } from '../claude/types.js';
+import { parseCodexAsyncQuestion } from './questions.js';
 
 /** Parse a `function_call` arguments string (JSON) into an object, falling back to
  *  the raw string so the tool block always shows something useful. */
@@ -234,7 +236,8 @@ export class CodexStreamNormalizer {
    *  completed turn. App Server normally supplies an exact duration. */
   private turnStartedAt?: number;
 
-  constructor(private readonly cb: NormalizerCallbacks) {}
+  private readonly emittedQuestions = new Set<string>();
+  constructor(private readonly cb: NormalizerCallbacks & Pick<RunCallbacks, 'onAsyncQuestion'>) {}
 
   private newId(): string {
     return `cdx_${this.prefix}_${this.counter++}`;
@@ -359,6 +362,13 @@ export class CodexStreamNormalizer {
       // Tool calls/outputs apply on any subevent (id-keyed); text finalizes only on
       // completed/updated so a started+completed pair doesn't double-emit a block.
       this.applyParsed(parts, type !== 'item.started');
+      if (type === 'item.completed') {
+        const question = parseCodexAsyncQuestion(item);
+        if (question && !this.emittedQuestions.has(question.id)) {
+          this.emittedQuestions.add(question.id);
+          this.cb.onAsyncQuestion?.(question);
+        }
+      }
       return;
     }
 

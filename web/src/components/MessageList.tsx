@@ -3,10 +3,14 @@ import { useStore } from '../store/store';
 import { BlockView } from './blocks';
 import { CliBlockView } from './CliBlocks';
 import { cn } from '../lib/format';
+import { outlineRenderWindow } from '@shared/conversationOutline';
+import { ConversationOutline } from './ConversationOutline';
+import { useConversationIndex } from './useConversationIndex';
+import type { ChatBlock } from '@shared/protocol';
 
 /** Blocks rendered at once. Paging keeps loaded history small; this bounds
  *  pathological sessions (thousands of blocks) so the DOM stays responsive. */
-const RENDER_CAP = 600;
+const EMPTY_BLOCKS: ChatBlock[] = [];
 
 export function MessageList({
   sessionId,
@@ -21,11 +25,16 @@ export function MessageList({
   const blocks = useStore((s) => s.views[sessionId]?.blocks);
   const hasMore = useStore((s) => s.views[sessionId]?.hasMore ?? false);
   const loadingOlder = useStore((s) => s.views[sessionId]?.loadingOlder ?? false);
+  const cursor = useStore((s) => s.views[sessionId]?.cursor);
   const loadOlder = useStore((s) => s.loadOlder);
   const viewMode = useStore((s) => s.viewMode);
   const cli = viewMode === 'cli';
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const jumpingRef = useRef(false);
+  const [renderTarget, setRenderTarget] = useState<string>();
+  const outline = useConversationIndex(sessionId, blocks ?? EMPTY_BLOCKS, cursor, hasMore);
   // Anchor across prepended history: keep the viewport parked on the same
   // content while content grows above it (scrollHeight jumps).
   const anchorRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(null);
@@ -34,23 +43,51 @@ export function MessageList({
   const [renderAll, setRenderAll] = useState(false);
   useEffect(() => {
     setRenderAll(false);
+    setRenderTarget(undefined);
   }, [sessionId]);
+  const targetIndex = renderTarget ? blocks?.findIndex(block => block.id === renderTarget) ?? -1 : -1;
+  const window = outlineRenderWindow(blocks?.length ?? 0, targetIndex, renderAll);
+  const hiddenAfter = (blocks?.length ?? 0) - window.end;
+
+  const latest = () => {
+    stickRef.current = true; setRenderTarget(undefined); setRenderAll(false);
+    requestAnimationFrame(() => { const el = containerRef.current; if (el) el.scrollTop = el.scrollHeight; });
+  };
+  const navigate = async (id: string, signal: AbortSignal) => {
+    stickRef.current = false; jumpingRef.current = true;
+    try {
+      for (;;) {
+        if (signal.aborted) return;
+        const view = useStore.getState().views[sessionId];
+        if (view?.index.has(id)) { setRenderAll(false); setRenderTarget(id); return; }
+        if (!view?.hasMore || !view.cursor) throw new Error('这条提问已不在当前历史中，请刷新目录');
+        if (view.loadingOlder) {
+          await new Promise(resolve => setTimeout(resolve, 50)); continue;
+        }
+        const before = view.cursor;
+        const el = containerRef.current;
+        if (el) anchorRef.current = { prevScrollHeight: el.scrollHeight, prevScrollTop: el.scrollTop };
+        await loadOlder(sessionId, signal);
+        if (useStore.getState().views[sessionId]?.cursor === before) throw new Error('历史加载未能继续，请重试');
+      }
+    } finally { jumpingRef.current = false; }
+  };
 
   // Track whether the user is parked at the bottom; only then do we auto-follow.
   const onScroll = () => {
     const el = containerRef.current;
     if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    stickRef.current = !renderTarget && !jumpingRef.current && hiddenAfter === 0 && el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     // Near the top with older history left: pull the previous page and keep
     // the reading position stable across the prepend.
-    if (el.scrollTop < 80 && hasMore && !loadingOlder) {
+    if (el.scrollTop < 80 && hasMore && !loadingOlder && !jumpingRef.current && window.start === 0) {
       anchorRef.current = { prevScrollHeight: el.scrollHeight, prevScrollTop: el.scrollTop };
       void loadOlder(sessionId);
     }
   };
 
-  // Re-anchor on new blocks and when the floating composer stack resizes (the
-  // task pane collapsing, say), since that changes the padding below the list.
+  // Composer resize changes bottom padding in chat and the scroll viewport's
+  // height in TUI. Re-anchor either layout, without moving a reader in history.
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -61,7 +98,7 @@ export function MessageList({
     } else if (stickRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [blocks, bottomPad, viewMode]);
+  }, [blocks, bottomPad, viewMode, renderAll, renderTarget]);
 
   // Snap to bottom when switching sessions.
   useEffect(() => {
@@ -74,20 +111,22 @@ export function MessageList({
     return <div className="flex-1" />;
   }
 
-  const hidden = renderAll ? 0 : Math.max(0, blocks.length - RENDER_CAP);
-  const shown = hidden > 0 ? blocks.slice(hidden) : blocks;
+  const hidden = window.start;
+  const shown = blocks.slice(window.start, window.end);
 
   return (
-    <div ref={containerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
+    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={containerRef} onScroll={onScroll} className="conversation-scroll min-h-0 flex-1 overflow-y-auto">
       <div
+        ref={contentRef}
         className={cn(
           'messages-pad mx-auto flex flex-col px-4 md:px-6',
           cli ? 'max-w-4xl gap-2' : 'max-w-3xl gap-4',
           embedded ? 'pt-6 pb-8' : 'pt-28 md:pt-20',
         )}
-        // Measured composer-stack height wins over the CSS fallback, so the last
-        // message always parks above it — including when the task pane is open.
-        style={bottomPad ? { paddingBottom: `${bottomPad + 8}px` } : undefined}
+        // TUI already reserves the composer in normal flow: no duplicate blank
+        // spacer below the transcript. Chat still clears its floating stack.
+        style={bottomPad !== undefined ? { paddingBottom: `${(cli ? 0 : bottomPad) + 8}px` } : undefined}
       >
         {blocks.length === 0 ? (
           <div className={cn('py-20 text-sm text-slate-600', cli ? 'font-mono text-left' : 'text-center')}>
@@ -133,12 +172,21 @@ export function MessageList({
                 {b.kind === 'user' && (i > 0 || hidden > 0) && (
                   <div className={cn('border-t', cli ? 'mt-2 border-ink-700' : 'mt-4 border-white/10')} />
                 )}
-                {cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
+                {b.kind === 'user' ? <div data-question-id={b.id} tabIndex={-1} className="question-anchor outline-none">
+                  {cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
+                </div> : cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
               </Fragment>
             ))}
+            {hiddenAfter > 0 && <button type="button" onClick={latest} className="my-4 self-center rounded-full border border-ink-600 bg-ink-900 px-4 py-2 text-xs text-slate-400 hover:text-slate-100">
+              下方还有 {hiddenAfter} 条消息 · 回到最新
+            </button>}
           </>
         )}
       </div>
+    </div>
+    <ConversationOutline entries={outline.entries} viewport={containerRef} content={contentRef}
+      hasMore={outline.hasMore} loading={outline.loading} error={outline.error} onOpen={() => void outline.load()} onClose={outline.stop}
+      onJump={navigate} onLatest={latest} />
     </div>
   );
 }

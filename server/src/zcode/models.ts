@@ -200,7 +200,7 @@ async function fetchCatalog(): Promise<ZcodeCatalog | null> {
         if (!providerId || !modelId) continue;
         const reasoning = (entry as { reasoning?: { enabled?: unknown; levels?: unknown; defaultLevel?: unknown } })
           ?.reasoning;
-        if (!reasoning || reasoning.enabled !== true) continue;
+        if (!reasoning) continue;
         const levels: string[] = (Array.isArray(reasoning.levels) ? reasoning.levels : [])
           .map((l) => (typeof (l as { value?: unknown })?.value === 'string' ? (l as { value: string }).value : ''))
           .filter(Boolean);

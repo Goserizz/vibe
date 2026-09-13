@@ -681,6 +681,26 @@
   line-height: 1.65;
 }
 
+/* Reasoning shares the normal Markdown renderer, with compact, muted prose.
+   Do not apply pre-wrap or blanket italics: Markdown owns paragraph spacing,
+   emphasis and code formatting. Code, math and tables keep their own overflow. */
+.thinking-markdown .prose-vibe {
+  font-size: 12px;
+  line-height: 1.65;
+  color: rgb(var(--slate-500));
+}
+.thinking-markdown.cli-md .prose-vibe { font-size: 12.5px; }
+.thinking-markdown .prose-vibe :is(h1, h2, h3, h4, h5, h6) {
+  margin-top: .65rem;
+  margin-bottom: .3rem;
+  color: inherit;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+.thinking-markdown .prose-vibe > :first-child { margin-top: 0; }
+.thinking-markdown .prose-vibe :is(table, pre) { font-size: inherit; }
+.thinking-markdown .prose-vibe pre { padding: .65rem .75rem; }
+
 .cli-md .prose-vibe h1,
 .cli-md .prose-vibe h2,
 .cli-md .prose-vibe h3 {
@@ -790,6 +810,31 @@ html.cli-mode textarea.cli-prompt:focus-visible {
 
 .cli-surface .messages-pad {
   font-variant-ligatures: none;
+}
+
+/* Wide outlines dock beside the full conversation surface. Narrow screens
+   retain the scaled task-area dropdown; both lists scroll independently. */
+.outline-panel { transform-origin: top right; animation: outline-reveal 180ms cubic-bezier(.2,.75,.25,1); }
+.outline-wide .outline-panel { animation: none; border-radius: 0; box-shadow: none; }
+[data-outline-slot="composer"]:has(.conversation-outline) { margin: 0 16px 8px; }
+/* Empty portal slots must not create a blank task card or extra rail spacing. */
+[data-outline-slot]:empty { display: block; height: 0; margin: 0 !important; }
+[data-outline-slot]:empty + * { margin-top: 0 !important; }
+.outline-entry:hover { transform: translateX(2px) scale(1.015); }
+.outline-entry:focus-visible { outline: 1px solid rgb(var(--slate-400)); outline-offset: -1px; }
+.question-anchor { border-radius: 12px; }
+.question-jump-highlight { animation: question-spotlight 1.8s ease-out; }
+@keyframes outline-reveal {
+  from { opacity: 0; scale: .93; }
+  to { opacity: 1; scale: 1; }
+}
+@keyframes question-spotlight {
+  0%, 25% { background-color: rgb(var(--accent) / .13); outline: 1px solid rgb(var(--slate-400) / .6); outline-offset: 5px; }
+  100% { background-color: transparent; outline: 1px solid transparent; outline-offset: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .outline-panel, .question-jump-highlight { animation: none; }
+  .outline-entry:hover { transform: none; }
 }
 
 /* CLI mode is a TUI: monospace, square corners, hairline panes, solid ground.
@@ -1109,4 +1154,3 @@ html.hc .cli-todo-pane {
   border: 1px solid rgb(var(--hc-line));
   border-radius: 0.75rem;
 }
-

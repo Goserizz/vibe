@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen, ArrowLeftRight } from '../lib/icons';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { Menu as MenuIcon, Cpu, ShieldCheck, Gauge, FolderGit2, Plus, SquareTerminal, FolderOpen, ArrowLeftRight, Sparkles } from '../lib/icons';
 import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { api } from '../lib/api';
 import { useStore } from '../store/store';
 import { MessageList } from './MessageList';
 import { Composer } from './Composer';
+import { AgentQuestions } from './AgentQuestions';
 import { PermissionPrompt } from './PermissionPrompt';
 import { latestTodos, TodoPane } from './TodoPane';
 import { BackgroundTasksPane } from './BackgroundTasksPane';
@@ -12,12 +14,16 @@ import { MonitorPane, useSessionMonitors, type SessionMonitorState } from './Mon
 import { TaskRail } from './TaskRail';
 import { Menu } from './Menu';
 import { SwitchAgentDialog } from './SwitchAgentDialog';
+import { FusionModelPicker } from './FusionModelPicker';
 import { Logo } from './Logo';
 import {
   agentLabel,
   cn,
   effortLabel,
   effortLevelsForAgent,
+  defaultFusionSpec,
+  devinModelFamilyOf,
+  fusionLabelOf,
   modelLabel,
   modelsForAgent,
   permissionModeLabel,
@@ -51,9 +57,9 @@ export function ChatView({
   const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
   const viewMode = useStore((s) => s.viewMode);
   const monitorState = useSessionMonitors(activeId);
-  // The composer stack floats over the message list, so the list needs bottom
-  // padding equal to its height. It grows and shrinks (task pane expanded,
-  // attachments, permission prompts), so measure instead of guessing.
+  // Chat overlays the composer and needs matching message padding; TUI keeps
+  // it in normal flow, outside the message scrollbar. Measure both layouts so
+  // auto-follow also handles tasks, attachments, and permission prompts resizing.
   const overlayRef = useRef<HTMLDivElement>(null);
   const [overlayHeight, setOverlayHeight] = useState(0);
 
@@ -81,14 +87,18 @@ export function ChatView({
         headerEnd={headerEnd}
       />
       <div className="flex min-h-0 flex-1">
-        <section className="relative flex min-w-0 flex-1 flex-col">
-          <MessageList sessionId={activeId} bottomPad={overlayHeight} />
-          {/* Composer (+ permission prompts) floats over the conversation. On
-              compact viewports the task panes stay in this stack; wide desktop
-              moves them into TaskRail instead. */}
-          <div className={cn('pointer-events-none absolute inset-x-0 bottom-0 z-20', viewMode === 'cli' && 'border-t border-ink-700 bg-ink-950')}>
+        <section data-conversation-surface className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          <MessageList key={`${activeId}:${session.agent}:${session.claudeSessionId ?? ''}`} sessionId={activeId} bottomPad={overlayHeight} />
+          {/* TUI reserves a separate, non-shrinking composer row. Only chat
+              floats it over the conversation. Compact task panes stay in this
+              stack; wide desktop moves them into TaskRail instead. */}
+          <div data-conversation-composer className={cn('z-20', viewMode === 'cli'
+            ? 'shrink-0 border-t border-ink-700 bg-ink-950'
+            : 'pointer-events-none absolute inset-x-0 bottom-0')}>
             <div ref={overlayRef} className="pointer-events-auto">
               <PermissionPrompt sessionId={activeId} />
+              <AgentQuestions key={activeId} sessionId={activeId} />
+              <div data-outline-slot="composer" />
               <div className="lg:hidden">
                 <BackgroundTasksPane sessionId={activeId} />
                 <TodoPane sessionId={activeId} />
@@ -112,6 +122,7 @@ function ChatTaskRail({ sessionId, monitorState }: { sessionId: string; monitorS
   if (!hasTodos && !backgroundTasks?.length && !monitorState.monitors.length && !monitorState.loading && !monitorState.error) return null;
   return (
     <TaskRail aria-label="Session tasks">
+      <div data-outline-slot="rail" />
       <BackgroundTasksPane sessionId={sessionId} layout="rail" />
       <TodoPane sessionId={sessionId} layout="rail" />
       <MonitorPane sessionId={sessionId} state={monitorState} layout="rail" />
@@ -236,6 +247,7 @@ function Header({
       <div className="flex flex-wrap items-center gap-1.5 pl-10 md:justify-end md:pl-0">
       <SwitchAgentControl sessionId={session.id} agent={session.agent} model={session.model} />
       <ModelControl align={align} />
+      <FusionControl align={align} />
       {session.agent !== 'cursor' && session.agent !== 'kimi' && <EffortControl align={align} />}
       <PermissionControl align={align} />
       <button type="button" onClick={onToggleTerminal} aria-label="Terminal" title="Terminal">
@@ -316,14 +328,105 @@ function ModelControl({ align }: { align: 'left' | 'right' }) {
       triggerLabel={`Model: ${label}`}
       searchable={usePicker}
       allowCustom={usePicker}
-      items={modelsForAgent(session.agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels).map((m) => ({ value: m.value, label: m.label, active: m.value === session.model }))}
-      onSelect={(value) => void patchSession(session.id, { model: value })}
+      items={modelsForAgent(session.agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels).map((m) => ({
+        value: m.value,
+        label: m.label,
+        active: m.value === (session.agent === 'devin' ? devinModelFamilyOf(session.model) : session.model),
+      }))}
+      onSelect={(value) => {
+        let next = value;
+        // Picking Fusion from the chip menu takes the default pair; fine-tune
+        // the combination in the new-session/switch dialogs.
+        if (value === 'fusion' && session.agent === 'devin') {
+          const opt = modelsForAgent('devin', cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels).find((m) => m.value === 'fusion');
+          if (opt?.fusion) next = defaultFusionSpec(opt.fusion);
+        }
+        void patchSession(session.id, { model: next });
+      }}
       trigger={
         <ControlChip title={`Model: ${label}`}>
           {cli ? label : <Cpu className="h-4 w-4 text-slate-400" />}
         </ControlChip>
       }
     />
+  );
+}
+
+/** Chip + popover to retune the devin fusion pair (strong + normal model)
+ *  without leaving the conversation. Applies live via a session patch, so the
+ *  next turn already runs the new combination. */
+function FusionControl({ align }: { align: 'left' | 'right' }) {
+  const session = useStore((s) => s.sessions.find((x) => x.id === s.activeId))!;
+  const cli = useStore((s) => s.viewMode) === 'cli';
+  const devinModels = useStore((s) => s.devinModels);
+  const option = useMemo(
+    () => (session.agent === 'devin' ? devinModels.find((m) => m.value === 'fusion') : undefined),
+    [session.agent, devinModels],
+  );
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<CSSProperties>({});
+  const rootRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      if (rootRef.current?.contains(event.target as Node)) return;
+      if (popRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  if (session.agent !== 'devin' || !session.model.startsWith('fusion') || !option?.fusion) return null;
+  const combo = fusionLabelOf(session.model, devinModels)?.split('· ')[1] ?? session.model;
+
+  return (
+    <>
+      <button
+        type="button"
+        ref={rootRef}
+        aria-label="Fusion combination"
+        onClick={() => {
+          const r = rootRef.current?.getBoundingClientRect();
+          if (r) {
+            setPos(
+              align === 'right'
+                ? { top: r.bottom + 6, right: window.innerWidth - r.right }
+                : { top: r.bottom + 6, left: r.left },
+            );
+          }
+          setOpen((v) => !v);
+        }}
+      >
+        <ControlChip title={`Fusion 组合: ${combo}`} active={open}>
+          {cli ? combo : <Sparkles className="h-4 w-4 text-slate-400" />}
+        </ControlChip>
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={popRef}
+            style={pos}
+            className="fixed z-50 w-[340px] rounded-xl border border-ink-600 bg-ink-850 p-3 shadow-2xl"
+          >
+            <FusionModelPicker
+              option={option}
+              value={session.model}
+              onChange={(spec) => void patchSession(session.id, { model: spec })}
+            />
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 

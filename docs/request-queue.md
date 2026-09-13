@@ -47,8 +47,26 @@ An explicitly rejected send remains visible and can be retried or discarded.
 
 A service restart retains pending requests but pauses them. A request that was
 claimed when the process stopped is marked **Interrupted**: it may already have
-performed some work. Review/remove it, or explicitly choose **Retry interrupted
-& resume queue**. Retried interrupted requests receive new transcript ids.
+performed some work. Review/remove it, or explicitly choose **Continue interrupted
+& resume queue**. Confirmed interrupted requests receive new transcript ids and
+a short continuation message instead of resending the original prompt:
+
+> 刚刚对话被中断了，请继续完成中断前尚未完成的任务。
+
+The message includes at most 200 characters of task context, asks the agent to
+check existing history/results and side effects before proceeding, and to ask
+for missing information instead of guessing. Attachment paths and long pasted
+prompts are not recopied. The queue keeps its original text privately for
+reference and deduplication; a persisted `continuation` flag chooses the actual
+dispatch text. Repeated interruptions reuse that original reference, without
+nesting continuation messages. The queue UI previews the continuation text.
+
+Requests that were only waiting are still sent unchanged. Connection retries
+with the same message id are still deduplicated; native pre-output transport
+retries are unchanged. No interrupted request is automatically continued on
+restart, and no native history is rewritten. This applies to the shared coding
+session queue, not to Vibot's independent chat-input workflow.
+
 Vibe does not promise exactly-once external side effects across a process crash.
 
 Limits: 20 waiting requests per session, 1 MiB of UTF-8 text per request, and
@@ -62,6 +80,9 @@ Protocol additions: `send_ack`, `request_queue`, `subscribed.requestQueue`, and
 the `queue_remove`, `queue_pause`, `queue_resume` client commands. Older clients
 can continue sending ordinary idle prompts; the new client is deployed only
 after the queue-capable backend has restarted.
+The `hello.interruptedResumeVersion: 1` capability confirms that interrupted
+requests use continuation notices; deployment verifies it before publishing
+the updated continuation UI.
 
 ## Verification
 
@@ -73,3 +94,14 @@ injected runners and a temporary Vibe home in Chromium/Firefox, chat/CLI mode:
 FIFO, cancellation, Stop/resume, refresh, lost ACKs, attachment-upload target
 stability, failure pause, restart review, rejected-send retry, and mobile layout.
 No production agent/model call is made by these tests.
+
+2026-09-11 continuation update: 19 additional regression cases cover short task
+references, attachment handling, Unicode, unchanged unsent requests, repeated
+interruptions, durable-save failure, and continuation dispatch through all ten
+coding agents. The focused queue/prompt suite passes 57 tests; the complete suite
+passes 652 tests with no skips. Typecheck/build and Chromium/Firefox × chat/CLI
+browser checks pass, including the actual continuation text, a second
+interruption, and FIFO delivery of the untouched next request. A normal-command
+monitor test's startup budget was raised from 2s to 10s after diagnostics showed
+an exit-0 command whose close handling was delayed beyond 2s; its separate 100ms
+timeout case and all production monitor settings remain unchanged.

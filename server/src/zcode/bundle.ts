@@ -40,6 +40,35 @@ export function findZcodeAppRoot(): string | null {
   return fs.existsSync(path.join(fallback, 'resources', 'glm', 'zcode.cjs')) ? fallback : null;
 }
 
+const BUILTIN_PROVIDER = 'zcode-builtin.json';
+
+/** Paths the packaged CLI 0.16.5+ probes, vs where the AppImage actually ships the file. */
+export function zcodeBuiltinProviderPaths(root: string): { expected: string; shipped: string } {
+  return {
+    expected: path.join(root, 'resources', 'glm', 'provider', BUILTIN_PROVIDER),
+    shipped: path.join(root, 'resources', 'config', 'provider', BUILTIN_PROVIDER),
+  };
+}
+
+/**
+ * CLI 0.16.5 looks for zcode-builtin.json next to zcode.cjs (and five levels
+ * up, the source-tree layout). The desktop AppImage ships it under
+ * resources/config/provider. Link the expected path so `zcode app-server`
+ * can start. Returns true when a link/copy was created.
+ */
+export function repairZcodeBuiltinProviderLayout(root: string): boolean {
+  const { expected, shipped } = zcodeBuiltinProviderPaths(root);
+  if (fs.existsSync(expected) || !fs.existsSync(shipped)) return false;
+  fs.mkdirSync(path.dirname(expected), { recursive: true, mode: 0o755 });
+  const rel = path.relative(path.dirname(expected), shipped);
+  try {
+    fs.symlinkSync(rel, expected);
+  } catch {
+    fs.copyFileSync(shipped, expected);
+  }
+  return fs.existsSync(expected);
+}
+
 function bundleFingerprint(root: string): string | null {
   try {
     const st = fs.statSync(path.join(root, 'resources', 'glm', 'zcode.cjs'));
@@ -86,6 +115,7 @@ export interface ZcodeBundle {
 export function buildZcodeBundle(): ZcodeBundle | null {
   const root = findZcodeAppRoot();
   if (!root) return null;
+  repairZcodeBuiltinProviderLayout(root);
   const fingerprint = bundleFingerprint(root);
   if (!fingerprint) return null;
 

@@ -910,8 +910,11 @@ export interface QueuedSessionRequest {
   id: string;
   text: string;
   queuedAt: number;
-  /** A server restart interrupted dispatch; explicit resume may repeat work. */
+  /** Dispatch was interrupted; explicit resume asks the agent to continue. */
   interrupted?: boolean;
+  /** User confirmed continuation from prior progress. `text` retains the
+   * original request for reference/dedup; dispatch uses a short resume notice. */
+  continuation?: boolean;
 }
 
 export type RequestQueuePauseReason = 'manual' | 'stopped' | 'error' | 'restart' | 'unavailable';
@@ -923,6 +926,30 @@ export interface SessionRequestQueueState {
   error?: string;
 }
 
+/** Codex async questions are user input, not command approval requests. */
+export interface AgentQuestionItem {
+  title: string;
+  options?: string[];
+}
+
+export interface AgentQuestion {
+  id: string;
+  agent: 'codex';
+  nativeId: string;
+  sourceId: string;
+  questions: AgentQuestionItem[];
+  createdAt: number;
+  status: 'pending' | 'sending' | 'uncertain';
+  /** Retained privately only while a submitted answer may need recovery. */
+  answers?: string[];
+  error?: string;
+}
+
+export interface AgentQuestionState {
+  items: AgentQuestion[];
+  error?: string;
+}
+
 export type ClientMessage =
   | { t: 'subscribe'; sessionId: string; lastSeq: number }
   | { t: 'unsubscribe'; sessionId: string }
@@ -930,6 +957,8 @@ export type ClientMessage =
   | { t: 'queue_remove'; sessionId: string; clientMsgId: string }
   | { t: 'queue_pause'; sessionId: string }
   | { t: 'queue_resume'; sessionId: string }
+  | { t: 'question_answer'; sessionId: string; questionId: string; answers: string[]; retry?: boolean }
+  | { t: 'question_dismiss'; sessionId: string; questionId: string }
   | { t: 'abort'; sessionId: string }
   | { t: 'task_stop'; sessionId: string; taskId: string }
   | { t: 'permission'; sessionId: string; requestId: string; decision: PermissionDecision }
@@ -945,7 +974,7 @@ export type ClientMessage =
 // ---------------------------------------------------------------------------
 
 export type ServerEvent =
-  | { t: 'hello'; protocolVersion: number; serverVersion: string; requestQueueVersion?: 1 }
+  | { t: 'hello'; protocolVersion: number; serverVersion: string; requestQueueVersion?: 1; agentQuestionsVersion?: 1; interruptedResumeVersion?: 1 }
   | {
       t: 'subscribed';
       sessionId: string;
@@ -957,10 +986,13 @@ export type ServerEvent =
       pendingPermissions: PermissionRequest[];
       tasks: BackgroundTask[];
       requestQueue?: SessionRequestQueueState;
+      agentQuestions?: AgentQuestionState;
     }
   | { t: 'event'; sessionId: string; seq: number; ev: LiveEvent }
   | { t: 'send_ack'; sessionId: string; clientMsgId: string }
   | { t: 'request_queue'; sessionId: string; queue: SessionRequestQueueState }
+  | { t: 'agent_questions'; sessionId: string; state: AgentQuestionState }
+  | { t: 'agent_question_result'; sessionId: string; questionId: string; ok: boolean; delivery?: 'steered' | 'queued' | 'dismissed'; message?: string }
   | { t: 'permission_request'; sessionId: string; request: PermissionRequest }
   | {
       t: 'permission_resolved';

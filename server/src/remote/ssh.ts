@@ -134,6 +134,9 @@ export function sshExec(
     };
     child.on('error', (e) => finish(-1, e instanceof Error ? e.message : String(e)));
     child.on('close', (code) => finish(code));
+    // A remote that dies before our stdin lands (stalled tunnel, dead mux
+    // master) raises EPIPE on this socket; unhandled it kills the server.
+    child.stdin.on('error', () => undefined);
 
     if (opts.input != null) child.stdin.write(opts.input);
     child.stdin.end();

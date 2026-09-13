@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X, ArrowLeftRight, Loader2, AlertCircle } from '../lib/icons';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
-import { AGENTS, agentLabel, cn, modelsForAgent } from '../lib/format';
+import { AGENTS, agentLabel, cn, defaultFusionSpec, devinModelFamilyOf, modelsForAgent } from '../lib/format';
+import { FusionModelPicker } from './FusionModelPicker';
 import type { AgentKind, SwitchFidelity } from '@shared/protocol';
 
 /**
@@ -62,13 +64,20 @@ export function SwitchAgentDialog({ sessionId, currentAgent, currentModel, onClo
         : [],
     [target, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels],
   );
+  const fusionOpt = useMemo(
+    () => (target === 'devin' ? models.find((m) => m.value === 'fusion') : undefined),
+    [target, models],
+  );
 
   // 选中目标后，默认模型沿用当前会话的（若该 agent 没有这个模型则回落到第一项）。
   const pick = (agent: AgentKind): void => {
     setTarget(agent);
     setError(null);
     const list = modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels);
-    const keep = list.some((m) => m.value === currentModel) ? currentModel : '';
+    // Fusion selections stay selected across agent switches — they validate
+    // against their family entry, not the raw `fusion:…` spec.
+    const effective = agent === 'devin' ? devinModelFamilyOf(currentModel) : currentModel;
+    const keep = list.some((m) => m.value === effective) ? currentModel : '';
     setModel(keep);
   };
 
@@ -88,10 +97,14 @@ export function SwitchAgentDialog({ sessionId, currentAgent, currentModel, onClo
     else setError('切换失败，请查看服务端日志。');
   };
 
-  return (
+  // Portal to <body>: in chat mode the dialog is mounted inside the Header's
+  // Glass (backdrop-filter), which turns `position: fixed` against that box
+  // instead of the viewport and pushes the overlay past the top edge. Same
+  // escape the Menu popover uses.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="w-full max-w-md overflow-hidden rounded-xl border border-ink-600 bg-ink-850 shadow-2xl"
+        className="flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col overflow-hidden rounded-xl border border-ink-600 bg-ink-850 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-ink-700 px-4 py-3">
@@ -104,7 +117,7 @@ export function SwitchAgentDialog({ sessionId, currentAgent, currentModel, onClo
           </button>
         </div>
 
-        <div className="space-y-4 px-4 py-4">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
           <p className="text-[12px] leading-relaxed text-slate-400">
             历史对话无损迁移，新 agent 原生接手。
           </p>
@@ -148,8 +161,16 @@ export function SwitchAgentDialog({ sessionId, currentAgent, currentModel, onClo
             <div>
               <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-500">模型</div>
               <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
+                value={target === 'devin' ? devinModelFamilyOf(model) : model}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (target === 'devin' && v === 'fusion') {
+                    const opt = models.find((m) => m.value === 'fusion');
+                    setModel(opt?.fusion ? defaultFusionSpec(opt.fusion) : 'fusion');
+                    return;
+                  }
+                  setModel(v);
+                }}
                 className="w-full rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-2 text-[12px] text-slate-200 outline-none focus:border-accent/50"
               >
                 <option value="">（由 {agentLabel(target)} 自行选择）</option>
@@ -159,6 +180,11 @@ export function SwitchAgentDialog({ sessionId, currentAgent, currentModel, onClo
                   </option>
                 ))}
               </select>
+              {target === 'devin' && model.startsWith('fusion') && fusionOpt?.fusion && (
+                <div className="mt-2">
+                  <FusionModelPicker option={fusionOpt} value={model} onChange={setModel} />
+                </div>
+              )}
             </div>
           )}
 
@@ -216,6 +242,7 @@ export function SwitchAgentDialog({ sessionId, currentAgent, currentModel, onClo
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

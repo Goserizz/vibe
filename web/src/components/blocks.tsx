@@ -106,14 +106,22 @@ function ThinkingView({ block }: { block: ThinkingBlock }) {
   useLayoutEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight > el.clientHeight + 1 ? el.scrollHeight : 0;
+    const follow = () => { el.scrollTop = el.scrollHeight > el.clientHeight + 1 ? el.scrollHeight : 0; };
+    follow();
+    const content = el.firstElementChild;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(follow);
+    observer.observe(content);
+    return () => observer.disconnect();
   }, [displayText, open]);
 
   if (!block.text) return null;
 
   return (
-    <div className="animate-fade-in rounded-xl border border-white/5 bg-ink-900/40">
+    <div data-thinking-id={block.id} className="animate-fade-in rounded-xl border border-white/5 bg-ink-900/40">
       <button
+        type="button"
+        aria-expanded={Boolean(open)}
         onClick={() => setManual(!open)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-slate-500 transition hover:text-slate-300"
       >
@@ -126,13 +134,14 @@ function ThinkingView({ block }: { block: ThinkingBlock }) {
       {open && (
         <div
           ref={viewportRef}
+          data-thinking-content
           className={cn(
             'border-t border-white/5',
             block.streaming && 'max-h-28 overflow-hidden',
           )}
         >
-          <div className="whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-[12px] leading-relaxed text-slate-500">
-            {displayText}
+          <div className="thinking-markdown min-w-0 px-3 py-2.5">
+            <Markdown>{displayText}</Markdown>
           </div>
         </div>
       )}

@@ -4,9 +4,13 @@ import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } fro
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
 import { applyZcodeMcp } from '../mcp/apply.js';
 import { assertZcodeStartupConfig } from './configFile.js';
+import { ensureZcodePersonalProviders } from './personalConfig.js';
 
 export interface ZcodeRunnerDeps {
   prepareMcp?: typeof applyZcodeMcp;
+  /** Project cli/config.json providers into v2/provider_config.json so
+   *  app-server (which does not import the legacy file) can select a model. */
+  ensurePersonalProviders?: typeof ensureZcodePersonalProviders;
   createClient?: (opts: ZcodeRunOptions, cb: RunCallbacks) => Pick<ZcodeAppServerClient, 'run' | 'abort' | 'stopTask' | 'queueMessage'>;
 }
 
@@ -53,6 +57,9 @@ export function startZcodeRun(opts: ZcodeRunOptions, cb: RunCallbacks, deps: Zco
       );
       if (aborted) return;
       assertZcodeStartupConfig(state, resume);
+      await (deps.ensurePersonalProviders ?? ensureZcodePersonalProviders)(
+        opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined,
+      );
     } catch (error) {
       if (aborted) return;
       const text = error instanceof Error ? error.message : String(error);

@@ -19,7 +19,7 @@ import { stripAttachments } from '../lib/attachments';
  * Terminal-transcript rendering of the same structured blocks the card UI
  * uses. Layout and glyphs follow the coding-agent CLIs (Claude Code / Cursor /
  * Codex / Grok): `❯` for the user, `■` for tools, a stretching `└` bracket
- * (.cli-bracket) for results, dim italic
+ * (.cli-bracket) for results, dim compact Markdown
  * for thinking. Assistant prose has no gutter glyph.
  */
 export const CliBlockView = memo(function CliBlockView({ block }: { block: ChatBlock }) {
@@ -90,15 +90,22 @@ function CliThinkingView({ block }: { block: ThinkingBlock }) {
   useLayoutEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight > el.clientHeight + 1 ? el.scrollHeight : 0;
+    const follow = () => { el.scrollTop = el.scrollHeight > el.clientHeight + 1 ? el.scrollHeight : 0; };
+    follow();
+    const content = el.firstElementChild;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(follow);
+    observer.observe(content);
+    return () => observer.disconnect();
   }, [displayText, open]);
 
   if (!block.text) return null;
 
   return (
-    <div className="font-mono text-[13px] leading-relaxed">
+    <div data-thinking-id={block.id} className="font-mono text-[13px] leading-relaxed">
       <button
         type="button"
+        aria-expanded={Boolean(open)}
         onClick={() => setManual(!open)}
         className="flex w-full items-start gap-2 text-left text-slate-500 transition hover:text-slate-300"
       >
@@ -110,12 +117,15 @@ function CliThinkingView({ block }: { block: ThinkingBlock }) {
       {open && (
         <div
           ref={viewportRef}
+          data-thinking-content
           className={cn(
-            'whitespace-pre-wrap break-words pl-[1.75rem] text-[12.5px] italic text-slate-600',
+            'min-w-0 pl-[1.75rem]',
             block.streaming && 'max-h-28 overflow-hidden',
           )}
         >
-          {displayText}
+          <div className="thinking-markdown cli-md min-w-0">
+            <Markdown>{displayText}</Markdown>
+          </div>
         </div>
       )}
     </div>

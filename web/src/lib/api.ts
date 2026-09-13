@@ -40,6 +40,7 @@ import type {
   VibotMemory,
 } from '@shared/protocol';
 import type { ModelOption, PermissionOption } from './format';
+import type { ConversationOutlinePage } from '@shared/conversationOutline';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -413,13 +414,15 @@ export const api = {
       body: JSON.stringify({ pinned }),
     }),
 
-  getMessages: (id: string, opts: { cursor?: string; limit?: number } = {}) => {
+  getMessages: (id: string, opts: { cursor?: string; limit?: number; signal?: AbortSignal } = {}) => {
     const qs = new URLSearchParams();
     if (opts.cursor) qs.set('cursor', opts.cursor);
     if (opts.limit) qs.set('limit', String(opts.limit));
     const suffix = qs.size > 0 ? `?${qs.toString()}` : '';
-    return request<{ blocks: ChatBlock[]; seq: number } & SnapshotPage>(`/sessions/${id}/messages${suffix}`);
+    return request<{ blocks: ChatBlock[]; seq: number } & SnapshotPage>(`/sessions/${id}/messages${suffix}`, { signal: opts.signal });
   },
+  getConversationOutline: (id: string, cursor?: string, signal?: AbortSignal) =>
+    request<ConversationOutlinePage>(`/sessions/${encodeURIComponent(id)}/outline${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal }),
   /** Unabridged text of a tool result that arrived truncated in a page. */
   getBlockResult: (id: string, blockId: string, ref: string) =>
     request<{ blockId: string; size: number; text: string }>(

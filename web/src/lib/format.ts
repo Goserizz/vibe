@@ -95,6 +95,13 @@ export const MODELS: { value: string; label: string }[] = [
   { value: 'opusplan', label: 'Opus Plan' },
 ];
 
+/** One fusable model inside Devin's fusion family, in one of the two roles. */
+export interface FusionModelRef {
+  value: string;
+  label: string;
+  efforts?: string[];
+}
+
 export interface ModelOption {
   value: string;
   label: string;
@@ -104,6 +111,11 @@ export interface ModelOption {
   efforts?: string[];
   /** Codex/ZCode only: the model's default reasoning level. */
   defaultEffort?: string;
+  /** Devin only: present on the `fusion` family — the models that can be
+   *  fused, by role (strong = frontier intelligence, normal = cost-efficient
+   *  execution). The choice is stored as a `fusion:<strong>:<effort?>+<normal>
+   *  :<effort?>` spec the server resolves to a concrete variant at turn time. */
+  fusion?: { strong: FusionModelRef[]; normal: FusionModelRef[] };
 }
 
 export interface PermissionOption {
@@ -180,6 +192,7 @@ export const DEVIN_MODELS: ModelOption[] = [
   { value: 'claude-opus-5', label: 'Claude Opus 5' },
   { value: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
   { value: 'claude-fable-5-1', label: 'Claude Fable 5.1' },
+  { value: 'fusion', label: 'Fusion' },
 ];
 
 /** Fallback opencode models until `opencode models` loads. Values are
@@ -317,6 +330,102 @@ export const EFFORT_LEVELS: { value: EffortLevel; label: string; hint: string }[
   { value: 'ultra', label: 'Ultra', hint: 'Beyond max — gpt-5.6 models' },
 ];
 
+// ---------------------------------------------------------------------------
+// Devin fusion
+// ---------------------------------------------------------------------------
+
+export interface FusionSelection {
+  strong: string;
+  strongEffort?: string;
+  normal: string;
+  normalEffort?: string;
+}
+
+const FUSION_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const FUSION_TIERS = ['fast', 'priority', '1m', 'thinking', 'lightning'];
+
+function splitFusionComponent(s: string): { family?: string; effort?: string } {
+  const toks = s.split('-').filter(Boolean);
+  let effort: string | undefined;
+  while (toks.length) {
+    const last = toks[toks.length - 1]!;
+    if (FUSION_EFFORTS.includes(last)) {
+      if (!effort) effort = last;
+      toks.pop();
+      continue;
+    }
+    if (FUSION_TIERS.includes(last)) {
+      toks.pop();
+      continue;
+    }
+    break;
+  }
+  if (!toks.length) return {};
+  return { family: toks.join('-'), effort };
+}
+
+/** Decompose a stored fusion value — either the `fusion:…` selection spec or a
+ *  concrete variant uid (`fusion-claude-opus-5-high-sidekick-swe-2-medium`,
+ *  e.g. on a session discovered from Devin's own database). */
+export function parseFusionSelection(value: string): FusionSelection | null {
+  if (value.startsWith('fusion:')) {
+    const [sp, np] = value.slice('fusion:'.length).split('+');
+    const [strong, strongEffort] = String(sp ?? '').split(':');
+    const [normal, normalEffort] = String(np ?? '').split(':');
+    if (!strong || !normal) return null;
+    return {
+      strong,
+      strongEffort: strongEffort || undefined,
+      normal,
+      normalEffort: normalEffort || undefined,
+    };
+  }
+  const m = /^fusion-(.+)-sidekick-(.+)$/.exec(value);
+  if (!m) return null;
+  const s = splitFusionComponent(m[1]!);
+  const n = splitFusionComponent(m[2]!);
+  if (!s.family || !n.family) return null;
+  return { strong: s.family, strongEffort: s.effort, normal: n.family, normalEffort: n.effort };
+}
+
+export function fusionSpecOf(sel: FusionSelection): string {
+  return `fusion:${sel.strong}${sel.strongEffort ? `:${sel.strongEffort}` : ''}+${sel.normal}${sel.normalEffort ? `:${sel.normalEffort}` : ''}`;
+}
+
+/** The family a devin model value belongs to, for picker highlighting: fusion
+ *  selections and fusion variant uids both map to the `fusion` family. */
+export function devinModelFamilyOf(value: string): string {
+  return value.startsWith('fusion:') || value.startsWith('fusion-') ? 'fusion' : value;
+}
+
+/** Sensible first selection when the user picks the Fusion family: the first
+ *  strong model at its middle tier plus the first normal model. */
+export function defaultFusionSpec(fusion: { strong: FusionModelRef[]; normal: FusionModelRef[] }): string {
+  const strong = fusion.strong[0];
+  const normal = fusion.normal[0];
+  if (!strong || !normal) return 'fusion';
+  const mid = (r?: FusionModelRef) => (r?.efforts?.includes('medium') ? 'medium' : r?.efforts?.[0]);
+  return fusionSpecOf({
+    strong: strong.value,
+    strongEffort: mid(strong),
+    normal: normal.value,
+    normalEffort: mid(normal),
+  });
+}
+
+/** Pretty label for a fusion value, e.g. `Fusion · Opus 5 high + SWE-2`. */
+export function fusionLabelOf(value: string, devinModels?: ModelOption[]): string | undefined {
+  const sel = parseFusionSelection(value);
+  if (!sel) return undefined;
+  const refs = devinModels?.find((m) => m.value === 'fusion')?.fusion;
+  const labelOf = (family: string): string =>
+    refs?.strong.find((r) => r.value === family)?.label ??
+    refs?.normal.find((r) => r.value === family)?.label ??
+    family;
+  const withEffort = (label: string, effort?: string): string => (effort ? `${label} ${effort}` : label);
+  return `Fusion · ${withEffort(labelOf(sel.strong), sel.strongEffort)} + ${withEffort(labelOf(sel.normal), sel.normalEffort)}`;
+}
+
 export function modelLabel(
   value: string,
   cursorModels?: ModelOption[],
@@ -329,6 +438,8 @@ export function modelLabel(
   devinModels?: ModelOption[],
   opencodeModels?: ModelOption[],
 ): string {
+  const fusion = fusionLabelOf(value, devinModels);
+  if (fusion) return fusion;
   return (
     MODELS.find((m) => m.value === value)?.label ??
     cursorModels?.find((m) => m.value === value)?.label ??

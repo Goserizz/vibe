@@ -17,6 +17,22 @@ export interface DevinModel {
   efforts?: string[];
   /** The variant Devin would pick on its own for this family. */
   defaultEffort?: string;
+  /** Present only on the `fusion` family: the models that can be fused, split
+   *  by role. Drives the fusion pickers; the user's choice is stored as a
+   *  `fusion:<strong>:<effort?>+<normal>:<effort?>` spec that
+   *  `resolveDevinVariant` maps onto a concrete variant uid at turn time. */
+  fusion?: { strong: FusionModelRef[]; normal: FusionModelRef[] };
+}
+
+/** One fusable model inside the fusion family, in one of the two roles. */
+export interface FusionModelRef {
+  /** Family uid with dots normalised to dashes (`gpt-5.6-sol` → `gpt-5-6-sol`),
+   *  matching how fusion variant uids spell it. */
+  value: string;
+  label: string;
+  /** Effort tiers this model ships inside fusion pairs, ladder order; absent
+   *  when every pair pins it to a single undifferentiated variant. */
+  efforts?: string[];
 }
 
 export interface DevinPermissionOption {
@@ -119,6 +135,145 @@ function parseEffort(uid: string): { effort?: string; tier: number } {
 }
 
 // ---------------------------------------------------------------------------
+// Fusion
+// ---------------------------------------------------------------------------
+
+const FUSION_PREFIX = 'fusion-';
+const SIDEKICK_SEP = '-sidekick-';
+/** Stored-selection format: `fusion:<strong>:<effort?>+<normal>:<effort?>`. */
+const FUSION_SPEC_PREFIX = 'fusion:';
+
+/** The models a fusion variant uid names on either side of `-sidekick-`. */
+export interface FusionSelection {
+  strong: string;
+  strongEffort?: string;
+  normal: string;
+  normalEffort?: string;
+}
+
+/** Split `family-effort-tier…` into its parts, stripping from the right. */
+function splitFusionComponent(s: string): { family?: string; effort?: string; tier: number } {
+  const toks = s.toLowerCase().split('-').filter(Boolean);
+  let effort: string | undefined;
+  let tier = 0;
+  while (toks.length) {
+    const last = toks[toks.length - 1]!;
+    if ((EFFORT_TOKENS as readonly string[]).includes(last)) {
+      if (!effort) effort = last;
+      toks.pop();
+      continue;
+    }
+    if (TIER_TOKENS.has(last)) {
+      tier++;
+      toks.pop();
+      continue;
+    }
+    break;
+  }
+  if (!toks.length) return { tier };
+  return { family: toks.join('-'), effort, tier };
+}
+
+/** Decompose a concrete fusion variant uid
+ *  (`fusion-claude-opus-5-high-sidekick-swe-2-medium`). */
+export function parseFusionUid(uid: string): FusionSelection | undefined {
+  if (!uid.startsWith(FUSION_PREFIX) || !uid.includes(SIDEKICK_SEP)) return undefined;
+  const rest = uid.slice(FUSION_PREFIX.length);
+  const i = rest.indexOf(SIDEKICK_SEP);
+  const strong = splitFusionComponent(rest.slice(0, i));
+  const normal = splitFusionComponent(rest.slice(i + SIDEKICK_SEP.length));
+  if (!strong.family || !normal.family) return undefined;
+  return {
+    strong: strong.family,
+    strongEffort: strong.effort,
+    normal: normal.family,
+    normalEffort: normal.effort,
+  };
+}
+
+/** Parse the stored selection spec. Colons and the `+` cannot appear in family
+ *  uids or effort tokens, so the split is unambiguous. */
+export function parseFusionSpec(model: string): FusionSelection | undefined {
+  if (!model.startsWith(FUSION_SPEC_PREFIX)) return undefined;
+  const [strongPart, normalPart] = model.slice(FUSION_SPEC_PREFIX.length).split('+');
+  const [strong, strongEffort] = String(strongPart ?? '').split(':');
+  const [normal, normalEffort] = String(normalPart ?? '').split(':');
+  if (!strong || !normal) return undefined;
+  return {
+    strong,
+    strongEffort: strongEffort || undefined,
+    normal,
+    normalEffort: normalEffort || undefined,
+  };
+}
+
+/** Score how well a candidate's effort matches the request. `undefined` on
+ *  either side is not a tie-breaker-free zero: without a preference we prefer
+ *  the mildest tier the pair ships (the normal side exists to be cheap), and a
+ *  candidate without any effort token sits a mild penalty away. */
+function effortScore(want: string | undefined, have: string | undefined): number {
+  const ladder = EFFORT_TOKENS as readonly string[];
+  const hi = have ? ladder.indexOf(have) : -1;
+  if (!want) return hi < 0 ? 0 : hi;
+  const wi = ladder.indexOf(want);
+  if (wi < 0) return hi < 0 ? 0 : hi;
+  if (hi < 0) return 2;
+  return Math.abs(wi - hi);
+}
+
+/** Map a fusion selection onto the best concrete variant uid of the fusion
+ *  family: the named pair is a hard requirement, requested efforts are matched
+ *  as closely as the catalog allows, plain variants beat tiered ones. */
+export function resolveFusionUid(
+  sel: FusionSelection,
+  variants: readonly Variant[],
+): string | undefined {
+  const parsed = variants
+    .map((v) => ({ v, sel: parseFusionUid(v.uid) }))
+    .filter((x) => x.sel && x.sel.strong === sel.strong && x.sel.normal === sel.normal);
+  if (!parsed.length) return undefined;
+  parsed.sort((a, b) => {
+    const da =
+      effortScore(sel.strongEffort, a.sel!.strongEffort) +
+      effortScore(sel.normalEffort, a.sel!.normalEffort);
+    const db =
+      effortScore(sel.strongEffort, b.sel!.strongEffort) +
+      effortScore(sel.normalEffort, b.sel!.normalEffort);
+    return da - db || a.v.tier - b.v.tier || a.v.uid.length - b.v.uid.length;
+  });
+  return parsed[0]!.v.uid;
+}
+
+/** Collect the fusable models per role from the fusion family's variants. */
+function fusionRefs(
+  variants: readonly Variant[],
+  role: 'strong' | 'normal',
+  labels: Map<string, string>,
+): FusionModelRef[] {
+  const byFamily = new Map<string, Set<string>>();
+  for (const v of variants) {
+    const sel = parseFusionUid(v.uid);
+    if (!sel) continue;
+    const family = role === 'strong' ? sel.strong : sel.normal;
+    const effort = role === 'strong' ? sel.strongEffort : sel.normalEffort;
+    let efforts = byFamily.get(family);
+    if (!efforts) byFamily.set(family, (efforts = new Set()));
+    if (effort) efforts.add(effort);
+  }
+  const out: FusionModelRef[] = [];
+  for (const [family, efforts] of byFamily) {
+    const ordered = SURFACED_EFFORTS.filter((e) => efforts.has(e));
+    out.push({
+      value: family,
+      label: labels.get(family) ?? family,
+      ...(ordered.length > 1 ? { efforts: ordered } : {}),
+    });
+  }
+  out.sort((a, b) => a.label.localeCompare(b.label));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Catalog
 // ---------------------------------------------------------------------------
 
@@ -152,6 +307,15 @@ export function parseDevinModels(raw: string): DevinCatalog {
   const models: DevinModel[] = [];
   const variants = new Map<string, Variant[]>();
 
+  // Family labels by normalised uid (dots → dashes), for fusion refs: fusion
+  // variant uids spell `gpt-5.6-sol` as `gpt-5-6-sol`.
+  const labels = new Map<string, string>();
+  for (const family of families) {
+    const familyUid = String(family?.family_uid ?? family?.slug ?? '').trim();
+    const label = String(family?.family_label ?? family?.slug ?? familyUid).trim() || familyUid;
+    if (familyUid) labels.set(familyUid.replace(/\./g, '-'), label);
+  }
+
   for (const family of families) {
     const familyUid = String(family?.family_uid ?? family?.slug ?? '').trim();
     if (!familyUid || variants.has(familyUid)) continue;
@@ -174,6 +338,22 @@ export function parseDevinModels(raw: string): DevinCatalog {
     if (!list.length) continue;
     variants.set(familyUid, list);
 
+    const label = labels.get(familyUid.replace(/\./g, '-')) ?? familyUid;
+
+    // The fusion family is not effort-differentiated like plain families: its
+    // "variants" are model pairs. Surface the fusable models per role instead
+    // of a flat 200-entry list; the pair choice lives in the fusion pickers.
+    if (familyUid === 'fusion') {
+      const fusion = {
+        strong: fusionRefs(list, 'strong', labels),
+        normal: fusionRefs(list, 'normal', labels),
+      };
+      if (fusion.strong.length && fusion.normal.length) {
+        models.push({ value: familyUid, label, fusion });
+        continue;
+      }
+    }
+
     // Surface efforts in ladder order, de-duplicated.
     const efforts: string[] = [];
     for (const token of SURFACED_EFFORTS) {
@@ -187,7 +367,6 @@ export function parseDevinModels(raw: string): DevinCatalog {
     const medium = list.find((v) => v.effort === 'medium');
     const defaultVariant = plain ?? medium ?? list[0]!;
 
-    const label = String(family?.family_label ?? family?.slug ?? familyUid).trim() || familyUid;
     models.push({
       value: familyUid,
       label,
@@ -228,6 +407,22 @@ export function resolveDevinVariant(
 ): { uid: string; contextWindow?: number } {
   const trimmed = model?.trim();
   if (!trimmed || trimmed === 'auto') return { uid: trimmed || 'auto' };
+  // A stored fusion selection (`fusion:<strong>:<effort?>+<normal>:<effort?>`):
+  // map it onto the best concrete variant of the fusion family. The generic
+  // effort ladder does not apply — the tiers are inside the selection.
+  const spec = parseFusionSpec(trimmed);
+  if (spec) {
+    const cat = catalog ?? cache.peek('');
+    const fusionList = cat?.variants.get('fusion');
+    const uid = fusionList ? resolveFusionUid(spec, fusionList) : undefined;
+    if (uid) {
+      const exact = fusionList!.find((v) => v.uid === uid);
+      return { uid, contextWindow: exact?.maxContextTokens };
+    }
+    // Unknown pair (catalog stale or CLI without fusion): send Devin's plain
+    // family uid rather than a spec string it cannot parse.
+    return { uid: 'fusion' };
+  }
   const cat = catalog ?? cache.peek('');
   if (!cat?.variants.size) return { uid: trimmed };
 
@@ -265,6 +460,9 @@ export function resolveDevinVariant(
 export function devinFamilyForModel(model: string, catalog?: DevinCatalog): string {
   const trimmed = model?.trim();
   if (!trimmed || trimmed === 'auto') return trimmed || 'auto';
+  // Fusion selections — both the stored spec and a concrete variant uid picked
+  // up from Devin's own database — belong to the `fusion` family entry.
+  if (trimmed.startsWith(FUSION_SPEC_PREFIX) || parseFusionUid(trimmed)) return 'fusion';
   const cat = catalog ?? cache.peek('');
   if (!cat?.variants.size) return trimmed;
   for (const [familyUid, list] of cat.variants) {

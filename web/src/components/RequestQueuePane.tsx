@@ -3,12 +3,13 @@ import { cn } from '../lib/format';
 import { stripAttachments } from '../lib/attachments';
 import { useStore } from '../store/store';
 import type { RequestQueuePauseReason } from '@shared/protocol';
+import { interruptedContinuationPrompt } from '@shared/interruptedContinuation';
 
 const REASONS: Record<RequestQueuePauseReason, string> = {
   manual: 'Queue paused. The current response is not interrupted.',
   stopped: 'Queue paused after Stop. Resume when you are ready.',
   error: 'Queue paused because the previous response failed.',
-  restart: 'Service restarted. Review interrupted requests before resuming: some work may already have run.',
+  restart: 'Service restarted. Interrupted work will continue from prior progress, not resend the original request. Review before continuing.',
   unavailable: 'Queue paused because the session or connection is unavailable.',
 };
 
@@ -44,7 +45,7 @@ export function RequestQueuePane({ sessionId }: { sessionId: string }) {
             className="ml-auto inline-flex items-center gap-1 text-accent-soft hover:underline disabled:opacity-40"
           >
             {queue?.paused ? <Play className="h-3 w-3" /> : <CirclePause className="h-3 w-3" />}
-            {queue?.paused ? interrupted ? 'Retry interrupted & resume queue' : 'Resume queue' : 'Pause queue'}
+            {queue?.paused ? interrupted ? 'Continue interrupted & resume queue' : 'Resume queue' : 'Pause queue'}
           </button>
         )}
       </div>
@@ -56,14 +57,17 @@ export function RequestQueuePane({ sessionId }: { sessionId: string }) {
       )}
       <ol className="max-h-48 overflow-y-auto border-t border-white/5 px-2 py-1">
         {rows.map((item, index) => {
+          const continuation = Boolean(item.interrupted || item.continuation);
           const { text, files } = stripAttachments(item.text);
-          const preview = text.trim() || (files.length ? `${files.length} attached file(s)` : item.text);
+          const preview = continuation ? interruptedContinuationPrompt(item.text)
+            : text.trim() || (files.length ? `${files.length} attached file(s)` : item.text);
           return (
             <li key={item.id} data-request-id={item.id} className="flex items-start gap-2 rounded px-1 py-1.5">
               <span className="mt-px shrink-0 text-slate-600">{index + 1}.</span>
               <div className="min-w-0 flex-1">
-                <div className="line-clamp-2 break-words text-slate-300">{preview.slice(0,240)}</div>
-                {item.interrupted && <div className="text-amber-600 dark:text-amber-300">Interrupted — review before retrying</div>}
+                <div className="line-clamp-2 break-words text-slate-300" title={continuation ? preview : undefined}>{preview.slice(0,240)}</div>
+                {item.interrupted && <div className="text-amber-600 dark:text-amber-300">Interrupted — review before continuing</div>}
+                {item.continuation && !item.interrupted && <div className="text-slate-500">Continue from saved progress</div>}
                 {item.state === 'sending' && <div className="mt-0.5 inline-flex items-center gap-1 text-slate-500"><Loader2 className="h-3 w-3 animate-spin" /> Sending…</div>}
                 {item.error && <div className="mt-0.5 break-words text-rose-500">Not sent: {item.error}</div>}
               </div>

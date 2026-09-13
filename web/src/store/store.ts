@@ -23,6 +23,7 @@ import type {
   SwitchFidelity,
   QueuedSessionRequest,
   SessionRequestQueueState,
+  AgentQuestionState,
 } from '@shared/protocol';
 import { compareSessions } from '@shared/protocol';
 import type { SessionMonitorSummary } from '@shared/monitorSummary';
@@ -165,6 +166,9 @@ interface StoreState {
   tasks: Record<string, BackgroundTask[]>;
   requestQueues: Record<string, SessionRequestQueueState>;
   requestOutbox: Record<string, PendingSessionSend[]>;
+  agentQuestions: Record<string, AgentQuestionState>;
+  agentQuestionsSupported: boolean;
+  questionActions: Record<string, Record<string, { sending: boolean; error?: string }>>;
   /** Sessions whose last turn finished while they weren't the active one — i.e.
    *  "has a reply you haven't seen yet". Cleared by opening the session. Lives
    *  only in memory: it tracks live running→idle transitions, not history. */
@@ -245,7 +249,7 @@ interface StoreState {
   openSession: (id: string) => Promise<void>;
   /** Fetch the next older history page for an open conversation. No-op when
    *  none is left or a request is already in flight. */
-  loadOlder: (id: string) => Promise<void>;
+  loadOlder: (id: string, signal?: AbortSignal) => Promise<void>;
   createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<boolean>;
   renameSession: (id: string, title: string) => Promise<void>;
   /** 把会话切换成另一个 agent（历史无损保留）。返回保真等级，失败返回 null。 */
@@ -259,6 +263,9 @@ interface StoreState {
   retryPendingRequest: (sessionId: string, clientMsgId: string) => void;
   removeQueuedRequest: (sessionId: string, clientMsgId: string) => void;
   controlRequestQueue: (sessionId: string, action: 'pause' | 'resume') => void;
+  answerAgentQuestion: (sessionId: string, questionId: string, answers: string[], retry?: boolean) => void;
+  dismissAgentQuestion: (sessionId: string, questionId: string) => void;
+  refreshAgentQuestions: (sessionId: string) => void;
   abort: () => void;
   stopTask: (taskId: string) => void;
   respondPermission: (requestId: string, decision: PermissionDecision) => void;
@@ -277,6 +284,7 @@ export const useStore = create<StoreState>((set, get) => {
     ({ loading, error }) => set({ monitorLoading: loading, monitorError: error }),
   );
   let monitorRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  let socketGeneration = 0;
   // -- socket event handling -------------------------------------------------
 
   /** Send subscribe and mark the session as replaying until `subscribed`
@@ -334,6 +342,8 @@ export const useStore = create<StoreState>((set, get) => {
     let monitorsDirty = false;
     let requestQueues = state.requestQueues;
     let requestOutbox = state.requestOutbox;
+    let agentQuestions = state.agentQuestions;
+    let questionActions = state.questionActions;
     const acknowledge = (sessionId: string, id: string) => {
       const items = requestOutbox[sessionId];
       if (items?.some((item) => item.id === id)) {
@@ -381,6 +391,8 @@ export const useStore = create<StoreState>((set, get) => {
           push(msg.sessionId, msg.seq, msg.ev);
           break;
         case 'subscribed':
+          agentQuestions = { ...agentQuestions, [msg.sessionId]: msg.agentQuestions ?? { items: [] } };
+          questionActions = { ...questionActions, [msg.sessionId]: {} };
           requestQueues = { ...requestQueues, [msg.sessionId]: msg.requestQueue ?? { items: [], paused: false } };
           for (const item of msg.requestQueue?.items ?? []) acknowledge(msg.sessionId, item.id);
           // Replay (if any) landed ahead of this frame — back to live events.
@@ -422,6 +434,25 @@ export const useStore = create<StoreState>((set, get) => {
           requestQueues = { ...requestQueues, [msg.sessionId]: msg.queue };
           for (const item of msg.queue.items) acknowledge(msg.sessionId, item.id);
           break;
+        case 'agent_questions': {
+          agentQuestions = { ...agentQuestions, [msg.sessionId]: msg.state };
+          const ids = new Set(msg.state.items.map(item => item.id));
+          questionActions = { ...questionActions, [msg.sessionId]: Object.fromEntries(
+            Object.entries(questionActions[msg.sessionId] ?? {}).filter(([id]) => ids.has(id)),
+          ) };
+          break;
+        }
+        case 'agent_question_result':
+          if (msg.ok && agentQuestions[msg.sessionId]) agentQuestions = { ...agentQuestions, [msg.sessionId]: {
+            ...agentQuestions[msg.sessionId], items: agentQuestions[msg.sessionId]!.items.filter(item => item.id !== msg.questionId),
+          } };
+          questionActions = { ...questionActions, [msg.sessionId]: { ...(questionActions[msg.sessionId] ?? {}),
+            [msg.questionId]: { sending: false, ...(msg.ok ? {} : { error: msg.message ?? 'Answer could not be sent' }) },
+          } };
+          if (msg.ok) set({ toast: msg.delivery === 'steered' ? 'Answer sent to the active Codex turn'
+            : msg.delivery === 'queued' ? 'Answer added to Next requests; paused queues must be resumed'
+              : 'Question dismissed; no answer was sent' });
+          break;
         case 'monitor_changed':
           monitorsDirty = true;
           window.dispatchEvent(new CustomEvent('vibe-monitor-changed', { detail: { monitorId: msg.monitorId } }));
@@ -436,6 +467,8 @@ export const useStore = create<StoreState>((set, get) => {
           }
           break;
         case 'session_removed':
+          agentQuestions = { ...agentQuestions }; delete agentQuestions[msg.sessionId];
+          questionActions = { ...questionActions }; delete questionActions[msg.sessionId];
           requestQueues = { ...requestQueues };
           requestOutbox = { ...requestOutbox };
           delete requestQueues[msg.sessionId];
@@ -444,7 +477,7 @@ export const useStore = create<StoreState>((set, get) => {
           sessionsDirty = true;
           break;
         case 'hello':
-          set({ serverVersion: msg.serverVersion });
+          set({ serverVersion: msg.serverVersion, agentQuestionsSupported: msg.agentQuestionsVersion === 1 });
           break;
         case 'error':
           if (msg.sessionId && msg.clientMsgId) {
@@ -478,6 +511,8 @@ export const useStore = create<StoreState>((set, get) => {
         tasks,
         requestQueues,
         requestOutbox,
+        agentQuestions,
+        questionActions,
         unread,
         ...(monitorToast ? { toast: monitorToast } : {}),
         sessions: sessionsDirty ? sessions : s.sessions,
@@ -552,6 +587,9 @@ export const useStore = create<StoreState>((set, get) => {
     tasks: {},
     requestQueues: {},
     requestOutbox: {},
+    agentQuestions: {},
+    questionActions: {},
+    agentQuestionsSupported: false,
     unread: {},
     rightTabs: {},
     toast: null,
@@ -561,14 +599,18 @@ export const useStore = create<StoreState>((set, get) => {
     searchLoading: false,
 
     async init(token: string) {
+      const generation = ++socketGeneration;
+      set({ agentQuestions: {}, questionActions: {}, agentQuestionsSupported: false });
       monitorLoader.reset();
       clearInterval(monitorRefreshTimer);
       set({ sessionMonitors: {}, monitorRecords: [], monitorLoaded: false, monitorLoading: false, monitorError: null, requestQueues: {}, requestOutbox: {} });
       setApiToken(token);
       try {
         const me = await api.me();
+        if (generation !== socketGeneration) return;
         set({ defaultModel: me.defaultModel, serverVersion: me.serverVersion, account: me.account, isAdmin: me.isAdmin });
       } catch (err) {
+        if (generation !== socketGeneration) return;
         if (err instanceof ApiError && err.status === 401) {
           set({ phase: 'unauthorized' });
           return;
@@ -576,7 +618,12 @@ export const useStore = create<StoreState>((set, get) => {
         set({ toast: 'Failed to reach server' });
       }
 
-      socket = new VibeSocket({ onBatch: handleBatch, onStatus: handleStatus, onVibotBatch: vibotHandleBatch });
+      socket?.close();
+      socket = new VibeSocket({
+        onBatch: events => { if (generation === socketGeneration) handleBatch(events); },
+        onStatus: (status, options) => { if (generation === socketGeneration) handleStatus(status, options); },
+        onVibotBatch: events => { if (generation === socketGeneration) vibotHandleBatch(events); },
+      });
       socket.connect(token);
       // Badges should not hold up opening the app if the Monitor endpoint is slow.
       void get().loadSessionMonitors();
@@ -617,6 +664,8 @@ export const useStore = create<StoreState>((set, get) => {
     },
 
     signOut() {
+      socketGeneration++;
+      set({ agentQuestions: {}, questionActions: {}, agentQuestionsSupported: false });
       monitorLoader.reset();
       clearInterval(monitorRefreshTimer);
       socket?.close();
@@ -1046,18 +1095,26 @@ export const useStore = create<StoreState>((set, get) => {
       resubscribe(id);
     },
 
-    async loadOlder(id) {
+    async loadOlder(id, signal) {
       const view = get().views[id];
       if (!view?.loaded || !view.hasMore || !view.cursor || view.loadingOlder) return;
+      const generation = socketGeneration;
+      const session = get().sessions.find(row => row.id === id);
+      const stillSameSession = () => {
+        const current = get().sessions.find(row => row.id === id);
+        return generation === socketGeneration && current?.agent === session?.agent && current?.claudeSessionId === session?.claudeSessionId;
+      };
       set((s) => ({ views: { ...s.views, [id]: { ...view, loadingOlder: true } } }));
       try {
-        const page = await api.getMessages(id, { cursor: view.cursor });
+        const page = await api.getMessages(id, { cursor: view.cursor, signal });
+        if (!stillSameSession()) return;
         set((s) => {
           const cur = s.views[id];
           if (!cur) return {};
           return { views: { ...s.views, [id]: prependPage(cur, page.blocks, page) } };
         });
       } catch {
+        if (!stillSameSession()) return;
         set((s) => {
           const cur = s.views[id];
           return cur ? { views: { ...s.views, [id]: { ...cur, loadingOlder: false } } } : {};
@@ -1124,8 +1181,10 @@ export const useStore = create<StoreState>((set, get) => {
         const requestOutbox = { ...s.requestOutbox };
         delete requestQueues[id];
         delete requestOutbox[id];
+        const agentQuestions = { ...s.agentQuestions }; delete agentQuestions[id];
+        const questionActions = { ...s.questionActions }; delete questionActions[id];
         const activeId = s.activeId === id ? (sessions[0]?.id ?? null) : s.activeId;
-        return { sessions, views, tasks, rightTabs, unread, activeId, requestQueues, requestOutbox };
+        return { sessions, views, tasks, rightTabs, unread, activeId, requestQueues, requestOutbox, agentQuestions, questionActions };
       });
       const next = get().activeId;
       if (next) void get().openSession(next);
@@ -1184,6 +1243,26 @@ export const useStore = create<StoreState>((set, get) => {
     controlRequestQueue(sessionId, action) {
       if (!socket?.send({ t: action === 'pause' ? 'queue_pause' : 'queue_resume', sessionId })) set({ toast: 'Reconnect before changing the queue.' });
     },
+
+    answerAgentQuestion(sessionId, questionId, answers, retry = false) {
+      if (!get().agentQuestionsSupported || get().status !== 'open') { set({ toast: 'Reconnect before answering this question.' }); return; }
+      if (get().questionActions[sessionId]?.[questionId]?.sending) return;
+      set((s) => ({ questionActions: { ...s.questionActions, [sessionId]: { ...(s.questionActions[sessionId] ?? {}), [questionId]: { sending: true } } } }));
+      if (!socket?.send({ t: 'question_answer', sessionId, questionId, answers, retry })) {
+        set((s) => ({ questionActions: { ...s.questionActions, [sessionId]: { ...(s.questionActions[sessionId] ?? {}), [questionId]: { sending: false, error: 'Disconnected; your answer was not sent.' } } } }));
+      }
+    },
+
+    dismissAgentQuestion(sessionId, questionId) {
+      if (!get().agentQuestionsSupported || get().status !== 'open') { set({ toast: 'Reconnect before dismissing this question.' }); return; }
+      if (get().questionActions[sessionId]?.[questionId]?.sending) return;
+      set((s) => ({ questionActions: { ...s.questionActions, [sessionId]: { ...(s.questionActions[sessionId] ?? {}), [questionId]: { sending: true } } } }));
+      if (!socket?.send({ t: 'question_dismiss', sessionId, questionId })) {
+        set((s) => ({ questionActions: { ...s.questionActions, [sessionId]: { ...(s.questionActions[sessionId] ?? {}), [questionId]: { sending: false, error: 'Disconnected; please retry.' } } } }));
+      }
+    },
+
+    refreshAgentQuestions(sessionId) { if (get().status === 'open') resubscribe(sessionId); },
 
     abort() {
       const id = get().activeId;

@@ -14,6 +14,14 @@ compatibility is preserved. Project config and environment/dotenv overrides
 are left to the native resolver instead of being incorrectly rejected by a
 user-config-only check.
 
+Desktop ZCode 3.12+ loads models from `~/.zcode/v2/provider_config.json`.
+`zcode app-server` does not import `~/.zcode/cli/config.json` on its own.
+Vibe projects the host's existing `provider` / `model.main` into that personal
+file before starting a turn, without removing providers created in the TUI.
+Keep credentials out of logs; the writer only reports path and counts.
+Selecting GLM-5.3 also requires a reasoning level (`low|high|max`); Vibe
+sends it on `session/setModel` from the session effort (or the model default).
+
 ## MCP reconciliation
 
 MCP updates are performed in one on-host transaction using `python3`:

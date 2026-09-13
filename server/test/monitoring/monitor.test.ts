@@ -161,15 +161,19 @@ describe('MonitorStore durable incident state', { concurrency: false }, () => {
 
 describe('monitor probes', { concurrency: false }, () => {
   it('uses command exit status as the health contract', async () => {
+    // These two probes test exit semantics, not shell startup speed. Full-suite
+    // event-loop contention can delay even an exit-0 close event past 2s. The
+    // dedicated 100ms timeout assertion below still tests the timeout contract.
     const healthy = await runMonitorProbe(monitorInput({
-      probe: { kind: 'command', command: 'printf "all good"', timeoutMs: 2_000 },
+      probe: { kind: 'command', command: 'printf "all good"', timeoutMs: 10_000 },
     }));
-    assert.equal(healthy.healthy, true);
+    assert.equal(healthy.healthy, true, JSON.stringify({ kind: healthy.kind, exitCode: healthy.exitCode,
+      durationMs: healthy.durationMs, timedOut: /timed out/.test(healthy.summary) }));
     assert.equal(healthy.exitCode, 0);
     assert.match(healthy.summary, /all good/);
 
     const unhealthy = await runMonitorProbe(monitorInput({
-      probe: { kind: 'command', command: 'echo broken >&2; exit 7', timeoutMs: 2_000 },
+      probe: { kind: 'command', command: 'echo broken >&2; exit 7', timeoutMs: 10_000 },
     }));
     assert.equal(unhealthy.healthy, false);
     assert.equal(unhealthy.kind, 'observation');
@@ -262,7 +266,8 @@ describe('MonitorService dispatch and deterministic recovery', { concurrency: fa
       probe: { kind: 'command', command: 'printf recovered', timeoutMs: 2_000 },
     });
     const healthy = await monitorService.runNow(draft.id);
-    assert.equal(healthy.healthy, true);
+    assert.equal(healthy.healthy, true, JSON.stringify({ kind: healthy.kind, exitCode: healthy.exitCode,
+      durationMs: healthy.durationMs, timedOut: /timed out/.test(healthy.summary) }));
     const event = monitorStore.listEvents('admin', draft.id)[0]!;
     assert.equal(event.status, 'resolved');
     assert.equal(notices.length, 1);

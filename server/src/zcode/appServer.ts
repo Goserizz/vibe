@@ -22,11 +22,13 @@ import { isDelegateWakeActive, peekDelegateWakePrompt } from '../vibot/wakeSuppr
  * Newline-delimited JSON-RPC over stdio with NO initialize handshake and no
  * `jsonrpc` field. Shapes below were probed live against zcode 0.16.3:
  *
- *   session/create  {workspace:{workspaceKey,workspacePath}}            → .session.sessionId (+ .settings.model.available)
+ *   session/create  {workspace:{workspaceKey,workspacePath}, model?, thoughtLevel?}
+ *                                                                       → .session.sessionId (+ .settings.model.available)
  *   session/resume  {sessionId, workspace}                              → same shape + messages history (strict schema)
  *   session/subscribe {sessionId, deliveryKind:'desktop-continuous'}
  *   session/setMode   {sessionId, mode: build|edit|plan|yolo}
- *   session/setModel  {sessionId, model:{providerId,modelId}}           (object, not a string)
+ *   session/setModel  {sessionId, model:{providerId,modelId,options?:{reasoningLevel}}}
+ *                                                                       (object; GLM-5.3 requires reasoningLevel)
  *   session/setThoughtLevel {sessionId, thoughtLevel}                   → .settings.thoughtLevel
  *                                                                             (ladders are per-model;
  *                                                                             invalid → "Unsupported
@@ -418,6 +420,7 @@ export class ZcodeAppServerClient {
   /** Per-model thought-level ladders from session/create|resume
    *  (`settings.model.available[].reasoning`), keyed `providerId/modelId`. */
   private reasoning = new Map<string, string[]>();
+  private reasoningDefault = new Map<string, string>();
   private turnUsage: ZcodeTurnUsage = {};
   private contextWindow?: number;
   /** input+output of the last single model request — the context watermark.
@@ -657,7 +660,18 @@ export class ZcodeAppServerClient {
         log.warn('zcode session/resume failed, starting new session', error);
       }
     }
-    const created = await this.rpc!.request('session/create', { workspace }, SETUP_TIMEOUT_MS);
+    const parsed = splitZcodeModel(this.opts.model);
+    const createParams: Record<string, unknown> = { workspace };
+    if (parsed) createParams.model = this.modelSelection(parsed);
+    if (this.opts.effort) createParams.thoughtLevel = this.opts.effort;
+    let created: any;
+    try {
+      created = await this.rpc!.request('session/create', createParams, SETUP_TIMEOUT_MS);
+    } catch (error) {
+      // Older builds reject model/thoughtLevel on create; retry bare.
+      if (!parsed && !this.opts.effort) throw error;
+      created = await this.rpc!.request('session/create', { workspace }, SETUP_TIMEOUT_MS);
+    }
     const id = asString(created?.session?.sessionId);
     if (!id) throw new Error('session/create did not return sessionId');
     this.sessionId = id;
@@ -672,13 +686,33 @@ export class ZcodeAppServerClient {
       const ref = (entry as { ref?: { providerId?: unknown; modelId?: unknown } })?.ref;
       const providerId = asString(ref?.providerId);
       const modelId = asString(ref?.modelId);
-      const reasoning = (entry as { reasoning?: { enabled?: unknown; levels?: unknown } } | undefined)?.reasoning;
-      if (!providerId || !modelId || !reasoning || reasoning.enabled !== true) continue;
+      const reasoning = (entry as { reasoning?: { enabled?: unknown; levels?: unknown; defaultLevel?: unknown } } | undefined)?.reasoning;
+      if (!providerId || !modelId || !reasoning) continue;
       const levels = (Array.isArray(reasoning.levels) ? reasoning.levels : [])
         .map((l) => asString((l as { value?: unknown })?.value))
         .filter(Boolean);
-      if (levels.length) this.reasoning.set(`${providerId}/${modelId}`, levels);
+      const key = `${providerId}/${modelId}`;
+      if (levels.length) this.reasoning.set(key, levels);
+      const defaultLevel = asString(reasoning.defaultLevel);
+      if (defaultLevel) this.reasoningDefault.set(key, defaultLevel);
     }
+  }
+
+  private modelSelection(
+    parsed: { providerId: string; modelId: string },
+    effort: string | undefined = this.opts.effort,
+  ): { providerId: string; modelId: string; options?: { reasoningLevel: string } } {
+    const ladder = this.reasoning.get(`${parsed.providerId}/${parsed.modelId}`);
+    const level = effort
+      ? (ladder ? nearestThoughtLevel(effort, ladder) : effort)
+      : this.defaultThoughtLevel(parsed);
+    return level ? { ...parsed, options: { reasoningLevel: level } } : parsed;
+  }
+
+  private defaultThoughtLevel(parsed: { providerId: string; modelId: string }): string | undefined {
+    const ladder = this.reasoning.get(`${parsed.providerId}/${parsed.modelId}`);
+    return this.reasoningDefault.get(`${parsed.providerId}/${parsed.modelId}`)
+      ?? (ladder && ladder.length ? ladder[ladder.length - 1] : undefined);
   }
 
   private rememberModel(ref: unknown): void {
@@ -706,10 +740,26 @@ export class ZcodeAppServerClient {
     }
     const parsed = splitZcodeModel(this.opts.model);
     if (parsed) {
+      const selection = this.modelSelection(parsed);
       try {
-        await this.rpc!.request('session/setModel', { sessionId: this.sessionId, model: parsed }, SETUP_TIMEOUT_MS);
+        await this.rpc!.request('session/setModel', { sessionId: this.sessionId, model: selection }, SETUP_TIMEOUT_MS);
+        this.currentModel = parsed;
       } catch (error) {
-        log.debug('zcode session/setModel failed', this.opts.model, error);
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!selection.options && /Reasoning level is required/i.test(detail)) {
+          const fallback = this.modelSelection(parsed, this.opts.effort || this.defaultThoughtLevel(parsed) || 'max');
+          await this.rpc!.request('session/setModel', { sessionId: this.sessionId, model: fallback }, SETUP_TIMEOUT_MS);
+          this.currentModel = parsed;
+        } else if (selection.options && /Unrecognized key.*["']options["']/i.test(detail)) {
+          // Older zcode builds reject the options object outright. The model
+          // still selects without it; session/setThoughtLevel below carries the
+          // reasoning effort on builds that support it.
+          const fallback = { providerId: parsed.providerId, modelId: parsed.modelId };
+          await this.rpc!.request('session/setModel', { sessionId: this.sessionId, model: fallback }, SETUP_TIMEOUT_MS);
+          this.currentModel = parsed;
+        } else {
+          throw new Error(`ZCode 无法选用模型 ${this.opts.model}：${detail.slice(0, 240)}`);
+        }
       }
     }
     if (this.opts.effort) {

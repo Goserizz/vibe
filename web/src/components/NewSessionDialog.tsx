@@ -3,7 +3,8 @@ import { X, FolderGit2, Folder, Loader2, Check, AlertCircle, ChevronDown, Bookma
 import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
-import { basename, cn, AGENTS, agentLabel, defaultEffortForAgent, effortLabel, effortLevelsForAgent, modelLabel, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
+import { basename, cn, AGENTS, agentLabel, defaultEffortForAgent, defaultFusionSpec, devinModelFamilyOf, effortLabel, effortLevelsForAgent, modelLabel, modelsForAgent, permissionModesForAgent, shortenPath } from '../lib/format';
+import { FusionModelPicker } from './FusionModelPicker';
 import { loadNewSessionPrefs, saveNewSessionPrefs } from '../lib/newSessionPrefs';
 
 export function NewSessionDialog({ onClose }: { onClose: () => void }) {
@@ -72,7 +73,20 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     () => modelsForAgent(agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels),
     [agent, cursorModels, codexModels, kimiModels, kiroModels, grokModels, zcodeModels, codebuddyModels, devinModels, opencodeModels],
   );
-  const modelOpt = useMemo(() => modelOptions.find((m) => m.value === model) ?? null, [modelOptions, model]);
+  const modelOpt = useMemo(
+    () => modelOptions.find((m) => m.value === (agent === 'devin' ? devinModelFamilyOf(model) : model)) ?? null,
+    [modelOptions, model, agent],
+  );
+  // Picking the Fusion family selects a default pair immediately; fine-tuning
+  // happens in the fusion sub-pickers.
+  const onModelChange = (v: string): void => {
+    if (agent === 'devin' && v === 'fusion') {
+      const opt = modelOptions.find((m) => m.value === 'fusion');
+      setModel(opt?.fusion ? defaultFusionSpec(opt.fusion) : 'fusion');
+      return;
+    }
+    setModel(v);
+  };
   const effortLevels = useMemo(() => effortLevelsForAgent(agent, modelOpt), [agent, modelOpt]);
   // The local machine is admin-only; other accounts pick among their own hosts.
   const machineOptions = useMemo(
@@ -190,10 +204,12 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   }, [loadCursorModels, loadCodexModels, loadKimiCapabilities, loadKiroModels, loadGrokModels, loadZcodeModels, loadCodebuddyModels, loadDevinModels, loadOpencodeModels]);
 
   // If the current model disappeared after a host switch (or a remembered
-  // model is no longer valid), fall back to a safe default.
+  // model is no longer valid), fall back to a safe default. Fusion selections
+  // (`fusion:<strong>:…+<normal>:…`) validate against their family entry.
   useEffect(() => {
     if (!modelOptions.length) return;
-    if (modelOptions.some((m) => m.value === model)) return;
+    const current = agent === 'devin' ? devinModelFamilyOf(model) : model;
+    if (modelOptions.some((m) => m.value === current)) return;
     setModel(agent === 'claude' ? defaultModel : 'auto');
   }, [agent, model, modelOptions, defaultModel]);
 
@@ -567,9 +583,9 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           <div className="grid grid-cols-2 gap-3">
             <DropdownField
               label="Model"
-              value={model}
+              value={agent === 'devin' ? devinModelFamilyOf(model) : model}
               options={modelOptions}
-              onChange={setModel}
+              onChange={onModelChange}
             />
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Title</label>
@@ -581,6 +597,10 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
               />
             </div>
           </div>
+
+          {agent === 'devin' && modelOpt?.fusion && model.startsWith('fusion') && (
+            <FusionModelPicker option={modelOpt} value={model} onChange={setModel} />
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <DropdownField

@@ -90,10 +90,9 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
       >
         <Glass className="flex h-full w-full flex-col border-r border-white/5" cornerRadius={0}>
         <div className="relative min-h-0 flex-1">
-          {/* Session list — the only scroll element. It sits behind the frosted
-              top bar (and the search field when open): padded down so the first
-              row clears them, and items scroll up under the translucent blur. */}
-          <div className={cn('absolute inset-0 overflow-y-auto px-2 pb-4', searchOpen ? 'pt-[108px]' : 'pt-[56px]')}>
+          {/* The list viewport starts below the fixed toolbar/search region,
+              so its scrollbar and rows never extend behind those controls. */}
+          <div className="absolute inset-x-0 bottom-0 overflow-y-auto px-2 pb-4" style={{ top: headerH }}>
             {searching ? (
               <SearchResults
                 results={searchResults}
@@ -120,11 +119,6 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
             )}
           </div>
 
-          {/* Frosted gradient backing for the whole top region (top bar +
-              New/Search). One backdrop-blur layer whose mask fades top→bottom,
-              so the blur is strongest at the logo and softens toward the search
-              box. Sits above the list, below the controls (pointer-events-none
-              so it never blocks clicks). */}
           {/* Frosted gradient backing for the top region — 10 stacked
               backdrop-blur-[0.5px] layers anchored at top-0 with increasing
               height, so the logo (top) gets the most blur, fading down toward
@@ -186,8 +180,8 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
             </div>
           )}
 
-          {/* Top bar (logo + actions) — pinned at the very top; the session
-              list scrolls behind it. Does not bounce. Frost comes from the
+          {/* Top bar (logo + actions) — pinned above the list's scroll viewport.
+              Does not bounce. Frost comes from the
               gradient layer behind. */}
           <div className={cn('absolute inset-x-0 top-0 z-20 flex items-center justify-between px-3 pb-2.5 pt-3.5', cli && 'bg-ink-950')}>
             <div className="flex items-center gap-2.5">
@@ -398,6 +392,7 @@ function SessionItem({
   const openSession = useStore((s) => s.openSession);
   const renameSession = useStore((s) => s.renameSession);
   const deleteSession = useStore((s) => s.deleteSession);
+  const togglePin = useStore((s) => s.togglePin);
   const unread = useStore((s) => !!s.unread[session.id]);
   const cursorModels = useStore((s) => s.cursorModels);
   const codexModels = useStore((s) => s.codexModels);
@@ -444,10 +439,25 @@ function SessionItem({
             active={active}
             cli={cli}
           />
-          {session.pinned && (
-            <span title="Favorite" className="text-accent">
-              <Star className="h-3.5 w-3.5" fill="currentColor" />
-            </span>
+          {!editing && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void togglePin(session.id);
+              }}
+              title={session.pinned ? 'Unpin' : 'Pin'}
+              aria-label={session.pinned ? 'Unpin' : 'Pin'}
+              aria-pressed={Boolean(session.pinned)}
+              className={cn(
+                'rounded p-0 hover:bg-ink-700',
+                session.pinned
+                  ? 'text-accent'
+                  : 'text-slate-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 hover:text-slate-200',
+              )}
+            >
+              <Star className="h-3.5 w-3.5" fill={session.pinned ? 'currentColor' : 'none'} />
+            </button>
           )}
         </div>
 

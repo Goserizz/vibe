@@ -9,6 +9,7 @@ import { config } from '../config.js';
 import { log } from '../log.js';
 import { sessionStore, toMeta } from '../sessions/store.js';
 import { sessionVisible } from '../sessions/visibility.js';
+import { conversationHeadings } from '../../../shared/conversationOutline.js';
 import { createLocalWorkdir, getRecentProjects, validateDir } from '../projects.js';
 import { getClaudeSessionInfo, type DiscoveredSession } from '../sessions/discovery.js';
 import { listAllSessions } from '../sessions/list.js';
@@ -1765,9 +1766,13 @@ export function createApiRouter(): Router {
       return;
     }
     try {
+      // ?force=1 skips the "remote already matches local" version-string check
+      // — distinct builds can share a version string (e.g. a locally
+      // auto-updated zcode.cjs where both still report the same CLI version).
+      const force = req.query.force === '1' || req.query.force === 'true';
       const result = isLocal
         ? await localUpdateAgent(agentParam)
-        : await sshUpdateAgent(hostRegistry.get(name)!.ssh, agentParam);
+        : await sshUpdateAgent(hostRegistry.get(name)!.ssh, agentParam, force ? { force: true } : {});
       if (!result.ok) {
         res.status(502).json(result);
         return;
@@ -2158,6 +2163,22 @@ export function createApiRouter(): Router {
   // walks older pages; `limit` (1..500) overrides the page size. Tool results
   // travel as bounded previews — the full text comes from
   // /sessions/:id/blocks/:blockId/result on demand.
+  // Same visibility and native/remote history readers as messages, but only
+  // short user headings travel to the browser. No model call or transcript write.
+  router.get('/sessions/:id/outline', async (req, res, next) => {
+    res.set('Cache-Control', 'private, no-store');
+    if (sessionForbidden(res, accountOf(req).name, req.params.id)) return;
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : '';
+    if (cursor && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor)))) {
+      res.status(400).json({ error: 'invalid cursor' }); return;
+    }
+    try {
+      await ensureRemoteCached(req.params.id);
+      const page = await hub.snapshot(req.params.id, { endByte: cursor ? Number(cursor) : undefined, limit: PAGE_MAX_BLOCKS });
+      res.json({ entries: conversationHeadings(page.blocks), hasMore: page.hasMore, cursor: page.cursor });
+    } catch (error) { next(error); }
+  });
+
   router.get('/sessions/:id/messages', async (req, res) => {
     if (sessionForbidden(res, accountOf(req).name, req.params.id)) return;
     const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : '';

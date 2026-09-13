@@ -4,7 +4,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import { fetchZcodeCdnLatest } from './cdn.js';
-import { invalidateLocalZcodeVersion } from './bundle.js';
+import { invalidateLocalZcodeVersion, repairZcodeBuiltinProviderLayout, zcodeBuiltinProviderPaths } from './bundle.js';
 
 /**
  * Keep the LOCAL ZCode CLI current — in the push-install model the local
@@ -100,6 +100,11 @@ function extractAppImage(appImage: string, outDir: string): Promise<void> {
   });
 }
 
+function repairVerified(root: string): boolean {
+  const { expected, shipped } = zcodeBuiltinProviderPaths(root);
+  return fs.existsSync(expected) || !fs.existsSync(shipped);
+}
+
 function cliVersionOf(root: string): string | undefined {
   const cjs = path.join(root, 'resources', 'glm', 'zcode.cjs');
   if (!fs.existsSync(cjs)) return undefined;
@@ -126,8 +131,13 @@ export async function installZcodeRelease(version: string): Promise<{ cliVersion
     fs.chmodSync(appImage, 0o755);
     await extractAppImage(appImage, work);
     const extracted = path.join(work, 'squashfs-root');
+    // --version skips the built-in provider lookup that app-server needs.
+    repairZcodeBuiltinProviderLayout(extracted);
     const cliVersion = cliVersionOf(extracted);
     if (!cliVersion) throw new Error('extracted CLI failed verification (zcode.cjs --version)');
+    if (!repairVerified(extracted)) {
+      throw new Error('extracted CLI is missing the built-in provider catalog that app-server needs');
+    }
     fs.rmSync(path.join(extracted, 'AppRun'), { force: true });
 
     fs.rmSync(APP_ROOT, { recursive: true, force: true });
@@ -183,6 +193,9 @@ export function scheduleZcodeAutoUpdate(): void {
   if (process.env.VIBE_ZCODE_AUTO_UPDATE === '0') {
     log.info('zcode auto-update: disabled (VIBE_ZCODE_AUTO_UPDATE=0)');
     return;
+  }
+  if (repairZcodeBuiltinProviderLayout(APP_ROOT)) {
+    log.info('zcode: linked built-in provider catalog next to zcode.cjs');
   }
   schedule(FIRST_CHECK_DELAY_MS);
   log.info('zcode auto-update: daily check scheduled');

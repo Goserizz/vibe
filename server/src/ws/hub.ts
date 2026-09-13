@@ -6,6 +6,9 @@ import { log } from '../log.js';
 import { startRun, type RunHandle } from '../claude/runner.js';
 import type { RunCallbacks } from '../claude/types.js';
 import { requestQueueStore, type RequestQueueStore } from '../sessions/requestQueue.js';
+import { queuedRequestPrompt } from '../../../shared/interruptedContinuation.js';
+import { agentQuestionStore, type AgentQuestionStore } from '../sessions/agentQuestions.js';
+import type { AgentQuestionItem, AgentQuestionState } from '../../../shared/protocol.js';
 import type { RequestQueuePauseReason, SessionRequestQueueState } from '../../../shared/protocol.js';
 import { isContentEvent } from '../claude/retry.js';
 import { startCursorRun } from '../cursor/runner.js';
@@ -206,6 +209,7 @@ type MetaListener = () => void;
 
 export interface HubOptions {
   queueStore?: RequestQueueStore;
+  questionStore?: AgentQuestionStore;
   /** Injectable launcher for isolated lifecycle tests; production uses native runners. */
   runFactory?: (agent: AgentKind, prompt: string, callbacks: RunCallbacks) => RunHandle;
 }
@@ -370,6 +374,9 @@ class SessionRuntime {
   private foregroundStopped = false;
   private shuttingDown = false;
   private readonly requestQueues: RequestQueueStore;
+  private readonly questions: AgentQuestionStore;
+  private questionError?: string;
+  private answeringQuestions = 0;
 
   constructor(
     readonly sessionId: string,
@@ -378,6 +385,7 @@ class SessionRuntime {
     private readonly options: HubOptions = {},
   ) {
     this.requestQueues = options.queueStore ?? requestQueueStore;
+    this.questions = options.questionStore ?? agentQuestionStore;
     this.cwd = init.cwd;
     this.model = init.model;
     this.permissionMode = init.permissionMode;
@@ -654,6 +662,79 @@ class SessionRuntime {
     for (const conn of this.subscribers) if (sessionVisible(conn.account, this.sessionId)) conn.send(frame);
   }
 
+  questionState(): AgentQuestionState {
+    if (this.agent !== 'codex') return { items: [] };
+    try { return { ...this.questions.snapshot(this.sessionId, this.claudeSessionId), ...(this.questionError ? { error: this.questionError } : {}) }; }
+    catch (error) { return { items: [], error: error instanceof Error ? error.message : 'Questions unavailable' }; }
+  }
+
+  publishQuestions(): void {
+    const state = this.questionState();
+    for (const conn of this.subscribers) if (sessionVisible(conn.account, this.sessionId)) {
+      conn.send({ t: 'agent_questions', sessionId: this.sessionId, state });
+    }
+  }
+
+  private receiveQuestion(question: { id: string; questions: AgentQuestionItem[] }): void {
+    if (this.retired || this.shuttingDown || this.agent !== 'codex' || !this.claudeSessionId) return;
+    try {
+      this.questions.add(this.sessionId, this.claudeSessionId, question.id, question.questions);
+      this.questionError = undefined;
+    } catch (error) { this.questionError = error instanceof Error ? error.message : 'Question could not be saved'; }
+    this.publishQuestions();
+  }
+
+  hasQuestionSubmission(): boolean { return this.answeringQuestions > 0; }
+
+  dismissQuestion(id: string): void {
+    if (this.retired || this.shuttingDown || this.agent !== 'codex' || !this.claudeSessionId) throw new Error('Agent session is unavailable');
+    this.questions.dismiss(this.sessionId, this.claudeSessionId, id);
+    this.questionError = undefined;
+    this.publishQuestions();
+  }
+
+  async answerQuestion(owner: string, id: string, answers: string[], retry = false): Promise<'steered' | 'queued'> {
+    if (this.retired || this.shuttingDown || this.agent !== 'codex' || !this.claudeSessionId) throw new Error('Agent session is unavailable');
+    const ticket = this.questions.begin(this.sessionId, this.claudeSessionId, id, answers, retry);
+    if (ticket.duplicate) { this.publishQuestions(); return ticket.duplicate; }
+    this.answeringQuestions++;
+    this.questionError = undefined;
+    this.publishQuestions();
+    let uncertain = false;
+    try {
+      let delivery: 'steered' | 'queued' = 'queued';
+      const run = this.run;
+      if (this.running && run?.steerMessage) {
+        uncertain = true;
+        if (await run.steerMessage(ticket.text, ticket.messageId)) delivery = 'steered';
+        else uncertain = false; // explicit rejection or no active turn: safe to queue
+      }
+      if (this.retired || this.shuttingDown || !sessionVisible(owner, this.sessionId)) throw new Error('Session changed during answer submission');
+      if (delivery === 'steered') {
+        // This is additional user input in the SAME native turn; it must not
+        // enter the ordinary FIFO or stop the in-flight generation.
+        if (this.run === run) this.runUserTurns++;
+        else {
+          const stored = sessionStore.get(this.sessionId);
+          if (stored) sessionStore.update(this.sessionId, { messageCount: stored.messageCount + 1 });
+        }
+        this.emit({ k: 'block', block: { id: ticket.messageId, kind: 'user', text: ticket.text, ts: Date.now() } });
+      } else {
+        this.enqueueRequest(owner, ticket.messageId, ticket.text);
+        uncertain = true; // durable queue acceptance preceded question completion
+      }
+      this.questions.finish(this.sessionId, id, delivery);
+      return delivery;
+    } catch (error) {
+      try { this.questions.fail(this.sessionId, id, uncertain); }
+      catch { this.questionError = 'Could not save answer status. Check the conversation before retrying.'; }
+      throw error;
+    } finally {
+      this.answeringQuestions--;
+      this.publishQuestions();
+    }
+  }
+
   enqueueRequest(owner: string, id: string, text: string): void {
     this.requestQueues.enqueue(this.sessionId, owner, id, text);
     this.queueError = undefined;
@@ -698,7 +779,7 @@ class SessionRuntime {
       const claimed = this.requestQueues.claim(this.sessionId);
       if (!claimed) return;
       try {
-        if (!this.startTurn(claimed.text, claimed.id)) this.requestQueues.restore(this.sessionId);
+        if (!this.startTurn(queuedRequestPrompt(claimed), claimed.id)) this.requestQueues.restore(this.sessionId);
       } catch (error) {
         this.requestQueues.restore(this.sessionId, 'error');
         this.foregroundFailed = true;
@@ -928,10 +1009,12 @@ class SessionRuntime {
     const builtInMcpServers: McpServerDef[] = monitorMcp ? [monitorMcp] : [];
     const cb = {
       onEvent: (ev: LiveEvent) => this.emit(ev),
+      onAsyncQuestion: (question: { id: string; questions: AgentQuestionItem[] }) => this.receiveQuestion(question),
       onClaudeSessionId: (id: string) => {
         if (this.retired) return;
         if (!id || id === this.claudeSessionId) return;
         this.claudeSessionId = id;
+        this.publishQuestions();
         // Link the underlying CLI session id to this Vibe session the moment the
         // SDK reports it — not only at turn-end. Background disk discovery
         // (loadAllSessions) dedups transcripts by claudeSessionId against the
@@ -1247,7 +1330,7 @@ class SessionRuntime {
   }
 
   hasActivity(): boolean {
-    return Boolean(this.run) || this.hasActiveBackgroundTasks() || this.subscribers.size > 0 || this.pending.size > 0 || this.requestQueueState().items.length > 0;
+    return Boolean(this.run) || this.hasActiveBackgroundTasks() || this.subscribers.size > 0 || this.pending.size > 0 || this.requestQueueState().items.length > 0 || this.hasQuestionSubmission();
   }
 
   hasLiveRun(): boolean {
@@ -1493,6 +1576,7 @@ export class Hub {
       pendingPermissions: rt.pendingRequests(),
       tasks: rt.taskList(),
       requestQueue: rt.requestQueueState(),
+      agentQuestions: rt.questionState(),
     });
   }
 
@@ -1561,6 +1645,24 @@ export class Hub {
     conn.subscriptions.add(sessionId);
     try { rt.changeQueue(action, conn.account, clientMsgId); }
     catch (error) { conn.send({ t: 'error', message: error instanceof Error ? error.message : 'Queue action failed', sessionId }); }
+  }
+
+  async answerQuestion(conn: Conn, sessionId: string, questionId: string, answers?: string[], retry = false): Promise<void> {
+    try {
+      if (!sessionVisible(conn.account, sessionId)) throw new Error('Session not found');
+      if (this.switchingSessions.has(sessionId)) throw new Error('Session is switching agent');
+      const rt = this.runtimeFor(sessionId);
+      if (!rt) throw new Error('Session not found');
+      rt.subscribers.add(conn); conn.subscriptions.add(sessionId);
+      let delivery: 'steered' | 'queued' | 'dismissed';
+      if (answers === undefined) { rt.dismissQuestion(questionId); delivery = 'dismissed'; }
+      else delivery = await rt.answerQuestion(conn.account, questionId, answers, retry);
+      if (delivery !== 'dismissed') { sessionStore.update(sessionId, {}); this.broadcastMeta(sessionId); }
+      conn.send({ t: 'agent_question_result', sessionId, questionId, ok: true, delivery });
+    } catch (error) {
+      conn.send({ t: 'agent_question_result', sessionId, questionId, ok: false,
+        message: error instanceof Error && error.name !== 'ZodError' ? error.message : 'Invalid answer; please complete every question' });
+    }
   }
 
   /** Start a model turn caused by a durable Monitor. The incident envelope is
@@ -1857,7 +1959,7 @@ export class Hub {
   beginAgentSwitch(sessionId: string): boolean {
     if (this.switchingSessions.has(sessionId)) return false;
     const rt = this.runtimes.get(sessionId);
-    if (rt?.hasLiveRun() || rt?.hasActiveBackgroundTasks()) return false;
+    if (rt?.hasLiveRun() || rt?.hasActiveBackgroundTasks() || rt?.hasQuestionSubmission()) return false;
     if (rt && !rt.requestQueueState().paused && rt.requestQueueState().items.length) return false;
     this.switchingSessions.add(sessionId);
     return true;
@@ -1869,6 +1971,10 @@ export class Hub {
    * the immutable agent/native-session fields come from the new runtime.
    */
   rebindAfterAgentSwitch(sessionId: string): void {
+    // Explicit agent switches invalidate unanswered questions for the old
+    // native conversation; no question is transplanted into another agent.
+    try { (this.options.questionStore ?? agentQuestionStore).clear(sessionId); }
+    catch { log.warn('previous agent questions could not be cleared; native-id scoping keeps them inactive'); }
     const init = this.resolveInit(sessionId);
     if (!init) throw new Error('switched session could not be resolved');
     const previous = this.runtimes.get(sessionId);
@@ -1884,6 +1990,7 @@ export class Hub {
   endAgentSwitch(sessionId: string): void {
     this.switchingSessions.delete(sessionId);
     this.runtimes.get(sessionId)?.publishRequestQueue();
+    this.runtimes.get(sessionId)?.publishQuestions();
   }
 
   /** Broadcast updated session metadata — only to connections whose account
@@ -1917,6 +2024,7 @@ export class Hub {
   broadcastRemoved(sessionId: string): void {
     this.runtimes.get(sessionId)?.retire();
     (this.options.queueStore ?? requestQueueStore).drop(sessionId);
+    (this.options.questionStore ?? agentQuestionStore).drop(sessionId);
     this.runtimes.delete(sessionId);
     for (const conn of this.conns) {
       if (sessionVisible(conn.account, sessionId)) conn.send({ t: 'session_removed', sessionId });

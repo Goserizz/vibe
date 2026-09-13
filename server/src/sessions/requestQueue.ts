@@ -17,6 +17,7 @@ export interface StoredQueuedRequest extends QueuedSessionRequest {
 const requestSchema = z.object({
   id: z.string().min(1).max(128), text: z.string().min(1).max(MAX_REQUEST_BYTES),
   owner: z.string().min(1).max(128), queuedAt: z.number().finite(), interrupted: z.boolean().optional(),
+  continuation: z.boolean().optional(),
 });
 const recordSchema = z.object({
   version: z.literal(1), sessionId: z.string(), items: z.array(requestSchema).max(MAX_QUEUED_REQUESTS + 1),
@@ -150,10 +151,12 @@ export class RequestQueueStore {
     next.reason = undefined;
     for (const item of next.items) {
       item.owner = owner;
-      // An explicit recovery retry is a NEW transcript message, not an upsert
-      // of a possibly already-persisted user block from before the restart.
+      // Explicit recovery creates a NEW continuation message. Keep the original
+      // text for reference/dedup and mark dispatch semantics separately so a
+      // second interruption never nests or grows the continuation prompt.
       if (item.interrupted) {
         item.id = crypto.randomUUID();
+        item.continuation = true;
         delete item.interrupted;
         next.recent.push(item.id);
       }

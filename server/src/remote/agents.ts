@@ -433,6 +433,10 @@ function updateCommand(agent: AgentKind): string {
         'rm -f ZCode.AppImage',
         '$SUDO rm -rf /opt/zcode-app',
         '$SUDO mv squashfs-root /opt/zcode-app',
+        'if [ ! -e /opt/zcode-app/resources/glm/provider/zcode-builtin.json ] && [ -f /opt/zcode-app/resources/config/provider/zcode-builtin.json ]; then',
+        '  $SUDO mkdir -p /opt/zcode-app/resources/glm/provider',
+        '  $SUDO ln -sfn ../../config/provider/zcode-builtin.json /opt/zcode-app/resources/glm/provider/zcode-builtin.json',
+        'fi',
         'printf \'#!/bin/sh\\nexec %s /opt/zcode-app/resources/glm/zcode.cjs "$@"\\n\' "$node_bin" | $SUDO tee /usr/local/bin/zcode >/dev/null',
         '$SUDO chmod +x /usr/local/bin/zcode',
         'echo VIBE_UPDATE_DONE',
@@ -500,13 +504,17 @@ function updateResultFromExec(agent: AgentKind, res: SshResult): AgentUpdateResu
 }
 
 /** Install or upgrade an agent CLI on a remote host over SSH. */
-export async function sshUpdateAgent(target: string, agent: AgentKind): Promise<AgentUpdateResult> {
+export async function sshUpdateAgent(
+  target: string,
+  agent: AgentKind,
+  opts: { force?: boolean } = {},
+): Promise<AgentUpdateResult> {
   if (!AGENTS.includes(agent)) {
     return { ok: false, agent, error: 'unknown agent' };
   }
   // ZCode: prefer pushing the local CLI bundle over SSH (~9MB tar.gz) instead
   // of downloading the ~200MB AppImage on the remote host.
-  if (agent === 'zcode') return zcodePushInstall(target);
+  if (agent === 'zcode') return zcodePushInstall(target, opts);
   // CodeBuddy: after the npm install, deploy this machine's credentials (never
   // overwriting the remote's) and verify with a remote login probe.
   if (agent === 'codebuddy') return codebuddyPushInstall(target);
@@ -717,6 +725,11 @@ export function zcodeExtractCommand(sudo: 'root' | 'sudo'): string {
     // The archive preserves the source's root-only dir modes (700); non-root
     // users on the remote host must be able to read/traverse the CLI.
     `${s}chmod -R a+rX /opt/zcode-app/resources/glm /opt/zcode-app/resources/tools /opt/zcode-app/resources/model-providers /opt/zcode-app/resources/config 2>/dev/null || true`,
+    // CLI 0.16.5 looks next to zcode.cjs; the AppImage ships the catalog under resources/config.
+    `if [ ! -e /opt/zcode-app/resources/glm/provider/zcode-builtin.json ] && [ -f /opt/zcode-app/resources/config/provider/zcode-builtin.json ]; then`,
+    `  ${s}mkdir -p /opt/zcode-app/resources/glm/provider`,
+    `  ${s}ln -sfn ../../config/provider/zcode-builtin.json /opt/zcode-app/resources/glm/provider/zcode-builtin.json`,
+    'fi',
     'node_bin=""',
     'for cand in "$(command -v node 2>/dev/null)" /opt/node/bin/node; do',
     '  [ -x "$cand" ] || continue',
@@ -762,7 +775,7 @@ function zcodeConfigFinalize(): string {
  * existing SSH channel. Falls back to the CDN AppImage script when no local
  * installation exists to push.
  */
-async function zcodePushInstall(target: string): Promise<AgentUpdateResult> {
+async function zcodePushInstall(target: string, opts: { force?: boolean } = {}): Promise<AgentUpdateResult> {
   const fail = (error: string, logTail = ''): AgentUpdateResult => ({ ok: false, agent: 'zcode', error, log: logTail });
 
   const bundle = buildZcodeBundle();
@@ -806,9 +819,11 @@ async function zcodePushInstall(target: string): Promise<AgentUpdateResult> {
 
   if (info.zcodeVersion && localVersion) {
     // The local CLI is the source of truth: same version → nothing to do,
-    // different → this click is an update push.
+    // different → this click is an update push. `force` bypasses the string
+    // comparison: distinct builds can share a version string (zcode.cjs was
+    // swapped locally by auto-update while both report the same CLI version).
     const remoteVersion = parseVersionOutput(info.zcodeVersion) ?? info.zcodeVersion;
-    if (remoteVersion === localVersion) {
+    if (!opts.force && remoteVersion === localVersion) {
       if (configDeployed) {
         return {
           ok: true,

@@ -164,6 +164,7 @@ describe('ZCode 新会话配置预检', () => {
     const cb: RunCallbacks = { onEvent: (event) => events.push(event), onClaudeSessionId: () => undefined, requestPermission: async () => ({ allow: false }) };
     const handle = startZcodeRun({ prompt: 'Synthetic prompt', cwd: '/synthetic-project', model: 'test/test-model', permissionMode: 'default', resume }, cb, {
       prepareMcp: async () => state,
+      ensurePersonalProviders: async () => undefined,
       createClient: () => { clients++; return { run: async () => ({}), abort: () => undefined, stopTask: async () => undefined, queueMessage: () => false }; },
     });
     return { handle, events, clients: () => clients };
@@ -187,6 +188,7 @@ describe('ZCode 新会话配置预检', () => {
     const cb: RunCallbacks = { onEvent: (event) => events.push(event), onClaudeSessionId: () => undefined, requestPermission: async () => ({ allow: false }) };
     const handle = startZcodeRun({ prompt: 'Synthetic', cwd: '/synthetic', model: 'auto', permissionMode: 'default' }, cb, {
       prepareMcp: () => new Promise((resolve) => { release = resolve; }),
+      ensurePersonalProviders: async () => undefined,
       createClient: () => { throw new Error('CLI must not start after abort'); },
     });
     handle.abort(); release(missing); await handle.done;

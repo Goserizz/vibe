@@ -25,6 +25,8 @@ const clientMessageSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('queue_remove'), sessionId: z.string(), clientMsgId: z.string() }),
   z.object({ t: z.literal('queue_pause'), sessionId: z.string() }),
   z.object({ t: z.literal('queue_resume'), sessionId: z.string() }),
+  z.object({ t: z.literal('question_answer'), sessionId: z.string(), questionId: z.string().max(128), answers: z.array(z.string().max(65_536)).min(1).max(20), retry: z.boolean().optional() }),
+  z.object({ t: z.literal('question_dismiss'), sessionId: z.string(), questionId: z.string().max(128) }),
   z.object({ t: z.literal('abort'), sessionId: z.string() }),
   z.object({ t: z.literal('task_stop'), sessionId: z.string(), taskId: z.string() }),
   z.object({ t: z.literal('permission'), sessionId: z.string(), requestId: z.string(), decision: decisionSchema }),
@@ -85,7 +87,7 @@ export function attachWsServer(server: Server): void {
     const conn = new WsConn(ws, account.name);
     hub.addConn(conn);
     vibotHub.addConn(conn);
-    conn.send({ t: 'hello', protocolVersion: PROTOCOL_VERSION, serverVersion: config.serverVersion, requestQueueVersion: 1 });
+    conn.send({ t: 'hello', protocolVersion: PROTOCOL_VERSION, serverVersion: config.serverVersion, requestQueueVersion: 1, agentQuestionsVersion: 1, interruptedResumeVersion: 1 });
 
     (ws as WsWithLiveness).isAlive = true;
     ws.on('pong', () => {
@@ -123,6 +125,12 @@ export function attachWsServer(server: Server): void {
           break;
         case 'queue_resume':
           hub.changeRequestQueue(conn, msg.sessionId, 'resume');
+          break;
+        case 'question_answer':
+          void hub.answerQuestion(conn, msg.sessionId, msg.questionId, msg.answers, msg.retry ?? false);
+          break;
+        case 'question_dismiss':
+          void hub.answerQuestion(conn, msg.sessionId, msg.questionId);
           break;
         case 'abort':
           if (!hub.abort(msg.sessionId, conn.account)) {

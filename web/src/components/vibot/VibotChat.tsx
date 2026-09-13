@@ -1,4 +1,6 @@
-import { Fragment, useEffect, useLayoutEffect, useRef } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { conversationHeadings } from '@shared/conversationOutline';
+import { ConversationOutline } from '../ConversationOutline';
 import { Brain, Check, HelpCircle, Settings, Sparkles } from '../../lib/icons';
 import type { ChatBlock, ToolBlock, VibotAskQuestion } from '@shared/protocol';
 import { useStore } from '../../store/store';
@@ -58,9 +60,9 @@ export function VibotChat({
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <section className="relative flex min-w-0 flex-1 flex-col">
+        <section data-conversation-surface className="relative flex min-w-0 flex-1 flex-col">
           {convId ? (
-            <MessageList blocks={blocks ?? []} convId={convId} />
+            <MessageList key={convId} blocks={blocks ?? []} convId={convId} />
           ) : (
             <Welcome onOpenSettings={onOpenSettings} hasApiKey={hasApiKey} />
           )}
@@ -68,7 +70,8 @@ export function VibotChat({
           {/* Narrow screens: agents sit above the composer (same as coding tasks).
               CLI: top hairline lives on this stack — mirrors ChatView's overlay. */}
           {convId && (
-            <div className={cn(cli && 'border-t border-ink-700 bg-ink-950')}>
+            <div data-conversation-composer className={cn(cli && 'border-t border-ink-700 bg-ink-950')}>
+              <div data-outline-slot="composer" />
               <div className="lg:hidden">
                 <VibotAgentsPane
                   convId={convId}
@@ -104,6 +107,7 @@ function VibotTaskRail({
   if (!rows.length) return null;
   return (
     <TaskRail aria-label="Background agents" clearFloatingHeader={false}>
+      <div data-outline-slot="rail" />
       <VibotAgentsPane
         convId={convId}
         onOpenSession={onOpenSession}
@@ -118,12 +122,15 @@ function MessageList({ blocks, convId }: { blocks: ChatBlock[]; convId: string }
   const viewMode = useStore((s) => s.viewMode);
   const cli = viewMode === 'cli';
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const headings = useMemo(() => conversationHeadings(blocks), [blocks]);
   const stickRef = useRef(true);
+  const readingHistory = useRef(false);
 
   const onScroll = () => {
     const el = containerRef.current;
     if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    stickRef.current = !readingHistory.current && el.scrollHeight - el.scrollTop - el.clientHeight < 100;
   };
   useLayoutEffect(() => {
     const el = containerRef.current;
@@ -136,8 +143,10 @@ function MessageList({ blocks, convId }: { blocks: ChatBlock[]; convId: string }
   }, [convId]);
 
   return (
-    <div ref={containerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
+    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={containerRef} onScroll={onScroll} className="conversation-scroll min-h-0 flex-1 overflow-y-auto">
       <div
+        ref={contentRef}
         className={cn(
           'messages-pad mx-auto flex flex-col px-4 pt-8 pb-6 md:px-6',
           cli ? 'max-w-4xl gap-2' : 'max-w-3xl gap-4',
@@ -153,7 +162,9 @@ function MessageList({ blocks, convId }: { blocks: ChatBlock[]; convId: string }
               {b.kind === 'user' && i > 0 && (
                 <div className={cn('border-t', cli ? 'mt-2 border-ink-700' : 'mt-4 border-white/10')} />
               )}
-              {isAskUserQuestionBlock(b) ? (
+              {b.kind === 'user' ? <div data-question-id={b.id} tabIndex={-1} className="question-anchor outline-none">
+                {cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
+              </div> : isAskUserQuestionBlock(b) ? (
                 <AskUserQuestionCard block={b} />
               ) : cli ? (
                 <CliBlockView block={b} />
@@ -164,6 +175,10 @@ function MessageList({ blocks, convId }: { blocks: ChatBlock[]; convId: string }
           ))
         )}
       </div>
+    </div>
+    <ConversationOutline entries={headings} viewport={containerRef} content={contentRef}
+      onJump={async () => { readingHistory.current = true; stickRef.current = false; }}
+      onLatest={() => { readingHistory.current = false; stickRef.current = true; const el = containerRef.current; if (el) el.scrollTop = el.scrollHeight; }} />
     </div>
   );
 }
@@ -301,4 +316,3 @@ function parseAskAnswers(result: string | undefined): Record<string, string | st
   }
   return null;
 }
-

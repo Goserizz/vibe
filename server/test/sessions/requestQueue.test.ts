@@ -9,6 +9,7 @@ import { Hub, CallbackConn } from '../../src/ws/hub.js';
 import { sessionStore } from '../../src/sessions/store.js';
 import type { RunCallbacks, RunHandle } from '../../src/claude/types.js';
 import type { AgentKind, ServerEvent } from '../../../shared/protocol.js';
+import { interruptedContinuationPrompt, queuedRequestPrompt } from '../../../shared/interruptedContinuation.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-request-queue-tests-'));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -73,9 +74,56 @@ describe('持久化待处理请求', () => {
     assert.equal(after.snapshot('s').items.length, 2);
     after.resume('s', 'admin');
     const retried = after.claim('s')!;
-    assert.equal(retried.text, 'First');
+    assert.equal(retried.text, 'First', '原始请求仍保留作参考和去重');
+    assert.equal(retried.continuation, true);
+    assert.equal(queuedRequestPrompt(retried), interruptedContinuationPrompt('First'));
     assert.notEqual(retried.id, 'a', '显式重试不能覆盖先前的用户消息块');
     assert.equal(retried.interrupted, undefined);
+  });
+
+  it('只有中断项变为续接；未执行的排队项保持原文与原 ID', () => {
+    const dir = directory(), before = new RequestQueueStore(dir);
+    before.enqueue('s', 'admin', 'active', 'Interrupted task');
+    before.enqueue('s', 'admin', 'waiting', 'Exact next request\nSecond line');
+    before.claim('s');
+    const restored = new RequestQueueStore(dir);
+    restored.resume('s', 'admin');
+    const items = restored.snapshot('s').items;
+    assert.equal(items[0]?.continuation, true);
+    assert.equal(items[1]?.continuation, undefined);
+    assert.equal(items[1]?.id, 'waiting');
+    assert.equal(queuedRequestPrompt(items[1]!), 'Exact next request\nSecond line');
+  });
+
+  it('连续多次中断不会套娃提示词，重复确认也不会重复改写 ID', () => {
+    const dir = directory();
+    let store = new RequestQueueStore(dir);
+    const original = ('原任务：继续修复流水线。' + 'Long details. '.repeat(500)).trimEnd();
+    store.enqueue('s', 'admin', 'first', original);
+    store.claim('s');
+    const ids = new Set(['first']);
+    for (let i = 0; i < 3; i++) {
+      store = new RequestQueueStore(dir);
+      assert.equal(store.snapshot('s').items[0]?.interrupted, true);
+      store.resume('s', 'admin');
+      const item = store.snapshot('s').items[0]!;
+      assert.ok(!ids.has(item.id)); ids.add(item.id);
+      assert.equal(item.text, original);
+      assert.equal(queuedRequestPrompt(item), interruptedContinuationPrompt(original));
+      store.resume('s', 'admin');
+      assert.equal(store.snapshot('s').items[0]?.id, item.id);
+      store.claim('s');
+    }
+  });
+
+  it('恢复状态落盘失败时保持原队列，不发布新的续接请求', context => {
+    const dir = directory(), before = new RequestQueueStore(dir);
+    before.enqueue('s', 'admin', 'a', 'Original'); before.claim('s');
+    const restored = new RequestQueueStore(dir);
+    const original = restored.snapshot('s');
+    context.mock.method(fs, 'renameSync', () => { throw new Error('Synthetic disk failure'); });
+    assert.throws(() => restored.resume('s', 'admin'), /could not be saved/);
+    assert.deepEqual(restored.snapshot('s'), original);
   });
 
   it('完整完成的请求重启后不重新排队，剩余请求仍须确认继续', () => {
@@ -136,8 +184,8 @@ interface FakeRun {
   reused: string[];
 }
 
-function setup(agent: AgentKind = 'codebuddy', queueStore = new RequestQueueStore(directory())) {
-  const session = sessionStore.create({ cwd: root, model: 'auto', permissionMode: 'default', agent, title: 'Synthetic queue test', owner: 'admin' });
+function setup(agent: AgentKind = 'codebuddy', queueStore = new RequestQueueStore(directory()), existing?: ReturnType<typeof sessionStore.create>) {
+  const session = existing ?? sessionStore.create({ cwd: root, model: 'auto', permissionMode: 'default', agent, title: 'Synthetic queue test', owner: 'admin' });
   const frames: ServerEvent[] = [];
   const runs: FakeRun[] = [];
   const hub = new Hub({ queueStore, runFactory: (kind, prompt, cb) => {
@@ -162,6 +210,37 @@ function setup(agent: AgentKind = 'codebuddy', queueStore = new RequestQueueStor
 }
 
 const agents: AgentKind[] = ['claude', 'cursor', 'codex', 'kimi', 'kiro', 'grok', 'zcode', 'codebuddy', 'opencode', 'devin'];
+describe('所有编码 agent 的中断续接', () => {
+  for (const agent of agents) it(`${agent}: 沿用原会话发送续接提示，不重发原任务`, async () => {
+    const dir = directory(), before = setup(agent, new RequestQueueStore(dir));
+    const original = '修复工作流并检查结果：' + '仅用于原始任务的长说明。'.repeat(100);
+    const nativeId = crypto.randomUUID();
+    let recovered: ReturnType<typeof setup> | undefined;
+    try {
+      before.send(original, 'original-user-id');
+      before.runs[0]!.cb.onClaudeSessionId(nativeId);
+      before.send('尚未执行的下一条请求', 'next-user-id');
+      before.hub.prepareForShutdown();
+      await before.finish(before.runs[0]!);
+      recovered = setup(agent, new RequestQueueStore(dir), before.session);
+      recovered.hub.subscribe(recovered.conn, recovered.session.id, 0);
+      assert.equal(recovered.runs.length, 0, '重启/订阅不能自动续接');
+      recovered.hub.changeRequestQueue(recovered.conn, recovered.session.id, 'resume');
+      recovered.hub.changeRequestQueue(recovered.conn, recovered.session.id, 'resume');
+      assert.equal(recovered.runs.length, 1, '重复确认不能重复派发');
+      assert.equal(recovered.runs[0]?.agent, agent);
+      assert.equal(recovered.runs[0]?.prompt, interruptedContinuationPrompt(original));
+      assert.equal(sessionStore.get(recovered.session.id)?.claudeSessionId, nativeId);
+      const userBlocks = recovered.frames.flatMap(frame => frame.t === 'event' && frame.ev.k === 'block' && frame.ev.block.kind === 'user' ? [frame.ev.block] : []);
+      assert.equal(userBlocks.length, 1);
+      assert.notEqual(userBlocks[0]?.id, 'original-user-id');
+      assert.equal(userBlocks[0]?.text, interruptedContinuationPrompt(original));
+      await recovered.finish(recovered.runs[0]!);
+      assert.equal(recovered.runs[1]?.prompt, '尚未执行的下一条请求');
+      await recovered.finish(recovered.runs[1]!);
+    } finally { before.close(); recovered?.close(); }
+  });
+});
 describe('所有编码 agent 的轮次后排队', () => {
   for (const agent of agents) it(`${agent}: 不打断当前输出，完成后按 FIFO 逐条执行`, async () => {
     const test = setup(agent);
