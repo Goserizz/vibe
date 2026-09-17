@@ -26,7 +26,7 @@ export function AgentQuestions({ sessionId }: { sessionId: string }) {
 
   return (
     <>
-      <section aria-label="Agent questions" className={cn('mx-4 mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-accent/30 bg-ink-900 px-3 py-2 text-[12px] md:mx-6', cli && 'font-mono')}>
+      <section aria-label="Agent questions" className={cn('mx-auto mb-2 flex w-full flex-wrap items-center gap-2 rounded-lg border border-accent/30 bg-ink-900 px-3 py-2 text-[12px]', cli ? 'max-w-4xl font-mono' : 'max-w-3xl')}>
         <HelpCircle className="h-4 w-4 shrink-0 text-accent-soft" />
         {state?.error
           ? <span role="status" className="flex-1 text-amber-600 dark:text-amber-300">{state.error}</span>

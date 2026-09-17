@@ -1,6 +1,6 @@
 import zlib from 'node:zlib';
 import { log } from '../log.js';
-import { bundleMtimeMs, markerCmd, mtimeExpr, parseBundle } from '../remote/bundle.js';
+import { BUNDLE_KNOWN_HEADER, bundleKnownStdin, bundleSkipGuard, bundleMtimeMs, cachedBundleSession, markerCmd, mtimeExpr, noteBundleKey, noteBundleSession, parseBundle } from '../remote/bundle.js';
 import { loginShellCommand, sshExec } from '../remote/ssh.js';
 import { isClaudeSessionId, type DiscoveredSession } from '../sessions/discovery.js';
 import { parseCodebuddyBlocks, parseCodebuddyHeadMeta } from './transcript.js';
@@ -17,38 +17,55 @@ const HEAD_LINES = 60;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 
 const BUNDLE_CMD = [
+  BUNDLE_KNOWN_HEADER,
   'cd ~/.codebuddy/projects 2>/dev/null || exit 0',
   // `./*/*.jsonl` (not `*/*.jsonl`) so project dirs whose names start with "-"
   // aren't mistaken for `ls` options.
   `ls -1t ./*/*.jsonl 2>/dev/null | head -${MAX_FILES} | while IFS= read -r f; do`,
   `  m=${mtimeExpr('"$f"')}`,
   `  ${markerCmd(['"$f"', '"$m"'])}`,
-  `  head -n ${HEAD_LINES} "$f"`,
+  `  ${bundleSkipGuard('f', `head -n ${HEAD_LINES} "$f"`)}`,
   'done',
 ].join('\n');
 
 /** Discover CodeBuddy sessions on a remote host (most-recent first). */
 export async function listRemoteCodebuddySessions(host: RemoteHost): Promise<DiscoveredSession[]> {
-  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), { timeoutMs: 20_000 });
+  const scope = `codebuddy:${host.name}`;
+  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), {
+    timeoutMs: 20_000,
+    input: `${bundleKnownStdin(scope)}\n`,
+  });
   if (res.code !== 0) {
     log.debug(`remote codebuddy discovery failed for ${host.name}: ${res.stderr.trim().slice(0, 120)}`);
     return [];
   }
   const sessions: DiscoveredSession[] = [];
   for (const { fields, body } of parseBundle(res.stdout)) {
-    const id = (fields[0] ?? '').replace(/^.*\//, '').replace(/\.jsonl$/, '');
+    const key = fields[0] ?? '';
+    const mtimeRaw = fields[1] ?? '';
+    const id = key.replace(/^.*\//, '').replace(/\.jsonl$/, '');
     if (!isClaudeSessionId(id)) continue;
-    const meta = parseCodebuddyHeadMeta(body.split('\n'));
-    if (!meta) continue;
-    sessions.push({
-      claudeSessionId: id,
-      cwd: meta.cwd,
-      title: meta.title,
-      model: meta.model || config.defaultCodebuddyModel,
-      createdAt: meta.createdAt || bundleMtimeMs(fields[1]),
-      updatedAt: bundleMtimeMs(fields[1]),
-      messageCount: meta.messageCount,
-    });
+    const updatedAt = bundleMtimeMs(mtimeRaw);
+    const cached = body === '' ? cachedBundleSession(scope, key) : undefined;
+    let session = cached;
+    if (!session) {
+      const meta = parseCodebuddyHeadMeta(body.split('\n'));
+      if (!meta) {
+        noteBundleKey(scope, key, mtimeRaw);
+        continue;
+      }
+      session = {
+        claudeSessionId: id,
+        cwd: meta.cwd,
+        title: meta.title,
+        model: meta.model || config.defaultCodebuddyModel,
+        createdAt: meta.createdAt || updatedAt,
+        updatedAt,
+        messageCount: meta.messageCount,
+      };
+      noteBundleSession(scope, key, mtimeRaw, session);
+    }
+    sessions.push(session);
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }

@@ -20,21 +20,30 @@ const RS = '\x1e';
 const FS = '\x1f';
 
 // One round-trip: list the most-recent top-level transcripts and emit, per file,
-// a marker line (relpath + mtime) followed by the file's head.
-const BUNDLE_CMD = [
+// a marker line (relpath + mtime) followed by the file's head — but only for
+// files whose mtime is not in the known-set passed on stdin (incremental):
+// unchanged files cost ~100 bytes of marker instead of up to megabytes of head.
+const bundleCmd = (): string => [
+  'KNOWN=$(cat)',
   'cd ~/.claude/projects 2>/dev/null || exit 0',
   // `./*/*.jsonl` (not `*/*.jsonl`) so project dirs whose names start with "-"
   // aren't mistaken for `ls` options.
   'ls -1t ./*/*.jsonl 2>/dev/null | head -80 | while IFS= read -r f; do',
   '  m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)',
   `  printf '${RS}%s${FS}%s${RS}\\n' "$f" "$m"`,
-  '  head -n 60 "$f"',
+  '  case "$KNOWN" in *"|$f:$m|"*) ;; *) head -n 60 "$f" 2>/dev/null | head -c 65536 ;; esac',
   'done',
 ].join('\n');
 
 const cache = new Map<string, DiscoveredSession[]>();
 /** Per-host results across every agent (see {@link listRemoteAgentSessions}). */
 const allCache = new Map<string, RemoteDiscovery[]>();
+/** Incremental-discovery state, deliberately OUTSIDE the per-cycle caches
+ *  (clearRemoteDiscoveryCache wipes those every refresh): per host, the last
+ *  seen mtime per transcript file and the metadata parsed from its head, so
+ *  unchanged files are served from memory instead of re-downloaded. */
+const knownMtimes = new Map<string, Map<string, string>>();
+const metaByFile = new Map<string, Map<string, DiscoveredSession>>();
 
 /** A session found on a remote host, tagged with the agent that owns it. */
 export interface RemoteDiscovery {
@@ -53,15 +62,24 @@ export async function listRemoteSessions(host: RemoteHost): Promise<DiscoveredSe
   const hit = cache.get(host.name);
   if (hit) return hit;
 
-  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), { timeoutMs: 20_000 });
+  const known = knownMtimes.get(host.name);
+  const knownStr = known ? [...known].map(([p, m]) => `|${p}:${m}|`).join('') : '';
+  const res = await sshExec(host.ssh, loginShellCommand(bundleCmd()), {
+    timeoutMs: 20_000,
+    input: `${knownStr}\n`,
+  });
   if (res.code !== 0) {
     log.debug(`remote discovery failed for ${host.name}: ${res.stderr.trim().slice(0, 120)}`);
     return [];
   }
 
   // Each file emits: RS <relpath> FS <mtime> RS <head...>. Splitting on RS
-  // yields ["", marker0, head0, marker1, head1, ...] — process in pairs.
+  // yields ["", marker0, head0, marker1, head1, ...] — process in pairs. An
+  // empty head means the mtime matched the known-set: reuse the cached meta.
   const sessions: DiscoveredSession[] = [];
+  const nextKnown = new Map<string, string>();
+  const nextMeta = new Map<string, DiscoveredSession>();
+  const cachedMeta = metaByFile.get(host.name);
   const parts = res.stdout.split(RS);
   for (let i = 1; i + 1 < parts.length; i += 2) {
     const [relPath, mtimeStr] = parts[i].split(FS);
@@ -70,9 +88,19 @@ export async function listRemoteSessions(host: RemoteHost): Promise<DiscoveredSe
     const id = relPath.replace(/^.*\//, '').replace(/\.jsonl$/, '');
     if (!isClaudeSessionId(id)) continue;
     const mtime = (Number(mtimeStr) || 0) * 1000 || Date.now();
-    const meta = parseSessionMeta(head.split('\n'), id, { createdFallback: mtime, updatedAt: mtime });
-    if (meta) sessions.push(meta);
+    const cached = head === '' ? cachedMeta?.get(relPath) : undefined;
+    let meta = cached;
+    if (!meta) {
+      meta = parseSessionMeta(head.split('\n'), id, { createdFallback: mtime, updatedAt: mtime }) ?? undefined;
+    }
+    nextKnown.set(relPath, mtimeStr);
+    if (meta) {
+      sessions.push(meta);
+      nextMeta.set(relPath, meta);
+    }
   }
+  knownMtimes.set(host.name, nextKnown);
+  metaByFile.set(host.name, nextMeta);
 
   cache.set(host.name, sessions);
   return sessions;

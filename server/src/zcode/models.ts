@@ -24,8 +24,6 @@ export interface ZcodePermissionOption {
   hint: string;
 }
 
-const AUTO_MODEL: ZcodeModelOption = { value: 'auto', label: 'Auto' };
-
 /** Permission modes ZCode exposes (session/setMode build|edit|plan|yolo). */
 export const ZCODE_PERMISSIONS: ZcodePermissionOption[] = [
   { value: 'default', label: 'Ask', hint: 'Approve risky tools before they run' },
@@ -34,9 +32,9 @@ export const ZCODE_PERMISSIONS: ZcodePermissionOption[] = [
   { value: 'bypassPermissions', label: 'Yolo', hint: 'Auto-approve tool calls (careful)' },
 ];
 
-const FALLBACK: ZcodeModelOption[] = [
-  AUTO_MODEL,
-];
+// No Auto here either — the fallback only shows while a host config is
+// unreadable, and an Auto pick cannot work on this fleet (see parseZcodeModels).
+const FALLBACK: ZcodeModelOption[] = [];
 
 /** Shape of ~/.zcode/cli/config.json (only the parts Vibe reads). */
 export interface ZcodeCliConfig {
@@ -99,14 +97,10 @@ export function parseZcodeModels(raw: string): ZcodeModelOption[] {
       models.unshift(entry!);
     }
   }
-  if (!seen.has('auto')) models.unshift(AUTO_MODEL);
-  else {
-    const autoIdx = models.findIndex((m) => m.value === 'auto');
-    if (autoIdx > 0) {
-      const [auto] = models.splice(autoIdx, 1);
-      models.unshift(auto!);
-    }
-  }
+  // Deliberately no `auto` option: zcode's own default comes from its built-in
+  // catalog and bypasses the configured providers, so on this fleet
+  // (relay/baseURL-based) an Auto pick fails at turn time. Sessions must pick
+  // an explicit configured model.
   return models;
 }
 

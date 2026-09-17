@@ -816,7 +816,19 @@ html.cli-mode textarea.cli-prompt:focus-visible {
    retain the scaled task-area dropdown; both lists scroll independently. */
 .outline-panel { transform-origin: top right; animation: outline-reveal 180ms cubic-bezier(.2,.75,.25,1); }
 .outline-wide .outline-panel { animation: none; border-radius: 0; box-shadow: none; }
-[data-outline-slot="composer"]:has(.conversation-outline) { margin: 0 16px 8px; }
+/* Match the task panes' box (px-4 md:px-6 wrapper + inner max-w-3xl centered)
+   so the outline bar is exactly as wide as Todo/Monitors above the composer. */
+[data-outline-slot="composer"]:has(.conversation-outline) {
+  margin: 0 auto 8px;
+  padding: 0 16px;
+  max-width: calc(48rem + 32px);
+}
+@media (min-width: 768px) {
+  [data-outline-slot="composer"]:has(.conversation-outline) {
+    padding: 0 24px;
+    max-width: calc(48rem + 48px);
+  }
+}
 /* Empty portal slots must not create a blank task card or extra rail spacing. */
 [data-outline-slot]:empty { display: block; height: 0; margin: 0 !important; }
 [data-outline-slot]:empty + * { margin-top: 0 !important; }

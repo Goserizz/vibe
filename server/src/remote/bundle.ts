@@ -12,6 +12,8 @@
  * which predate this helper.
  */
 
+import type { DiscoveredSession } from '../sessions/discovery.js';
+
 export const RS = '\x1e';
 export const FS = '\x1f';
 
@@ -46,4 +48,56 @@ export function parseBundle(stdout: string): BundleRecord[] {
 /** Remote seconds-since-epoch → local ms, falling back to "now". */
 export function bundleMtimeMs(raw: string | undefined): number {
   return (Number(raw) || 0) * 1000 || Date.now();
+}
+
+// ---------------------------------------------------------------------------
+// Incremental bundles
+//
+// The bundle commands stream every listed item's body on every probe, which on
+// transcript-heavy hosts meant tens of MB per 60s discovery cycle. Incremental
+// mode passes the previously seen `|key:mtime|…` set to the remote command on
+// stdin (`KNOWN=$(cat)` first line) and the loop skips the body for items whose
+// mtime is already known — the parser then reuses the cached session for the
+// empty bodies. State lives here, deliberately OUTSIDE the per-cycle discovery
+// caches (which are wiped every refresh).
+// ---------------------------------------------------------------------------
+
+const knownMtimes = new Map<string, Map<string, string>>();
+const sessionByFile = new Map<string, Map<string, DiscoveredSession>>();
+
+/** KNOWN set for a scope, in the `|key:mtime|…` form the skip guard matches. */
+export function bundleKnownStdin(scope: string): string {
+  const known = knownMtimes.get(scope);
+  return known ? [...known].map(([k, m]) => `|${k}:${m}|`).join('') : '';
+}
+
+/** First line every incremental bundle command needs: capture the known-set. */
+export const BUNDLE_KNOWN_HEADER = 'KNOWN=$(cat)';
+
+/** Skip the body when the item's key+mtime is already known (shell vars
+ *  `$f`/`$m` by default; pass the item's path variable if it differs). */
+export function bundleSkipGuard(fileVar: string, headCmd: string): string {
+  return `case "$KNOWN" in *"|${fileVar}:$m|"*) ;; *) ${headCmd} ;; esac`;
+}
+
+/** Cached session for an unchanged item (empty body), if we have one. */
+export function cachedBundleSession(scope: string, key: string): DiscoveredSession | undefined {
+  return sessionByFile.get(scope)?.get(key);
+}
+
+/** Record a parsed session (and its mtime) for future incremental reuse. */
+export function noteBundleSession(scope: string, key: string, mtime: string, session: DiscoveredSession): void {
+  let known = knownMtimes.get(scope);
+  if (!known) knownMtimes.set(scope, (known = new Map()));
+  known.set(key, mtime);
+  let metas = sessionByFile.get(scope);
+  if (!metas) sessionByFile.set(scope, (metas = new Map()));
+  metas.set(key, session);
+}
+
+/** Record the mtime of an item whose body arrived but yielded no session. */
+export function noteBundleKey(scope: string, key: string, mtime: string): void {
+  let known = knownMtimes.get(scope);
+  if (!known) knownMtimes.set(scope, (known = new Map()));
+  known.set(key, mtime);
 }

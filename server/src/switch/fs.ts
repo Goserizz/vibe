@@ -194,6 +194,11 @@ export function createSshFs(sshTarget: string, run: SshRunner): SwitchFs {
     label: string,
   ): Promise<void> => {
     const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+    // Slow links are real (observed ~27 KB/s over a congested tunnel): scale
+    // the deadline with payload size instead of a flat 60s, so multi-MB
+    // session databases can land on far hosts. ~15 KB/s assumed, 30s margin
+    // for the verify+rename, capped at 15 minutes.
+    const timeoutMs = Math.min(900_000, Math.max(60_000, Math.ceil(bytes.length / 15_000) * 1000 + 30_000));
     const expectedHash = crypto.createHash('sha256').update(bytes).digest('hex');
     const tmp = `${filePath}.vibe-switch.${crypto.randomBytes(6).toString('hex')}.tmp`;
     const command =
@@ -203,7 +208,7 @@ export function createSshFs(sshTarget: string, run: SshRunner): SwitchFs {
       + ` && (sha256sum ${q(tmp)} 2>/dev/null || shasum -a 256 ${q(tmp)} 2>/dev/null)`
       + ` | awk '{print $1}' | grep -qx ${expectedHash}`
       + ` && mv ${q(tmp)} ${q(filePath)}`;
-    const res = await sh(command, content);
+    const res = await sh(command, content, timeoutMs);
     if (res.code !== 0) {
       const detail = res.timedOut
         ? 'SSH timed out before the verified commit; destination was left unchanged'

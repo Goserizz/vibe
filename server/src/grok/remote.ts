@@ -1,5 +1,5 @@
 import { log } from '../log.js';
-import { bundleMtimeMs, markerCmd, mtimeExpr, parseBundle } from '../remote/bundle.js';
+import { BUNDLE_KNOWN_HEADER, bundleKnownStdin, bundleSkipGuard, bundleMtimeMs, cachedBundleSession, markerCmd, mtimeExpr, noteBundleKey, noteBundleSession, parseBundle } from '../remote/bundle.js';
 import { loginShellCommand, shQuote, sshExec } from '../remote/ssh.js';
 import type { DiscoveredSession } from '../sessions/discovery.js';
 import type { ChatBlock, RemoteHost } from '../../../shared/protocol.js';
@@ -14,6 +14,7 @@ const META_HEAD_BYTES = 8192;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 
 const BUNDLE_CMD = [
+  BUNDLE_KNOWN_HEADER,
   'grok_home="${GROK_HOME:-$HOME/.grok}"',
   'cd "$grok_home/sessions" 2>/dev/null || exit 0',
   `ls -1td ./*/*/summary.json 2>/dev/null | head -${MAX_FILES} | while IFS= read -r f; do`,
@@ -22,14 +23,17 @@ const BUNDLE_CMD = [
   `  m=${mtimeExpr('"$f"')}`,
   '  sz=$(stat -c %s "$l" 2>/dev/null || stat -f %z "$l" 2>/dev/null || echo 0)',
   `  ${markerCmd(['"$d"', '"$m"', '"$sz"'])}`,
-  `  head -c ${META_HEAD_BYTES} "$f"`,
-  "  printf '\\n'",
+  `  ${bundleSkipGuard('d', `head -c ${META_HEAD_BYTES} "$f"; printf '\\n'`)}`,
   'done',
 ].join('\n');
 
 /** Discover native Grok CLI sessions on a remote host (most-recent first). */
 export async function listRemoteGrokSessions(host: RemoteHost): Promise<DiscoveredSession[]> {
-  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), { timeoutMs: 20_000 });
+  const scope = `grok:${host.name}`;
+  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), {
+    timeoutMs: 20_000,
+    input: `${bundleKnownStdin(scope)}\n`,
+  });
   if (res.code !== 0) {
     log.debug(`remote grok discovery failed for ${host.name}: ${res.stderr.trim().slice(0, 120)}`);
     return [];
@@ -39,10 +43,16 @@ export async function listRemoteGrokSessions(host: RemoteHost): Promise<Discover
   for (const { fields, body } of parseBundle(res.stdout)) {
     if (Number(fields[2]) === 0) continue;
     const dir = fields[0] ?? '';
+    const mtimeRaw = fields[1] ?? '';
     const fallbackId = dir.replace(/^.*\//, '');
-    const mtime = bundleMtimeMs(fields[1]);
-    const session = parseGrokSummary(body, fallbackId, { createdFallback: mtime, updatedAt: mtime });
-    if (session) sessions.push(session);
+    const mtime = bundleMtimeMs(mtimeRaw);
+    const session = body === '' ? cachedBundleSession(scope, dir) : parseGrokSummary(body, fallbackId, { createdFallback: mtime, updatedAt: mtime });
+    if (!session) {
+      noteBundleKey(scope, dir, mtimeRaw);
+      continue;
+    }
+    noteBundleSession(scope, dir, mtimeRaw, session);
+    sessions.push(session);
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }

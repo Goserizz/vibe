@@ -54,12 +54,40 @@ export const BlockView = memo(function BlockView({ block, sessionId }: { block: 
   }
 });
 
+/** Chips for the files the Composer folded into the prompt (paths stripped
+ *  from the visible text). Shown in both chat and CLI user views so an upload
+ *  is always visible on the conversation, even when the message has text. */
+export function AttachmentChips({ files }: { files: string[] }) {
+  if (!files.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {files.map((f) => {
+        const name = f.split('/').pop() || f;
+        const img = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
+        return (
+          <span
+            key={f}
+            title={f}
+            className="inline-flex max-w-[240px] items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-[12px] text-slate-300"
+          >
+            {img ? (
+              <Image className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+            ) : (
+              <FileText className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+            )}
+            <span className="truncate">{name}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function UserView({ block }: { block: UserBlock }) {
   // Hide the attachment boilerplate block the Composer folds into the prompt
-  // (the agent still sees it; the user just sees what they typed). If the
-  // message was attachments-only, keep the bubble from going empty.
+  // (the agent still sees it; the user sees what they typed plus the files).
   const { text, files } = stripAttachments(block.text);
-  const display = text.trim() || (files.length ? `📎 ${files.length} file${files.length > 1 ? 's' : ''} attached` : '');
+  const display = text.trim();
   const images = block.images?.length ? block.images : undefined;
   return (
     <div className="flex justify-end animate-fade-in">
@@ -76,6 +104,7 @@ function UserView({ block }: { block: UserBlock }) {
             ))}
           </div>
         )}
+        <AttachmentChips files={files} />
         {display}
       </div>
     </div>

@@ -10,7 +10,7 @@ import type {
   UserBlock,
 } from '@shared/protocol';
 import { Markdown } from './Markdown';
-import { CompactEditDiff, editChangeLines, toolKind, toolMeta, writeChangeLines } from './blocks';
+import { CompactEditDiff, AttachmentChips, editChangeLines, toolKind, toolMeta, writeChangeLines } from './blocks';
 import { parseList, todoSnapshotFromBlock } from './TodoPane';
 import { beijingClock, beijingDateTime, cn, formatTokens } from '../lib/format';
 import { stripAttachments } from '../lib/attachments';
@@ -45,8 +45,7 @@ export const CliBlockView = memo(function CliBlockView({ block }: { block: ChatB
 
 function CliUserView({ block }: { block: UserBlock }) {
   const { text, files } = stripAttachments(block.text);
-  const display =
-    text.trim() || (files.length ? `${files.length} file${files.length > 1 ? 's' : ''} attached` : '');
+  const display = text.trim();
   const images = block.images?.length ? block.images : undefined;
   return (
     <div className="cli-turn mt-5 font-mono text-[13.5px] leading-relaxed first:mt-0">
@@ -65,6 +64,7 @@ function CliUserView({ block }: { block: UserBlock }) {
               ))}
             </div>
           )}
+          <AttachmentChips files={files} />
           {display}
         </div>
       </div>

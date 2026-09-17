@@ -235,11 +235,11 @@ export function TodoPane({ sessionId, layout = 'composer' }: { sessionId: string
           onClick={() => setOpen((o) => !o)}
           className={cn(
             'flex w-full items-center gap-2 text-left transition',
-            cli ? 'gap-2 py-1 text-slate-400 hover:text-slate-200' : 'px-3 py-2 hover:bg-ink-800/40',
+            cli ? 'px-3 py-1 text-slate-400 hover:text-slate-200' : 'px-3 py-2 hover:bg-ink-800/40',
           )}
         >
           {cli ? (
-            <span className="cli-gutter select-none text-accent-soft">■</span>
+            <span className="inline-flex w-4 shrink-0 select-none justify-center text-accent-soft">■</span>
           ) : (
             <ListTodo className="h-4 w-4 shrink-0 text-accent-soft" />
           )}

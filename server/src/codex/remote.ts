@@ -1,5 +1,5 @@
 import { log } from '../log.js';
-import { bundleMtimeMs, markerCmd, mtimeExpr, parseBundle } from '../remote/bundle.js';
+import { BUNDLE_KNOWN_HEADER, bundleKnownStdin, bundleSkipGuard, bundleMtimeMs, cachedBundleSession, markerCmd, mtimeExpr, noteBundleKey, noteBundleSession, parseBundle } from '../remote/bundle.js';
 import { loginShellCommand, shQuote, sshExec } from '../remote/ssh.js';
 import type { DiscoveredSession } from '../sessions/discovery.js';
 import { isClaudeSessionId } from '../sessions/discovery.js';
@@ -18,6 +18,7 @@ const MAX_DAY_DIRS = 20;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 
 const BUNDLE_CMD = [
+  BUNDLE_KNOWN_HEADER,
   'cd ~/.codex/sessions 2>/dev/null || exit 0',
   // `./*/…` (not `*/…`) so a directory named like a flag can't become one.
   'recent_files() {',
@@ -30,13 +31,17 @@ const BUNDLE_CMD = [
   `recent_files | head -${MAX_FILES} | while IFS= read -r f; do`,
   `  m=${mtimeExpr('"$f"')}`,
   `  ${markerCmd(['"$f"', '"$m"'])}`,
-  '  head -n 40 "$f"',
+  `  ${bundleSkipGuard('f', 'head -n 40 "$f"')}`,
   'done',
 ].join('\n');
 
 /** Discover Codex sessions on a remote host (most-recent first). */
 export async function listRemoteCodexSessions(host: RemoteHost): Promise<DiscoveredSession[]> {
-  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), { timeoutMs: 20_000 });
+  const scope = `codex:${host.name}`;
+  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), {
+    timeoutMs: 20_000,
+    input: `${bundleKnownStdin(scope)}\n`,
+  });
   if (res.code !== 0) {
     log.debug(`remote codex discovery failed for ${host.name}: ${res.stderr.trim().slice(0, 120)}`);
     return [];
@@ -44,9 +49,20 @@ export async function listRemoteCodexSessions(host: RemoteHost): Promise<Discove
 
   const byId = new Map<string, DiscoveredSession>();
   for (const { fields, body } of parseBundle(res.stdout)) {
-    const meta = parseCodexRolloutHead(body.split('\n'));
-    if (!meta) continue;
-    const session = codexMetaToDiscovered(meta, bundleMtimeMs(fields[1]));
+    const key = fields[0] ?? '';
+    const mtimeRaw = fields[1] ?? '';
+    // Empty body = mtime already known: reuse the session parsed last time.
+    let session = body === '' ? cachedBundleSession(scope, key) : undefined;
+    if (!session) {
+      const meta = parseCodexRolloutHead(body.split('\n'));
+      const built = meta ? codexMetaToDiscovered(meta, bundleMtimeMs(mtimeRaw)) : null;
+      if (!built) {
+        noteBundleKey(scope, key, mtimeRaw);
+        continue;
+      }
+      session = built;
+      noteBundleSession(scope, key, mtimeRaw, session);
+    }
     // A resumed session appends a new rollout; keep the most recent one.
     if (session && (byId.get(session.claudeSessionId)?.updatedAt ?? 0) < session.updatedAt) {
       byId.set(session.claudeSessionId, session);

@@ -1,5 +1,5 @@
 import { log } from '../log.js';
-import { bundleMtimeMs, markerCmd, mtimeExpr, parseBundle } from '../remote/bundle.js';
+import { BUNDLE_KNOWN_HEADER, bundleKnownStdin, bundleSkipGuard, bundleMtimeMs, cachedBundleSession, markerCmd, mtimeExpr, noteBundleKey, noteBundleSession, parseBundle } from '../remote/bundle.js';
 import { loginShellCommand, shQuote, sshExec } from '../remote/ssh.js';
 import type { DiscoveredSession } from '../sessions/discovery.js';
 import type { ChatBlock, RemoteHost } from '../../../shared/protocol.js';
@@ -18,6 +18,7 @@ const META_HEAD_BYTES = 8192;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 
 const BUNDLE_CMD = [
+  BUNDLE_KNOWN_HEADER,
   'cd ~/.kiro/sessions/cli 2>/dev/null || exit 0',
   // `./*.json` never matches `*.jsonl`, so this lists metadata files only.
   `ls -1t ./*.json 2>/dev/null | head -${MAX_FILES} | while IFS= read -r f; do`,
@@ -25,14 +26,17 @@ const BUNDLE_CMD = [
   `  m=${mtimeExpr('"$f"')}`,
   '  sz=$(stat -c %s "$l" 2>/dev/null || stat -f %z "$l" 2>/dev/null || echo 0)',
   `  ${markerCmd(['"$f"', '"$m"', '"$sz"'])}`,
-  `  head -c ${META_HEAD_BYTES} "$f"`,
-  "  printf '\\n'",
+  `  ${bundleSkipGuard('f', `head -c ${META_HEAD_BYTES} "$f"; printf '\\n'`)}`,
   'done',
 ].join('\n');
 
 /** Discover native Kiro CLI sessions on a remote host (most-recent first). */
 export async function listRemoteKiroSessions(host: RemoteHost): Promise<DiscoveredSession[]> {
-  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), { timeoutMs: 20_000 });
+  const scope = `kiro:${host.name}`;
+  const res = await sshExec(host.ssh, loginShellCommand(BUNDLE_CMD), {
+    timeoutMs: 20_000,
+    input: `${bundleKnownStdin(scope)}\n`,
+  });
   if (res.code !== 0) {
     log.debug(`remote kiro discovery failed for ${host.name}: ${res.stderr.trim().slice(0, 120)}`);
     return [];
@@ -42,12 +46,19 @@ export async function listRemoteKiroSessions(host: RemoteHost): Promise<Discover
   for (const { fields, body } of parseBundle(res.stdout)) {
     // An empty event log means nothing was ever said (subagent/aborted stub).
     if (Number(fields[2]) === 0) continue;
-    const fallbackId = (fields[0] ?? '').replace(/^.*\//, '').replace(/\.json$/i, '');
-    const mtime = bundleMtimeMs(fields[1]);
+    const key = fields[0] ?? '';
+    const mtimeRaw = fields[1] ?? '';
+    const fallbackId = key.replace(/^.*\//, '').replace(/\.json$/i, '');
+    const mtime = bundleMtimeMs(mtimeRaw);
     // messageCount stays 0: counting prompts would mean reading every remote
     // event log (tens of MB) on each refresh.
-    const session = parseKiroMeta(body, fallbackId, { createdFallback: mtime, updatedAt: mtime });
-    if (session) sessions.push(session);
+    const session = body === '' ? cachedBundleSession(scope, key) : parseKiroMeta(body, fallbackId, { createdFallback: mtime, updatedAt: mtime });
+    if (!session) {
+      noteBundleKey(scope, key, mtimeRaw);
+      continue;
+    }
+    noteBundleSession(scope, key, mtimeRaw, session);
+    sessions.push(session);
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }

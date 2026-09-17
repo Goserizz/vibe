@@ -32,9 +32,9 @@ export function RequestQueuePane({ sessionId }: { sessionId: string }) {
     ...sending,
   ];
   return (
-    <section aria-label="Queued requests" className={cn('mb-2 overflow-hidden rounded-xl border border-white/10 bg-ink-900/90 text-[11px]', cli && 'font-mono')}>
+    <section aria-label="Queued requests" className={cn('mx-4 mb-2 overflow-hidden rounded-xl border border-white/10 bg-ink-900/90 text-[11px] md:mx-6', cli && 'font-mono')}>
       <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-        <Clock className="h-3.5 w-3.5 text-accent-soft" />
+        <Clock className="h-4 w-4 text-accent-soft" />
         <span className="text-slate-300">Next requests</span>
         <span className="text-slate-500">{items.length} queued{sending.length ? ` · ${sending.length} unconfirmed` : ''}</span>
         {items.length > 0 && (
