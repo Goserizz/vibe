@@ -1,12 +1,54 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/store';
-import { BlockView } from './blocks';
+import { BlockView, subagentUuidOf, taskBadgeClass, taskShortId } from './blocks';
 import { CliBlockView } from './CliBlocks';
 import { cn } from '../lib/format';
 import { outlineRenderWindow } from '@shared/conversationOutline';
 import { ConversationOutline } from './ConversationOutline';
 import { useConversationIndex } from './useConversationIndex';
 import type { ChatBlock } from '@shared/protocol';
+
+/** A consecutive run of tool blocks made by the same sub-agent, kept in
+ *  conversation order. Runs of ≥2 collapse into one labelled container so
+ *  parallel sub-agents' calls stop interleaving into an unreadable wall. */
+type ShownItem =
+  | { t: 'block'; block: ChatBlock }
+  | { t: 'run'; uuid: string; blocks: ChatBlock[] };
+
+function SubagentRun({ uuid, blocks, cli }: { uuid: string; blocks: ChatBlock[]; cli: boolean }) {
+  // Like the Thinking block: auto-open while any call is still running, then
+  // collapse; a manual toggle always wins.
+  const running = blocks.some((b) => b.kind === 'tool' && (b as { status?: string }).status === 'running');
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? running;
+  const viewportRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (open) viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight });
+  }, [open, blocks.length]);
+  return (
+    <div className={cn('my-1 overflow-hidden rounded-xl border border-white/10', cli ? 'bg-transparent' : 'bg-ink-900/30')}>
+      <button
+        type="button"
+        onClick={() => setManual(!open)}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition hover:bg-white/[0.03]"
+      >
+        <span className={cn('rounded-md border px-1.5 py-px font-mono text-[11px]', taskBadgeClass(uuid))}>
+          子代理 {taskShortId(uuid)}
+        </span>
+        <span className="text-[12px] text-slate-400">
+          {blocks.length} 次调用{running ? ' · 运行中' : ''}
+        </span>
+        {running && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />}
+        <span className="ml-auto text-[11px] text-slate-500">{open ? '收起' : '展开'}</span>
+      </button>
+      {open && (
+        <div ref={viewportRef} className="max-h-72 space-y-1.5 overflow-y-auto overscroll-contain border-t border-white/5 px-2.5 py-2">
+          {blocks.map((b) => (cli ? <CliBlockView key={b.id} block={b} /> : <BlockView key={b.id} block={b} />))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Blocks rendered at once. Paging keeps loaded history small; this bounds
  *  pathological sessions (thousands of blocks) so the DOM stays responsive. */
@@ -107,12 +149,39 @@ export function MessageList({
     if (el) el.scrollTop = el.scrollHeight;
   }, [sessionId]);
 
+  const hidden = window.start;
+  const shown = (blocks ?? EMPTY_BLOCKS).slice(window.start, window.end);
+  // Every block of a sub-agent lands in ONE container for that agent, anchored
+  // at the agent's first appearance (conversation order otherwise kept; later
+  // occurrences of the same agent are absorbed, main-agent blocks pass through).
+  // (Above the `!blocks` early return: hooks must run on every render.)
+  const items = useMemo<ShownItem[]>(() => {
+    const byUuid = new Map<string, ChatBlock[]>();
+    for (const b of shown) {
+      const uuid = b.kind === 'tool' ? subagentUuidOf(b) : undefined;
+      if (!uuid) continue;
+      const list = byUuid.get(uuid);
+      if (list) list.push(b);
+      else byUuid.set(uuid, [b]);
+    }
+    const out: ShownItem[] = [];
+    const emitted = new Set<string>();
+    for (const b of shown) {
+      const uuid = b.kind === 'tool' ? subagentUuidOf(b) : undefined;
+      if (!uuid) {
+        out.push({ t: 'block', block: b });
+        continue;
+      }
+      if (emitted.has(uuid)) continue;
+      emitted.add(uuid);
+      out.push({ t: 'run', uuid, blocks: byUuid.get(uuid)! });
+    }
+    return out;
+  }, [shown]);
+
   if (!blocks) {
     return <div className="flex-1" />;
   }
-
-  const hidden = window.start;
-  const shown = blocks.slice(window.start, window.end);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -163,20 +232,24 @@ export function MessageList({
                 )}
               </div>
             )}
-            {shown.map((b, i) => (
-              <Fragment key={b.id}>
-                {/* Turn boundary: a hairline between the previous answer and the
-                    user's next question (not before the first message). Drawn
-                    with border utilities so the high-contrast theme picks it
-                    up like every other hairline. */}
-                {b.kind === 'user' && (i > 0 || hidden > 0) && (
-                  <div className={cn('border-t', cli ? 'mt-2 border-ink-700' : 'mt-4 border-white/10')} />
-                )}
-                {b.kind === 'user' ? <div data-question-id={b.id} tabIndex={-1} className="question-anchor outline-none">
-                  {cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
-                </div> : cli ? <CliBlockView block={b} /> : <BlockView block={b} />}
-              </Fragment>
-            ))}
+            {items.map((item, i) =>
+              item.t === 'run' ? (
+                <SubagentRun key={`run-${item.uuid}-${i}`} uuid={item.uuid} blocks={item.blocks} cli={cli} />
+              ) : (
+                <Fragment key={item.block.id}>
+                  {/* Turn boundary: a hairline between the previous answer and the
+                      user's next question (not before the first message). Drawn
+                      with border utilities so the high-contrast theme picks it
+                      up like every other hairline. */}
+                  {item.block.kind === 'user' && (i > 0 || hidden > 0) && (
+                    <div className={cn('border-t', cli ? 'mt-2 border-ink-700' : 'mt-4 border-white/10')} />
+                  )}
+                  {item.block.kind === 'user' ? <div data-question-id={item.block.id} tabIndex={-1} className="question-anchor outline-none">
+                    {cli ? <CliBlockView block={item.block} /> : <BlockView block={item.block} />}
+                  </div> : cli ? <CliBlockView block={item.block} /> : <BlockView block={item.block} />}
+                </Fragment>
+              ),
+            )}
             {hiddenAfter > 0 && <button type="button" onClick={latest} className="my-4 self-center rounded-full border border-ink-600 bg-ink-900 px-4 py-2 text-xs text-slate-400 hover:text-slate-100">
               下方还有 {hiddenAfter} 条消息 · 回到最新
             </button>}

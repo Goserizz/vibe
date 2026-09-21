@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { Plus, Trash2, Check, X, Pencil, Menu as MenuIcon, Search, Settings, Star, Server, LogOut, Brain, Users, Monitor } from '../lib/icons';
 import { SessionStatusIcon } from './SessionStatusIcon';
 import { SessionMonitorBadge } from './SessionMonitorBadge';
@@ -23,6 +23,7 @@ interface SidebarProps {
 
 export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarProps) {
   const sessions = useStore((s) => s.sessions);
+  const projectNames = useStore((s) => s.projectNames);
   const activeId = useStore((s) => s.activeId);
   const signOut = useStore((s) => s.signOut);
   const searchQuery = useStore((s) => s.searchQuery);
@@ -107,7 +108,10 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
               </div>
             ) : (
               <ul className="space-y-0.5">
-                {sessions.map((s) => (
+                {/* Projects: pinned sessions grouped by host+cwd (auto-derived,
+                    custom names from the registry). Unpinned stay flat below. */}
+                <ProjectGroups sessions={sessions} names={projectNames} activeId={activeId} onClose={onClose} />
+                {sessions.filter((s) => !s.pinned).map((s) => (
                   <SessionItem
                     key={s.id}
                     session={s}
@@ -377,6 +381,163 @@ function SearchResults({
         );
       })}
     </ul>
+  );
+}
+
+/** Auto-derived project groups: pinned sessions sharing one host+cwd, shown
+ *  together under a collapsible header. Default title `host · basename`,
+ *  overridable via the persisted project-name registry (empty → default). */
+function ProjectGroups({
+  sessions,
+  names,
+  activeId,
+  onClose,
+}: {
+  sessions: SessionMeta[];
+  names: Record<string, string>;
+  activeId: string | null;
+  onClose: () => void;
+}) {
+  const renameProject = useStore((s) => s.renameProject);
+  const cli = useStore((s) => s.viewMode) === 'cli';
+  const groups = useMemo(() => {
+    const map = new Map<string, SessionMeta[]>();
+    for (const s of sessions) {
+      if (!s.pinned) continue;
+      const key = `${s.host ?? ''}::${s.cwd}`;
+      const arr = map.get(key);
+      if (arr) arr.push(s);
+      else map.set(key, [s]);
+    }
+    return [...map.entries()]
+      .map(([key, members]) => ({
+        key,
+        members: [...members].sort((a, b) => b.updatedAt - a.updatedAt),
+        latest: Math.max(...members.map((m) => m.updatedAt)),
+      }))
+      .sort((a, b) => b.latest - a.latest);
+  }, [sessions]);
+
+  if (!groups.length) return null;
+  return (
+    <>
+      {groups.map((g) => (
+        <ProjectGroup
+          key={g.key}
+          groupKey={g.key}
+          members={g.members}
+          customName={names[g.key]}
+          cli={cli}
+          activeId={activeId}
+          onClose={onClose}
+          onRename={(name) => {
+            const i = g.key.indexOf('::');
+            void renameProject(g.key.slice(0, i) || undefined, g.key.slice(i + 2), name);
+          }}
+        />
+      ))}
+      <li aria-hidden className="mx-2 my-1.5 border-t border-white/5" />
+    </>
+  );
+}
+
+function ProjectGroup({
+  groupKey,
+  members,
+  customName,
+  cli,
+  activeId,
+  onClose,
+  onRename,
+}: {
+  groupKey: string;
+  members: SessionMeta[];
+  customName: string | undefined;
+  cli: boolean;
+  activeId: string | null;
+  onClose: () => void;
+  onRename: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const i = groupKey.indexOf('::');
+  const host = groupKey.slice(0, i) || undefined;
+  const cwd = groupKey.slice(i + 2);
+  const fallback = `${host ? `${host} · ` : ''}${basename(cwd)}`;
+  const title = customName ?? fallback;
+
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (next !== title) onRename(next);
+  };
+
+  return (
+    <li>
+      <div className={cn('group flex items-center gap-1.5 px-2 py-1', cli && 'font-mono')}>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+          title={cwd}
+          aria-expanded={open}
+        >
+          <span
+            className={cn(
+              'select-none text-[10px] text-slate-500 transition-transform',
+              open ? 'rotate-90' : '',
+            )}
+          >
+            ▸
+          </span>
+          <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+            {title}
+          </span>
+          <span className="shrink-0 rounded bg-white/5 px-1 text-[10px] text-slate-500">{members.length}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDraft(title);
+            setEditing(true);
+          }}
+          className="opacity-0 transition group-hover:opacity-100"
+          title="重命名项目"
+          aria-label="重命名项目"
+        >
+          <Pencil className="h-3 w-3 text-slate-500 hover:text-slate-300" />
+        </button>
+      </div>
+      {editing && (
+        <div className="mb-1 flex items-center gap-1 px-3">
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commit();
+              if (e.key === 'Escape') setEditing(false);
+            }}
+            placeholder={fallback}
+            className="h-7 min-w-0 flex-1 rounded-md border border-ink-600 bg-ink-900 px-2 text-[12px] text-slate-200 outline-none focus:border-accent/60"
+          />
+          <button type="button" onClick={commit} aria-label="确认" className="rounded p-1 hover:bg-ink-800">
+            <Check className="h-3.5 w-3.5 text-slate-400" />
+          </button>
+          <button type="button" onClick={() => setEditing(false)} aria-label="取消" className="rounded p-1 hover:bg-ink-800">
+            <X className="h-3.5 w-3.5 text-slate-400" />
+          </button>
+        </div>
+      )}
+      {open && (
+        <ul className="space-y-0.5">
+          {members.map((s) => (
+            <SessionItem key={s.id} session={s} active={s.id === activeId} onClose={onClose} />
+          ))}
+        </ul>
+      )}
+    </li>
   );
 }
 

@@ -122,6 +122,7 @@ import { teardownDelegateSession } from '../vibot/delegate.js';
 import { handleMonitorMcp } from '../monitoring/mcp.js';
 import { monitorService } from '../monitoring/service.js';
 import { monitorStore, MonitorStoreUnavailableError } from '../monitoring/store.js';
+import { loadProjectNames, setProjectName, projectKey } from '../projects/registry.js';
 import { monitorInputSchema } from '../monitoring/validation.js';
 import type {
   AgentKind,
@@ -569,6 +570,28 @@ export function createApiRouter(): Router {
     } catch (error) {
       monitorError(res, error, 'could not list monitors');
     }
+  });
+
+  // -- Sidebar project groups (auto-derived from pinned sessions; only the
+  //    custom display names are persisted) -----------------------------------
+  router.get('/projects', (_req, res) => {
+    res.json({ names: loadProjectNames() });
+  });
+
+  const projectNameSchema = z.object({
+    host: z.string().trim().max(120).optional(),
+    cwd: z.string().trim().min(1).max(1024),
+    /** Empty clears the custom name and falls back to `host · basename`. */
+    name: z.string().trim().max(120),
+  });
+  router.put('/projects', (req, res) => {
+    const parsed = projectNameSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'invalid project name' });
+      return;
+    }
+    if (hostForbidden(res, accountOf(req).name, parsed.data.host ?? '')) return;
+    res.json({ names: setProjectName(projectKey(parsed.data.host, parsed.data.cwd), parsed.data.name) });
   });
 
   router.get('/monitor-events', (req, res) => {

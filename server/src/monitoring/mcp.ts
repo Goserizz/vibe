@@ -16,7 +16,13 @@ import {
 import type { McpServerDef, Monitor, MonitorInput } from '../../../shared/protocol.js';
 import type { MonitorCreateDraftToolInput } from './validation.js';
 
-const CAPABILITY_TTL_MS = 12 * 60 * 60_000;
+// 30 days: several agent CLIs (Devin, and the ACP family) accept MCP servers
+// on session/new but never refresh credentials on later session/load turns, so
+// a short-lived capability goes stale mid-session and every call 401s. The
+// token is HMAC-scoped to one owner+session; a month is a bounded, acceptable
+// exposure that outlives any realistic session. File-reconciled agents
+// (zcode/cursor/codex/devin) still rotate their copy every turn.
+const CAPABILITY_TTL_MS = 30 * 24 * 60 * 60_000;
 const MCP_NAME = 'vibe-monitor';
 const TOOLS = {
   list: 'monitor_list',

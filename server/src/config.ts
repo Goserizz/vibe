@@ -112,6 +112,8 @@ export const config = {
    * monitor tools are omitted from remote sessions (the UI/API still work). */
   monitorMcpUrl: process.env.VIBE_MONITOR_MCP_URL?.trim() || '',
   hostsFile: path.join(VIBE_HOME, 'hosts.json'),
+  /** Custom display names for auto-derived sidebar project groups. */
+  projectNamesFile: path.join(VIBE_HOME, 'projects.json'),
   /** MCP server registry + per-scope enable lists (global, local, per host). */
   mcpFile: path.join(VIBE_HOME, 'mcp.json'),
   /** OAuth tokens + registered clients for MCP-OAuth servers (secrets — 0600). */

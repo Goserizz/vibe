@@ -6,6 +6,7 @@ import {
   FileText,
   FilePen,
   Search,
+  Users,
   Globe,
   Wrench,
   CircleAlert,
@@ -42,7 +43,7 @@ export const BlockView = memo(function BlockView({ block, sessionId }: { block: 
     case 'thinking':
       return <ThinkingView block={block} />;
     case 'tool':
-      return <ToolView block={block} sessionId={sessionId} />;
+      return isTaskOutputBlock(block.name) ? <TaskOutputView block={block} /> : <ToolView block={block} sessionId={sessionId} />;
     case 'result':
       return <ResultView block={block} />;
     case 'error':
@@ -475,6 +476,122 @@ export function toolMeta(name: string, input: unknown): ToolMeta {
 function planTextOf(input: unknown): string {
   const plan = input && typeof input === 'object' ? (input as Record<string, unknown>).plan : undefined;
   return typeof plan === 'string' ? plan.trim() : '';
+}
+
+// ---------------------------------------------------------------------------
+// Sub-agent (background task) output
+//
+// Parallel sub-agents surface as TaskOutput tool calls whose results carry an
+// XML-ish wrapper. Rendered flat they interleave into an unreadable wall, so
+// each card shows a stable per-task colour badge, the retrieval status and a
+// one-line preview; the full body stays collapsed.
+// ---------------------------------------------------------------------------
+
+const TASK_BADGES = [
+  'border-sky-500/30 bg-sky-500/10 text-sky-300',
+  'border-violet-500/30 bg-violet-500/10 text-violet-300',
+  'border-amber-500/30 bg-amber-500/10 text-amber-300',
+  'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+  'border-rose-500/30 bg-rose-500/10 text-rose-300',
+];
+
+export function taskBadgeClass(taskId: string): string {
+  let h = 0;
+  for (let i = 0; i < taskId.length; i++) h = (h * 31 + taskId.charCodeAt(i)) >>> 0;
+  return TASK_BADGES[h % TASK_BADGES.length]!;
+}
+
+/** `exec_1ab0c525-…` → `1ab0` — the first uuid segment is unique per batch. */
+export function taskShortId(taskId: string): string {
+  const m = /[0-9a-f]{4}(?=[0-9a-f]*-)/.exec(taskId);
+  return m ? m[0]! : taskId.slice(-4);
+}
+
+export interface ParsedTaskOutput {
+  status: string;
+  taskId: string;
+  body: string;
+}
+
+export function parseTaskResult(result: string): ParsedTaskOutput {
+  const status = /<retrieval_status>(\w+)<\/retrieval_status>/.exec(result)?.[1] ?? '';
+  const taskId = /<task_id>([^<]+)<\/task_id>/.exec(result)?.[1] ?? '';
+  const body = result
+    .replace(/<retrieval_status>[^<]*<\/retrieval_status>/g, '')
+    .replace(/<task_id>[^<]*<\/task_id>/g, '')
+    .replace(/<\/?output>/g, '')
+    .replace(/^\s+/, '')
+    .replace(/\s+$/, '');
+  return { status, taskId, body };
+}
+
+/** `tool_subagent_agent_<uuid>_call_…` → the uuid: the sub-agent that made
+ *  this tool call. Main-agent tools carry no such prefix. */
+export function subagentUuidOf(block: { id?: string; toolUseId?: string }): string | undefined {
+  const m = /tool_subagent_agent_([0-9a-f-]{36})_/.exec(block.id ?? block.toolUseId ?? '');
+  return m ? m[1] : undefined;
+}
+
+function isTaskOutputBlock(name: string | undefined): boolean {
+  const n = (name ?? '').toLowerCase();
+  return n === 'taskoutput' || n === 'task_output' || n === 'agent' || n === 'task';
+}
+
+function TaskOutputView({ block }: { block: ToolBlock }) {
+  const input = (block.input ?? {}) as Record<string, unknown>;
+  const inputTaskId = typeof input.task_id === 'string' ? input.task_id : '';
+  const parsed = parseTaskResult(block.result ?? '');
+  // Agent/Task dispatch blocks carry their own identity (description +
+  // subagent_type); TaskOutput blocks reference the background task id.
+  const dispatchDesc = typeof input.description === 'string' ? input.description : '';
+  const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : '';
+  const taskId = inputTaskId || parsed.taskId || block.toolUseId || block.id;
+  const label = dispatchDesc
+    ? dispatchDesc.slice(0, 20)
+    : `子代理 ${taskShortId(taskId)}`;
+  const status = parsed.status || (block.isError ? 'error' : block.status === 'running' ? 'running' : 'success');
+  const preview = (parsed.body.split('\n').find((l) => l.trim()) ?? '').slice(0, 140);
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? false;
+  return (
+    <div className="animate-fade-in overflow-hidden rounded-xl border border-white/5 bg-ink-900/50">
+      <button
+        onClick={() => setManual(!open)}
+        className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-ink-800/40"
+      >
+        <Users className="h-4 w-4 shrink-0 text-slate-500" />
+        <span className={cn('max-w-[220px] shrink-0 truncate rounded-md border px-1.5 py-px text-[11px]', taskBadgeClass(taskId))}>
+          {label}
+        </span>
+        {agentType && (
+          <span className="shrink-0 rounded bg-white/5 px-1.5 py-px text-[10px] text-slate-400">{agentType}</span>
+        )}
+        <span
+          className={cn(
+            'shrink-0 rounded px-1.5 py-px text-[11px]',
+            status === 'success' ? 'bg-emerald-500/10 text-emerald-300'
+              : status === 'timeout' ? 'bg-amber-500/10 text-amber-300'
+                : status === 'running' ? 'bg-sky-500/10 text-sky-300 animate-pulse'
+                  : 'bg-rose-500/10 text-rose-300',
+          )}
+        >
+          {status === 'success' ? '完成' : status === 'timeout' ? '超时' : status === 'running' ? '收取中' : status || '未知'}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-slate-400">{preview}</span>
+        <ChevronRight className={cn('h-3.5 w-3.5 shrink-0 text-slate-600 transition-transform', open && 'rotate-90')} />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-white/5 px-3 py-2.5">
+          {dispatchDesc && agentType && (
+            <div className="text-[11px] text-slate-500">{agentType} · {dispatchDesc}</div>
+          )}
+          <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-slate-300">
+            {parsed.body || '（无输出）'}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ToolView({ block }: { block: ToolBlock; sessionId?: string }) {

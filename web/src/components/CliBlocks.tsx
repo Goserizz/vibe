@@ -10,7 +10,7 @@ import type {
   UserBlock,
 } from '@shared/protocol';
 import { Markdown } from './Markdown';
-import { CompactEditDiff, AttachmentChips, editChangeLines, toolKind, toolMeta, writeChangeLines } from './blocks';
+import { CompactEditDiff, AttachmentChips, editChangeLines, taskBadgeClass, taskShortId, parseTaskResult, toolKind, toolMeta, writeChangeLines } from './blocks';
 import { parseList, todoSnapshotFromBlock } from './TodoPane';
 import { beijingClock, beijingDateTime, cn, formatTokens } from '../lib/format';
 import { stripAttachments } from '../lib/attachments';
@@ -31,7 +31,9 @@ export const CliBlockView = memo(function CliBlockView({ block }: { block: ChatB
     case 'thinking':
       return <CliThinkingView block={block} />;
     case 'tool':
-      return <CliToolView block={block} />;
+      return ['taskoutput', 'task_output', 'agent', 'task'].includes((block.name ?? '').toLowerCase())
+        ? <CliTaskOutputView block={block} />
+        : <CliToolView block={block} />;
     case 'result':
       return <CliResultView block={block} />;
     case 'error':
@@ -68,6 +70,47 @@ function CliUserView({ block }: { block: UserBlock }) {
           {display}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Sub-agent output in terminal style: per-task colour tag + status, body
+ *  expands under the ⋯ bracket (mirrors blocks.tsx's TaskOutputView). */
+function CliTaskOutputView({ block }: { block: ToolBlock }) {
+  const input = (block.input ?? {}) as Record<string, unknown>;
+  const inputTaskId = typeof input.task_id === 'string' ? input.task_id : '';
+  const parsed = parseTaskResult(block.result ?? '');
+  const dispatchDesc = typeof input.description === 'string' ? input.description : '';
+  const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : '';
+  const taskId = inputTaskId || parsed.taskId || block.toolUseId || block.id;
+  const label = dispatchDesc ? dispatchDesc.slice(0, 20) : `子代理 ${taskShortId(taskId)}`;
+  const status = parsed.status || (block.isError ? 'error' : block.status === 'running' ? 'running' : 'success');
+  const preview = (parsed.body.split('\n').find((l) => l.trim()) ?? '').slice(0, 100);
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? false;
+  const statusText = status === 'success' ? '完成' : status === 'timeout' ? '超时' : status === 'running' ? '收取中' : status || '未知';
+  const statusClass = status === 'success' ? 'text-emerald-300' : status === 'timeout' ? 'text-amber-300' : status === 'running' ? 'text-sky-300 animate-pulse' : 'text-rose-300';
+  return (
+    <div className="font-mono text-[13px] leading-relaxed">
+      <button
+        type="button"
+        onClick={() => setManual(!open)}
+        className="flex w-full items-start gap-2 text-left transition hover:text-slate-100"
+      >
+        <span className="cli-gutter select-none text-accent-soft">◆</span>
+        <span className={cn('max-w-[180px] shrink-0 truncate rounded border border-current/30 px-1 text-[11px]', taskBadgeClass(taskId))}>
+          {label}
+        </span>
+        {agentType && <span className="shrink-0 rounded bg-white/5 px-1 text-[10px] text-slate-400">{agentType}</span>}
+        <span className={cn('shrink-0 text-[11px]', statusClass)}>{statusText}</span>
+        <span className="min-w-0 flex-1 truncate text-slate-400">{preview}</span>
+      </button>
+      {open && parsed.body && (
+        <div className="flex items-start gap-2">
+          <span className="cli-bracket select-none text-slate-600" aria-hidden />
+          <CliResultBody text={parsed.body} isError={status === 'error'} />
+        </div>
+      )}
     </div>
   );
 }

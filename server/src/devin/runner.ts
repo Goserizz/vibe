@@ -3,6 +3,7 @@ import { DevinAcpClient } from './acp.js';
 import { resolveDevinVariant } from './models.js';
 import { usageContextTokens } from '../claude/normalize.js';
 import { MAX_RETRIES, backoffFor, isContentEvent, mentionsTransient, sleep } from '../claude/retry.js';
+import { applyDevinMcp } from '../mcp/apply.js';
 import type { EffortLevel, McpServerDef, PermissionMode } from '../../../shared/protocol.js';
 import type { RunCallbacks, RunHandle } from '../claude/types.js';
 
@@ -55,6 +56,14 @@ export function startDevinRun(opts: DevinRunOptions, cb: RunCallbacks): RunHandl
   };
 
   const done = (async () => {
+    // Devin consults ~/.config/devin/mcp_config.json at process start and does
+    // not refresh an ACP-injected server's bearer on session/load, so re-write
+    // our entries (fresh 12h vibe-monitor capability) before the first spawn.
+    try {
+      await applyDevinMcp(opts.mcpServers ?? [], opts.remote ? { sshTarget: opts.remote.sshTarget } : undefined);
+    } catch (err) {
+      log.warn('devin mcp apply failed; continuing with ACP-injected servers only', err);
+    }
     for (let attempt = 0; ; attempt++) {
       const startedAt = Date.now();
       acpClient = new DevinAcpClient({ ...opts, modelId, resume }, wrappedCb);

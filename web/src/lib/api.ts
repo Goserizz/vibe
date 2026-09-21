@@ -116,6 +116,17 @@ export const api = {
 
   listMonitors: (signal?: AbortSignal) => request<{ monitors: Monitor[] }>('/monitors', { signal }).then((r) => r.monitors),
 
+  // -- Sidebar project groups (custom names only; groups derive from sessions) --
+
+  listProjectNames: (signal?: AbortSignal) =>
+    request<{ names: Record<string, string> }>('/projects', { signal }).then((r) => r.names),
+
+  renameProject: (host: string | undefined, cwd: string, name: string) =>
+    request<{ names: Record<string, string> }>('/projects', {
+      method: 'PUT',
+      body: JSON.stringify({ host: host ?? '', cwd, name }),
+    }).then((r) => r.names),
+
   listMonitorEvents: (monitorId?: string, limit = 100, signal?: AbortSignal) => {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (monitorId) qs.set('monitorId', monitorId);

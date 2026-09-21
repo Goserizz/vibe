@@ -289,6 +289,70 @@ export async function applyZcodeMcp(defs: McpServerDef[], remote?: RemoteTarget,
   }
 }
 
+// ---- Devin ~/.config/devin/mcp_config.json ---------------------------------
+
+function devinEntry(def: McpServerDef): Record<string, unknown> | undefined {
+  if (def.transport === 'stdio') {
+    if (!def.command) return undefined;
+    const entry: Record<string, unknown> = { transport: 'stdio', command: def.command };
+    if (def.args?.length) entry.args = def.args;
+    if (def.env && Object.keys(def.env).length) entry.env = def.env;
+    return entry;
+  }
+  if (!def.url) return undefined;
+  const entry: Record<string, unknown> = { transport: def.transport, url: def.url };
+  const headers = headersFor(def);
+  if (headers) entry.headers = headers;
+  return entry;
+}
+
+/** Reconcile `~/.config/devin/mcp_config.json` so Vibe-managed servers carry
+ *  fresh credentials each turn. Devin's ACP accepts mcpServers on session/new
+ *  but does not refresh an existing server's bearer on session/load — the
+ *  vibe-monitor capability (12h TTL) would go stale and every call 401. The
+ *  file is the store devin consults at process start, so writing it before the
+ *  spawn keeps the token current; user-authored entries are preserved (managed
+ *  names tracked in an external sidecar, like the ZCode bridge, so a strict
+ *  vendor parser never sees an unknown key). */
+export async function applyDevinMcp(defs: McpServerDef[], remote?: RemoteTarget): Promise<void> {
+  await refreshOauthTokens(defs);
+  const managed = defs.map((d) => d.name);
+  const desired: Record<string, unknown> = {};
+  for (const d of defs) {
+    const entry = devinEntry(d);
+    if (entry) desired[d.name] = entry;
+  }
+  const sig = JSON.stringify({ managed, desired });
+  if (sigCache.get(devinKey(remote)) === sig) return;
+
+  try {
+    const cfgRaw = await readManagedFile('~/.config/devin/mcp_config.json', remote);
+    const sideRaw = await readManagedFile('~/.vibe/devin-managed-mcp.json', remote);
+    const obj: Record<string, unknown> = cfgRaw.trim() ? safeJsonParse(cfgRaw) : {};
+    const servers: Record<string, unknown> =
+      obj.mcpServers && typeof obj.mcpServers === 'object' ? { ...(obj.mcpServers as Record<string, unknown>) } : {};
+    let prevManaged: string[] = [];
+    try {
+      const parsed = JSON.parse(sideRaw) as unknown;
+      if (Array.isArray(parsed)) prevManaged = parsed.filter((x): x is string => typeof x === 'string');
+    } catch { /* missing or invalid sidecar */ }
+    // Drop the names we managed last time, then merge the current set.
+    for (const n of prevManaged) delete servers[n];
+    for (const [n, e] of Object.entries(desired)) servers[n] = e;
+    obj.mcpServers = servers;
+
+    await writeManagedFile('~/.config/devin/mcp_config.json', JSON.stringify(obj, null, 2) + '\n', remote);
+    await writeManagedFile('~/.vibe/devin-managed-mcp.json', JSON.stringify(managed, null, 2) + '\n', remote);
+    sigCache.set(devinKey(remote), sig);
+  } catch (err) {
+    log.warn('devin mcp apply failed', err);
+  }
+}
+
+function devinKey(remote?: RemoteTarget): string {
+  return `devin:${remote?.sshTarget ?? 'local'}`;
+}
+
 // ---- shared local/remote file helpers ---------------------------------------
 
 async function readManagedFile(remotePath: string, remote?: RemoteTarget): Promise<string> {

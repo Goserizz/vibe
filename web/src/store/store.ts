@@ -139,6 +139,9 @@ interface StoreState {
   monitorLoading: boolean;
   monitorError: string | null;
   projects: ProjectDir[];
+  /** Custom display names for sidebar project groups (key `host::cwd` → name).
+   *  The groups themselves derive from pinned sessions; only names persist. */
+  projectNames: Record<string, string>;
   hosts: RemoteHost[];
   /** MCP server registry + per-scope enable lists. */
   mcp: McpConfigSnapshot;
@@ -197,6 +200,9 @@ interface StoreState {
   refreshSessions: () => Promise<void>;
   loadSessionMonitors: () => Promise<void>;
   loadProjects: () => Promise<void>;
+  loadProjectNames: () => Promise<void>;
+  /** Set (empty string resets to the default `host · basename` title). */
+  renameProject: (host: string | undefined, cwd: string, name: string) => Promise<void>;
   loadHosts: () => Promise<void>;
   /** Load Cursor models for the local CLI, or for a remote host (with its proxy). */
   loadCursorModels: (host?: string) => Promise<void>;
@@ -571,6 +577,7 @@ export const useStore = create<StoreState>((set, get) => {
     monitorLoading: false,
     monitorError: null,
     projects: [],
+    projectNames: {},
     hosts: [],
     mcp: { servers: [], enabled: {}, oauth: {} },
     presets: [],
@@ -633,6 +640,7 @@ export const useStore = create<StoreState>((set, get) => {
         get().refreshSessions(),
         // Recent projects + local CLI probing are local-machine features.
         ...(admin ? [get().loadProjects()] : []),
+        get().loadProjectNames(),
         get().loadHosts(),
         get().loadMcp(),
         get().loadPresets(),
@@ -695,6 +703,24 @@ export const useStore = create<StoreState>((set, get) => {
         set({ projects });
       } catch {
         /* ignore */
+      }
+    },
+
+    async loadProjectNames() {
+      try {
+        set({ projectNames: await api.listProjectNames() });
+      } catch {
+        /* ignore — groups fall back to default titles */
+      }
+    },
+
+    async renameProject(host, cwd, name) {
+      const prev = get().projectNames;
+      try {
+        set({ projectNames: await api.renameProject(host, cwd, name) });
+      } catch {
+        set({ toast: 'Failed to rename project' });
+        set({ projectNames: prev });
       }
     },
 

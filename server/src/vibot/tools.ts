@@ -9,6 +9,7 @@ import { hostRegistry } from '../remote/hosts.js';
 import { parseSessionId } from '../remote/sessionId.js';
 import { mcpRegistry } from '../mcp/registry.js';
 import { presetRegistry } from '../presets/registry.js';
+import { monitorStore } from '../monitoring/store.js';
 import { createLocalWorkdir, validateDir } from '../projects.js';
 import { memoryStore } from './memories.js';
 import { loadVibotConfig } from './config.js';
@@ -93,6 +94,20 @@ export const VIBOT_TOOLS: LlmToolDef[] = [
       name: 'list_hosts',
       description: 'List the machines Vibe knows about: the local machine plus any remote SSH hosts.',
       parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_monitors',
+      description: 'List Vibe monitors (periodic health checks): name, enabled state, schedule, target host, current health (healthy / unhealthy / paused / checking), last check time and summary, last error, and the session it is attached to (id + title + agent). Pass the returned sessionId to read_session to see what that monitor\'s conversation actually did — e.g. how the agent handled the last alert.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Optional monitor-name substring filter.' },
+          host: { type: 'string', description: 'Optional host filter (e.g. msi, macintosh, or "local").' },
+        },
+      },
     },
   },
   {
@@ -674,6 +689,39 @@ export async function dispatchTool(name: string, args: Record<string, any>, ctx:
             remote: hostRegistry.list().map((h) => ({ name: h.name, ssh: h.ssh, proxy: h.proxy })),
           }),
         );
+      case 'list_monitors': {
+        // Vibot conversations are admin-facing; monitors are owned per
+        // account, so aggregate the owners the store knows about.
+        const owners = new Set<string>(['admin', ...hostRegistry.list().map((h) => h.owner).filter(Boolean) as string[]]);
+        const name = typeof args.name === 'string' ? args.name.trim().toLowerCase() : '';
+        const host = typeof args.host === 'string' ? args.host.trim().toLowerCase() : '';
+        const rows: unknown[] = [];
+        for (const owner of owners) {
+          for (const m of monitorStore.list(owner)) {
+            if (name && !m.name.toLowerCase().includes(name)) continue;
+            if (host && String(m.host ?? 'local').toLowerCase() !== host) continue;
+            // Attach the monitor's conversation metadata so the model can
+            // chain straight into read_session with the id.
+            const session = m.sessionId ? sessionStore.get(m.sessionId) : undefined;
+            rows.push({
+              name: m.name,
+              enabled: m.enabled,
+              status: m.status,
+              intervalMinutes: Math.round(m.intervalMs / 60_000),
+              host: m.host ?? 'local',
+              session: session
+                ? { id: session.id, title: session.title, agent: session.agent ?? 'claude', messages: session.messageCount }
+                : (m.sessionId ?? null),
+              lastCheckAt: m.lastCheckAt ? new Date(m.lastCheckAt).toISOString() : null,
+              lastSummary: m.lastSummary?.slice(0, 200) ?? null,
+              lastError: m.lastError ? String(m.lastError).slice(0, 200) : null,
+              consecutiveFailures: m.consecutiveFailures,
+              openIncident: m.activeEventId ? (m.status === 'firing' || m.status === 'error' ? true : 'resolved-pending') : null,
+            });
+          }
+        }
+        return clip(JSON.stringify({ monitors: rows }));
+      }
       case 'ask_user_question': {
         if (!ctx.convId) return 'Error: ask_user_question requires a conversation context.';
         const parsed = parseAskQuestions(args.questions);
