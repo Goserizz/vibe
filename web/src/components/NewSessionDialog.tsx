@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { X, FolderGit2, Folder, Loader2, Check, AlertCircle, ChevronDown, BookmarkPlus } from '../lib/icons';
+import { X, FolderGit2, Folder, Loader2, Check, AlertCircle, ChevronDown, BookmarkPlus, Star } from '../lib/icons';
 import type { AgentKind, EffortLevel, PermissionMode } from '@shared/protocol';
 import { useStore } from '../store/store';
 import { api } from '../lib/api';
@@ -7,7 +7,7 @@ import { basename, cn, AGENTS, agentLabel, defaultEffortForAgent, defaultFusionS
 import { FusionModelPicker } from './FusionModelPicker';
 import { loadNewSessionPrefs, saveNewSessionPrefs } from '../lib/newSessionPrefs';
 
-export function NewSessionDialog({ onClose }: { onClose: () => void }) {
+export function NewSessionDialog({ onClose, initial }: { onClose: () => void; initial?: { host?: string; cwd?: string; pinned?: boolean } }) {
   const projects = useStore((s) => s.projects);
   const sessions = useStore((s) => s.sessions);
   const hosts = useStore((s) => s.hosts);
@@ -42,10 +42,12 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   // Restore last create options (not cwd/title). Lazy so we only read storage once.
   const saved = useMemo(() => loadNewSessionPrefs(), []);
 
-  // '' = local machine; otherwise a remote host name.
-  const [host, setHost] = useState(saved?.host ?? '');
-  const [cwd, setCwd] = useState('');
+  // '' = local machine; otherwise a remote host name. A caller-supplied
+  // `initial` (e.g. the sidebar project "+" button) wins over saved prefs.
+  const [host, setHost] = useState(initial?.host ?? saved?.host ?? '');
+  const [cwd, setCwd] = useState(initial?.cwd ?? '');
   const [title, setTitle] = useState('');
+  const [pinned, setPinned] = useState(initial?.pinned ?? false);
   const [agent, setAgent] = useState<AgentKind>(saved?.agent ?? 'claude');
   const [model, setModel] = useState(saved?.model ?? defaultModel);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
@@ -56,8 +58,8 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const [naming, setNaming] = useState(false);
   const [nameInput, setNameInput] = useState('');
   const [savingPreset, setSavingPreset] = useState(false);
-  const [query, setQuery] = useState('');
-  const [pathState, setPathState] = useState<'idle' | 'checking' | 'ok' | 'bad'>('idle');
+  const [query, setQuery] = useState(initial?.cwd ?? '');
+  const [pathState, setPathState] = useState<'idle' | 'checking' | 'ok' | 'bad'>(initial?.cwd ? 'ok' : 'idle');
   // When true, skip the working-directory picker: the server creates a throwaway folder.
   const [autoCwd, setAutoCwd] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -239,7 +241,9 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
         if (s.host === host && !s.ephemeral && !seen.has(s.cwd)) seen.set(s.cwd, { path: s.cwd, name: basename(s.cwd) });
       }
     } else {
-      for (const p of projects) {
+      // Guard: a stale/mis-shaped /projects response once left `projects`
+      // undefined and crashed this memo when picking the local machine.
+      for (const p of projects ?? []) {
         if (!seen.has(p.path)) seen.set(p.path, { path: p.path, name: p.name });
       }
       for (const s of sessions) {
@@ -358,8 +362,8 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
     const base = { model, permissionMode, effort, agent, host: host || undefined };
     const ok = await createSession(
       autoCwd
-        ? { ...base, autoCwd: true, title: title.trim() || undefined }
-        : { ...base, cwd: dir, title: title.trim() || basename(dir) },
+        ? { ...base, autoCwd: true, title: title.trim() || undefined, pinned: pinned || undefined }
+        : { ...base, cwd: dir, title: title.trim() || basename(dir), pinned: pinned || undefined },
     );
     setCreating(false);
     if (!ok) return;
@@ -589,12 +593,29 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
             />
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-400">Title</label>
-              <input
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Optional"
-                className="w-full rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 text-[13px] text-slate-200 outline-none backdrop-blur-md transition focus:border-accent/60"
-              />
+              <div className="flex items-center gap-2">
+                <input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Optional"
+                  className="w-full rounded-lg border border-ink-700 bg-ink-900/35 px-3 py-2 text-[13px] text-slate-200 outline-none backdrop-blur-md transition focus:border-accent/60"
+                />
+                <button
+                  type="button"
+                  onClick={() => setPinned((p) => !p)}
+                  aria-pressed={pinned}
+                  title={pinned ? '创建后取消置顶' : '创建后置顶（加入项目分组）'}
+                  className={cn(
+                    'flex h-[38px] shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[12px] transition',
+                    pinned
+                      ? 'border-amber-400/40 bg-amber-400/10 text-amber-300'
+                      : 'border-ink-700 bg-ink-900/35 text-slate-400 hover:text-slate-200',
+                  )}
+                >
+                  <Star className="h-3.5 w-3.5" fill={pinned ? 'currentColor' : 'none'} />
+                  置顶
+                </button>
+              </div>
             </div>
           </div>
 

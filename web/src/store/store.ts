@@ -256,7 +256,7 @@ interface StoreState {
   /** Fetch the next older history page for an open conversation. No-op when
    *  none is left or a request is already in flight. */
   loadOlder: (id: string, signal?: AbortSignal) => Promise<void>;
-  createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string }) => Promise<boolean>;
+  createSession: (input: { cwd?: string; autoCwd?: boolean; model?: string; permissionMode?: PermissionMode; effort?: EffortLevel; agent?: AgentKind; title?: string; host?: string; pinned?: boolean }) => Promise<boolean>;
   renameSession: (id: string, title: string) => Promise<void>;
   /** 把会话切换成另一个 agent（历史无损保留）。返回保真等级，失败返回 null。 */
   switchSessionAgent: (
@@ -700,7 +700,7 @@ export const useStore = create<StoreState>((set, get) => {
     async loadProjects() {
       try {
         const projects = await api.listProjects();
-        set({ projects });
+        set({ projects: Array.isArray(projects) ? projects : [] });
       } catch {
         /* ignore */
       }
@@ -1150,7 +1150,15 @@ export const useStore = create<StoreState>((set, get) => {
 
     async createSession(input) {
       try {
-        const session = await api.createSession(input);
+        let session = await api.createSession(input);
+        // Pin after creation (the create API has no pinned field); a failure
+        // here must not lose the session, so fall through with the unpinned copy.
+        if (input.pinned) {
+          try {
+            await api.setSessionPinned(session.id, true);
+            session = { ...session, pinned: true };
+          } catch { /* keep unpinned */ }
+        }
         set((s) => ({ sessions: [session, ...s.sessions.filter((x) => x.id !== session.id)].sort(compareSessions) }));
         await get().openSession(session.id);
         return true;

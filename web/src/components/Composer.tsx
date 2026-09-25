@@ -129,6 +129,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
             const msg = first?.reason instanceof ApiError ? first.reason.message : 'Upload failed';
             setToast(paths.length ? `Uploaded ${paths.length}, ${failed} failed` : msg);
           }
+          if (failed && !paths.length) {
+            // Every upload failed: sending the bare text would silently drop
+            // the files the user attached. Keep the message + chips in place
+            // so the failure is obvious and the send can be retried.
+            return;
+          }
         } finally {
           setUploading(false);
         }

@@ -130,6 +130,10 @@ export function sshExec(
       clearTimeout(timer);
       const stdout = Buffer.concat(outChunks).toString('utf8');
       const stderr = Buffer.concat(errChunks).toString('utf8');
+      // Temporary observability: which probe moves the periodic MBs?
+      if (outBytes > 100_000) {
+        console.log(`[LARGE-SSH] ${target} ${Math.round(outBytes / 1024)}KB :: ${remoteCmd.replace(/\s+/g, ' ').slice(0, 160)}`);
+      }
       resolve({ code, stdout, stderr: extraErr ? `${stderr}${extraErr}` : stderr, timedOut });
     };
     child.on('error', (e) => finish(-1, e instanceof Error ? e.message : String(e)));

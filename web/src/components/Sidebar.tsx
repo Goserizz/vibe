@@ -17,7 +17,8 @@ import { MonitorDialog } from './MonitorDialog';
 interface SidebarProps {
   open: boolean;
   onClose: () => void;
-  onNewSession: () => void;
+  /** Optional preset (project host+cwd, pinned) — the project "+" button. */
+  onNewSession: (preset?: { host?: string; cwd?: string; pinned?: boolean }) => void;
   onOpenVibot: () => void;
 }
 
@@ -110,7 +111,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
               <ul className="space-y-0.5">
                 {/* Projects: pinned sessions grouped by host+cwd (auto-derived,
                     custom names from the registry). Unpinned stay flat below. */}
-                <ProjectGroups sessions={sessions} names={projectNames} activeId={activeId} onClose={onClose} />
+                <ProjectGroups sessions={sessions} names={projectNames} activeId={activeId} onClose={onClose} onNewSession={onNewSession} />
                 {sessions.filter((s) => !s.pinned).map((s) => (
                   <SessionItem
                     key={s.id}
@@ -195,7 +196,7 @@ export function Sidebar({ open, onClose, onNewSession, onOpenVibot }: SidebarPro
             </div>
             <div className="flex items-center gap-1.5">
               <button
-                onClick={onNewSession}
+                onClick={() => onNewSession()}
                 title="New session"
                 className={cn(
                   'flex h-8 w-8 items-center justify-center rounded-lg border transition',
@@ -392,11 +393,13 @@ function ProjectGroups({
   names,
   activeId,
   onClose,
+  onNewSession,
 }: {
   sessions: SessionMeta[];
   names: Record<string, string>;
   activeId: string | null;
   onClose: () => void;
+  onNewSession: (preset?: { host?: string; cwd?: string; pinned?: boolean }) => void;
 }) {
   const renameProject = useStore((s) => s.renameProject);
   const cli = useStore((s) => s.viewMode) === 'cli';
@@ -421,21 +424,26 @@ function ProjectGroups({
   if (!groups.length) return null;
   return (
     <>
-      {groups.map((g) => (
-        <ProjectGroup
-          key={g.key}
-          groupKey={g.key}
-          members={g.members}
-          customName={names[g.key]}
-          cli={cli}
-          activeId={activeId}
-          onClose={onClose}
-          onRename={(name) => {
-            const i = g.key.indexOf('::');
-            void renameProject(g.key.slice(0, i) || undefined, g.key.slice(i + 2), name);
-          }}
-        />
-      ))}
+      {groups.map((g) => {
+        const i = g.key.indexOf('::');
+        return (
+          <ProjectGroup
+            key={g.key}
+            groupKey={g.key}
+            members={g.members}
+            customName={names[g.key]}
+            cli={cli}
+            activeId={activeId}
+            onClose={onClose}
+            onRename={(name) => {
+              void renameProject(g.key.slice(0, i) || undefined, g.key.slice(i + 2), name);
+            }}
+            onNewInProject={() => {
+              onNewSession({ host: g.key.slice(0, i) || undefined, cwd: g.key.slice(i + 2), pinned: true });
+            }}
+          />
+        );
+      })}
       <li aria-hidden className="mx-2 my-1.5 border-t border-white/5" />
     </>
   );
@@ -449,6 +457,7 @@ function ProjectGroup({
   activeId,
   onClose,
   onRename,
+  onNewInProject,
 }: {
   groupKey: string;
   members: SessionMeta[];
@@ -457,6 +466,7 @@ function ProjectGroup({
   activeId: string | null;
   onClose: () => void;
   onRename: (name: string) => void;
+  onNewInProject: () => void;
 }) {
   const [open, setOpen] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -495,6 +505,15 @@ function ProjectGroup({
             {title}
           </span>
           <span className="shrink-0 rounded bg-white/5 px-1 text-[10px] text-slate-500">{members.length}</span>
+        </button>
+        <button
+          type="button"
+          onClick={onNewInProject}
+          className="opacity-0 transition group-hover:opacity-100"
+          title="在此项目中新建对话"
+          aria-label="在此项目中新建对话"
+        >
+          <Plus className="h-3.5 w-3.5 text-slate-500 hover:text-slate-300" />
         </button>
         <button
           type="button"

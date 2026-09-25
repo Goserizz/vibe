@@ -20,6 +20,12 @@ export interface ZcodeRunnerDeps {
  *  pass) but a setup request's reply is lost — the setup timeout rejects with
  *  it, and a backoff retry over a fresh connection clears it. */
 const TRANSPORT_DEATH = /exited mid-turn|message authentication code incorrect|ssh_dispatch_run_fatal|transport stalled/i;
+/** SQLite write-lock contention: concurrent zcode sessions on one host share a
+ *  single db.sqlite; the loser's turn fails wholesale. The turn transaction
+ *  rolled back on the host, so a retry (even after streamed partial output)
+ *  re-runs cleanly — same contract as transport death. No cross-session
+ *  mutex: turns stay concurrent and simply retry after a few seconds. */
+const SQLITE_LOCK = /ERR_SQLITE_ERROR|database is locked|SQLite migration lock/i;
 
 interface Outcome {
   transient: boolean;
@@ -90,16 +96,24 @@ export function startZcodeRun(opts: ZcodeRunOptions, cb: RunCallbacks, deps: Zco
       }
       // Transport death can strike mid-stream, after content already streamed —
       // still retryable (the resume picks up the remote session state), but
-      // capped tighter than the generic case to avoid a resume storm.
+      // capped tighter than the generic case to avoid a resume storm. A SQLite
+      // lock conflict behaves the same: the failed turn rolled back on the
+      // host, so even a turn that streamed partial output re-runs cleanly.
       const transportDeath = Boolean(outcome.error && TRANSPORT_DEATH.test(outcome.error));
-      if (outcome.transient && (!producedAny || transportDeath) && attempt < (transportDeath ? 3 : MAX_RETRIES)) {
-        const backoff = backoffFor(attempt);
-        const cap = transportDeath ? 3 : MAX_RETRIES;
-        log.warn(`zcode transient error${transportDeath ? ' (transport death)' : ''}, retry ${attempt + 1}/${cap} in ${backoff}ms`);
-        if (transportDeath && producedAny) {
+      const lockConflict = Boolean(outcome.error && SQLITE_LOCK.test(outcome.error));
+      const retryAnyway = transportDeath || lockConflict;
+      // Lock contention on a busy host can outlast a short window (a giant
+      // turn may hold the writer for minutes), so give locks a much longer
+      // ladder: 8 tries with the backoff capped at ~30s ≈ 3 minutes total.
+      const cap = lockConflict ? 8 : retryAnyway ? 3 : MAX_RETRIES;
+      if (outcome.transient && (!producedAny || retryAnyway) && attempt < cap) {
+        const raw = backoffFor(attempt);
+        const backoff = lockConflict ? Math.min(raw, 30_000) : raw;
+        log.warn(`zcode transient error${retryAnyway ? ` (${transportDeath ? 'transport death' : 'db lock'})` : ''}, retry ${attempt + 1}/${cap} in ${backoff}ms`);
+        if (retryAnyway && producedAny) {
           wrappedCb.onEvent({
             k: 'error',
-            text: `⚠️ SSH 链路中断（传输数据损坏），${Math.round(backoff / 1000)}s 后自动续跑（第 ${attempt + 1}/3 次）…`,
+            text: `⚠️ ${transportDeath ? 'SSH 链路中断' : '数据库锁冲突（同主机其它会话占用）'}，${Math.round(backoff / 1000)}s 后自动重试（第 ${attempt + 1}/${cap} 次）…`,
           });
         }
         try {

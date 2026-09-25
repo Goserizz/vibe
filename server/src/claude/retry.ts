@@ -35,7 +35,10 @@ export function isTransientError(err: unknown): boolean {
  *  retry re-dials a fresh connection and resumes cleanly (nothing streamed
  *  yet). */
 export function mentionsTransient(text: string): boolean {
-  return /529|overloaded|internal error|app-server closed|kex_exchange_identification|http\/2 stream closed|RetriableError|exited mid-turn|message authentication code incorrect|ssh_dispatch_run_fatal|transport stalled|访问量过大|过载/i.test(text);
+  // "database is locked" / ERR_SQLITE_ERROR: two concurrent sessions on one
+  // host contend for the single zcode db; the loser's turn fails while the
+  // holder's long transaction drains — a retry after backoff lands cleanly.
+  return /529|overloaded|internal error|app-server closed|kex_exchange_identification|http\/2 stream closed|RetriableError|exited mid-turn|message authentication code incorrect|ssh_dispatch_run_fatal|transport stalled|访问量过大|过载|ERR_SQLITE_ERROR|database is locked/i.test(text);
 }
 
 /** Backoff (ms) for attempt N (0-based): base * 2^N + small jitter. */

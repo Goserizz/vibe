@@ -74,10 +74,12 @@ export function bundleKnownStdin(scope: string): string {
 /** First line every incremental bundle command needs: capture the known-set. */
 export const BUNDLE_KNOWN_HEADER = 'KNOWN=$(cat)';
 
-/** Skip the body when the item's key+mtime is already known (shell vars
- *  `$f`/`$m` by default; pass the item's path variable if it differs). */
+/** Skip the body when the item's key+mtime is already known. `fileVar` is the
+ *  NAME of the shell variable holding the item's path ($f by default; grok
+ *  keys on $d) — it must interpolate as a shell variable reference, not the
+ *  literal letter, or the pattern never matches and nothing is ever skipped. */
 export function bundleSkipGuard(fileVar: string, headCmd: string): string {
-  return `case "$KNOWN" in *"|${fileVar}:$m|"*) ;; *) ${headCmd} ;; esac`;
+  return `case "$KNOWN" in *"|$${fileVar}:$m|"*) ;; *) ${headCmd} ;; esac`;
 }
 
 /** Cached session for an unchanged item (empty body), if we have one. */

@@ -199,12 +199,6 @@ function askDecisionToAcp(params: CursorAskQuestion, decision: PermissionDecisio
   return { outcome: { outcome: 'answered', answers } };
 }
 
-/** cursor-agent on some hosts (observed: macOS + API-key auth) streams every
- *  session/update for the turn but never answers the session/prompt request,
- *  leaving the runner awaiting forever ("running", unstoppable). Once output
- *  has flowed, this much silence means the turn is over. */
-const PROMPT_IDLE_FINALIZE_MS = 90_000;
-
 /**
  * One Cursor ACP process for a single turn (initialize → prompt → exit).
  * Maps streaming updates to LiveEvents and interactive methods to requestPermission.
@@ -216,8 +210,6 @@ export class CursorAcpClient {
   private buffer = '';
   private stderr = '';
   private aborted = false;
-  /** Wall clock of the last session/update; the prompt idle guard reads it. */
-  private lastUpdateAt = 0;
   private ignoreUpdates = false;
   private sessionId: string | null = null;
   private stream: { id: string; kind: 'assistant' | 'thinking'; text: string } | null = null;
@@ -350,38 +342,6 @@ export class CursorAcpClient {
     return this.sessionId;
   }
 
-  /** session/prompt with a completion guard: once at least one update arrived
-   *  for this prompt and then none for PROMPT_IDLE_FINALIZE_MS, finalize the
-   *  turn instead of waiting for a response that some cursor-agent builds
-   *  never send. Turns with zero output keep the plain request semantics. */
-  private async requestPromptWithIdleGuard(params: unknown): Promise<unknown> {
-    const baseline = this.lastUpdateAt;
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setInterval(() => {
-        if (this.aborted || this.closed) {
-          settle(() => resolve(undefined));
-          return;
-        }
-        if (this.lastUpdateAt <= baseline) return;
-        if (Date.now() - this.lastUpdateAt >= PROMPT_IDLE_FINALIZE_MS) {
-          log.warn('cursor acp session/prompt unanswered after final output; finalizing turn (idle guard)');
-          settle(() => resolve(undefined));
-        }
-      }, 5_000);
-      const settle = (fn: () => void): void => {
-        if (settled) return;
-        settled = true;
-        clearInterval(timer);
-        fn();
-      };
-      this.request('session/prompt', params).then(
-        (result) => settle(() => resolve(result)),
-        (error) => settle(() => reject(error)),
-      );
-    });
-  }
-
   async run(): Promise<{ error?: string }> {
     const spawnSpec = buildAcpSpawn(this.opts);
     if (!spawnSpec.bin) {
@@ -430,7 +390,7 @@ export class CursorAcpClient {
 
       await this.applySessionConfig();
 
-      await this.requestPromptWithIdleGuard({
+      await this.request('session/prompt', {
         sessionId: this.sessionId,
         prompt: [{ type: 'text', text: this.opts.prompt }],
       });
@@ -592,7 +552,6 @@ export class CursorAcpClient {
 
   private handleUpdate(update: any): void {
     if (!update || typeof update !== 'object') return;
-    this.lastUpdateAt = Date.now();
     const kind = update.sessionUpdate;
 
     if (kind === 'agent_message_chunk') {

@@ -364,7 +364,9 @@ async function writeRemoteAttachment(target: string, slug: string, name: string,
   if (mk.code !== 0) throw new HttpError(400, (mk.stderr.trim() || 'mkdir failed').slice(0, 500));
   const r = await sshExec(target, loginShellCommand(`base64 -d > ${shQuote(dest)}`), {
     input: body.toString('base64'),
-    timeoutMs: 120_000,
+    // Base64 inflates by ~4/3 and slow links (observed ~15KB/s on a congested
+    // tunnel) need minutes for multi-MB files; a flat 120s dropped large PDFs.
+    timeoutMs: Math.min(600_000, Math.max(120_000, Math.ceil((body.length * 4 / 3) / 15_000) * 1000)),
   });
   if (r.timedOut) throw new HttpError(504, 'write timed out');
   if (r.code !== 0) throw new HttpError(400, (r.stderr.trim() || 'write failed').slice(0, 500));
@@ -815,7 +817,11 @@ export function createApiRouter(): Router {
   });
 
   // Recent local working directories — local machine info, admin-only.
-  router.get('/projects', requireAdmin, (_req, res) => {
+  // Must NOT share GET /projects with the sidebar name map above: Express
+  // keeps only the first match, which left listProjects() reading `names`
+  // and writing `projects: undefined` into the store (New Session → Local
+  // machine white-screened on `for (const p of projects)`).
+  router.get('/projects/recent', requireAdmin, (_req, res) => {
     res.json({ projects: getRecentProjects() });
   });
 

@@ -83,12 +83,19 @@ function CliTaskOutputView({ block }: { block: ToolBlock }) {
   const dispatchDesc = typeof input.description === 'string' ? input.description : '';
   const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : '';
   const taskId = inputTaskId || parsed.taskId || block.toolUseId || block.id;
-  const label = dispatchDesc ? dispatchDesc.slice(0, 20) : `子代理 ${taskShortId(taskId)}`;
-  const status = parsed.status || (block.isError ? 'error' : block.status === 'running' ? 'running' : 'success');
+  // Background commands (local_bash) are not sub-agents — label them apart.
+  const isBackgroundTask = parsed.taskType === 'local_bash';
+  const label = dispatchDesc ? dispatchDesc.slice(0, 20) : `${isBackgroundTask ? '后台任务' : '子代理'} ${taskShortId(taskId)}`;
+  // Retrieval timeout + task still running → show the task's own live state.
+  const taskLive = parsed.taskStatus === 'running' || parsed.taskStatus === 'pending' || parsed.taskStatus === 'in_progress';
+  const status = taskLive && (parsed.status === 'timeout' || parsed.status === '')
+    ? 'running'
+    : parsed.status || (block.isError ? 'error' : block.status === 'running' ? 'running' : 'success');
+  const kind = isBackgroundTask ? '' : parsed.taskType;
   const preview = (parsed.body.split('\n').find((l) => l.trim()) ?? '').slice(0, 100);
   const [manual, setManual] = useState<boolean | null>(null);
   const open = manual ?? false;
-  const statusText = status === 'success' ? '完成' : status === 'timeout' ? '超时' : status === 'running' ? '收取中' : status || '未知';
+  const statusText = status === 'success' ? '完成' : status === 'timeout' ? '超时' : status === 'running' ? '运行中' : status || '未知';
   const statusClass = status === 'success' ? 'text-emerald-300' : status === 'timeout' ? 'text-amber-300' : status === 'running' ? 'text-sky-300 animate-pulse' : 'text-rose-300';
   return (
     <div className="font-mono text-[13px] leading-relaxed">
@@ -101,7 +108,7 @@ function CliTaskOutputView({ block }: { block: ToolBlock }) {
         <span className={cn('max-w-[180px] shrink-0 truncate rounded border border-current/30 px-1 text-[11px]', taskBadgeClass(taskId))}>
           {label}
         </span>
-        {agentType && <span className="shrink-0 rounded bg-white/5 px-1 text-[10px] text-slate-400">{agentType}</span>}
+        {(agentType || kind) && <span className="shrink-0 rounded bg-white/5 px-1 text-[10px] text-slate-400">{agentType || kind}</span>}
         <span className={cn('shrink-0 text-[11px]', statusClass)}>{statusText}</span>
         <span className="min-w-0 flex-1 truncate text-slate-400">{preview}</span>
       </button>

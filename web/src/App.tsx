@@ -25,6 +25,13 @@ export default function App() {
   const phase = useStore((s) => s.phase);
   const init = useStore((s) => s.init);
   const [newOpen, setNewOpen] = useState(false);
+  /** Pre-fill for the next New-session dialog open (e.g. a sidebar project's
+   *  "+" button: that project's host+cwd, pinned so it joins the group). */
+  const [newPreset, setNewPreset] = useState<{ host?: string; cwd?: string; pinned?: boolean } | null>(null);
+  const openNewSession = (preset?: { host?: string; cwd?: string; pinned?: boolean }): void => {
+    setNewPreset(preset ?? null);
+    setNewOpen(true);
+  };
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mode, setMode] = useState<'coding' | 'vibot'>(loadMode);
   const activeId = useStore((s) => s.activeId);
@@ -102,12 +109,12 @@ export default function App() {
       <Sidebar
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
-        onNewSession={() => setNewOpen(true)}
+        onNewSession={openNewSession}
         onOpenVibot={() => switchMode('vibot')}
       />
       <ChatView
         onOpenSidebar={() => setSidebarOpen(true)}
-        onNewSession={() => setNewOpen(true)}
+        onNewSession={() => openNewSession()}
         rightTab={activeTab}
         onToggleTerminal={() => activeId && setRightTab(activeId, activeTab === 'terminal' ? null : 'terminal')}
         onToggleFiles={() => activeId && setRightTab(activeId, activeTab === 'files' ? null : 'files')}
@@ -120,7 +127,7 @@ export default function App() {
           onClose={() => activeId && setRightTab(activeId, null)}
         />
       )}
-      {newOpen && <NewSessionDialog onClose={() => setNewOpen(false)} />}
+      {newOpen && <NewSessionDialog initial={newPreset ?? undefined} onClose={() => { setNewPreset(null); setNewOpen(false); }} />}
       <FilePreview />
       <Toast />
     </div>

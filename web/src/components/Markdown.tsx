@@ -91,11 +91,39 @@ function FilePathCode({ text }: { text: string }) {
   );
 }
 
+function FilePathLink({ path, children }: { path: string; children?: ReactNode }) {
+  const openPathPreview = useStore((s) => s.openPathPreview);
+  return (
+    <a
+      href={path}
+      title={`View ${path}`}
+      onClick={(e) => {
+        e.preventDefault();
+        openPathPreview(path);
+      }}
+      className="cursor-pointer text-accent-soft underline decoration-accent/40 underline-offset-2 transition hover:text-accent"
+    >
+      {children}
+    </a>
+  );
+}
+
 const MARKDOWN_COMPONENTS: Components = {
   pre: CodeBlock,
   // Keep GFM tables/task-lists/autolinks; show ~~strikethrough~~ literally —
   // remark-gfm has no per-feature toggle, so restore the tilde markers at render.
   del: ({ children }) => <>~~{children}~~</>,
+  // Agents often link files as markdown with a bare absolute path
+  // (`[标题](/mnt/e/…/08-形态分类.md)`) — the browser treats that as a
+  // same-origin route and the SPA falls back to the main screen. Route
+  // obvious file paths to the session-scoped preview instead (same as the
+  // inline-code paths).
+  a({ href, children }) {
+    const target = href ?? '';
+    const isFilePath = /^(?:~\/|\/(?!\/))/.test(target) && !target.startsWith('/api/');
+    if (isFilePath) return <FilePathLink path={decodeURI(target)}>{children}</FilePathLink>;
+    return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+  },
   code({ className, children }) {
     // Fenced code blocks carry `language-*` / `hljs` classes (added by
     // rehype-highlight) and stay plain <code> inside CodeBlock. Untyped inline

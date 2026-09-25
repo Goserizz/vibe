@@ -1,5 +1,5 @@
 import { log } from '../log.js';
-import { markerCmd, mtimeExpr, parseBundle, bundleMtimeMs } from '../remote/bundle.js';
+import { BUNDLE_KNOWN_HEADER, bundleKnownStdin, bundleMtimeMs, cachedBundleSession, markerCmd, mtimeExpr, noteBundleKey, noteBundleSession, parseBundle } from '../remote/bundle.js';
 import { loginShellCommand, shQuote, sshExec } from '../remote/ssh.js';
 import type { DiscoveredSession } from '../sessions/discovery.js';
 import type { ChatBlock, RemoteHost } from '../../../shared/protocol.js';
@@ -51,14 +51,23 @@ export async function findRemoteKimiSessionDir(
   return refs.find((ref) => ref.id === sessionId)?.dir;
 }
 
-/** Round-trip 2: per session dir, `state.json` plus the wire log's head. */
+/** Round-trip 2: per session dir, `state.json` plus the wire log's head. The
+ *  KNOWN stdin set (`|dir:mtime|…`, captured by the header line) skips both
+ *  bodies for unchanged sessions — the same incremental contract as the other
+ *  bundle agents; kimi's per-session state+wire otherwise costs MBs per host
+ *  on every 60s refresh. */
 function partsCmd(refs: KimiSessionRef[]): string {
   return [
+    BUNDLE_KNOWN_HEADER,
     `for d in ${refs.map((ref) => shQuote(ref.dir)).join(' ')}; do`,
     '  [ -f "$d/state.json" ] || continue',
     '  w="$d/agents/main/wire.jsonl"',
     `  m=${mtimeExpr('"$w"')}`,
     `  [ -n "$m" ] || m=${mtimeExpr('"$d/state.json"')}`,
+    '  case "$KNOWN" in *"|$d:$m|"*)',
+    `    ${markerCmd(['state', '"$d"', '"$m"'])}`,
+    `    ${markerCmd(['wire', '"$d"', '"$m"'])}`,
+    '    continue ;; esac',
     `  ${markerCmd(['state', '"$d"', '"$m"'])}`,
     '  cat "$d/state.json"',
     `  ${markerCmd(['wire', '"$d"', '"$m"'])}`,
@@ -73,13 +82,20 @@ export async function listRemoteKimiSessions(host: RemoteHost): Promise<Discover
   const refs = await remoteRefs(host);
   if (!refs.length) return [];
 
-  const res = await sshExec(host.ssh, loginShellCommand(partsCmd(refs)), { timeoutMs: 25_000 });
+  const scope = `kimi:${host.name}`;
+  const res = await sshExec(host.ssh, loginShellCommand(partsCmd(refs)), {
+    timeoutMs: 25_000,
+    input: `${bundleKnownStdin(scope)}\n`,
+  });
   if (res.code !== 0) {
     log.debug(`remote kimi discovery failed for ${host.name}: ${res.stderr.trim().slice(0, 120)}`);
     return [];
   }
 
+  // dir → state/wire/mtime, plus which dirs arrived as skip-markers only —
+  // those reuse the session parsed on the previous cycle.
   const byDir = new Map<string, { state: string; wire: string; mtime: number }>();
+  const skippedDirs = new Set<string>();
   for (const { fields, body } of parseBundle(res.stdout)) {
     const [kind, dir, mtime] = fields;
     if (!dir) continue;
@@ -87,17 +103,30 @@ export async function listRemoteKimiSessions(host: RemoteHost): Promise<Discover
     if (kind === 'state') entry.state = body;
     else if (kind === 'wire') entry.wire = body;
     byDir.set(dir, entry);
+    if (body === '') skippedDirs.add(dir);
   }
 
   const sessions: DiscoveredSession[] = [];
   for (const ref of refs) {
     const parts = byDir.get(ref.dir);
-    if (!parts?.state.trim()) continue;
+    if (!parts) continue;
+    const cached = skippedDirs.has(ref.dir) ? cachedBundleSession(scope, ref.dir) : undefined;
+    if (cached) {
+      noteBundleSession(scope, ref.dir, String(Math.floor(parts.mtime / 1000)), cached);
+      sessions.push(cached);
+      continue;
+    }
+    if (!parts.state.trim()) continue;
     const session = kimiSessionFromParts(ref, parts.state, parts.wire, {
       createdFallback: parts.mtime,
       updatedAt: parts.mtime,
     });
-    if (session) sessions.push(session);
+    if (session) {
+      noteBundleSession(scope, ref.dir, String(Math.floor(parts.mtime / 1000)), session);
+      sessions.push(session);
+    } else if (parts.state.trim()) {
+      noteBundleKey(scope, ref.dir, String(Math.floor(parts.mtime / 1000)));
+    }
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }

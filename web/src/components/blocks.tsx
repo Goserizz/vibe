@@ -3,6 +3,7 @@ import {
   Brain,
   ChevronRight,
   Terminal,
+  TerminalSquare,
   FileText,
   FilePen,
   Search,
@@ -508,21 +509,28 @@ export function taskShortId(taskId: string): string {
 }
 
 export interface ParsedTaskOutput {
+  /** Retrieval outcome of this TaskOutput call: success | timeout | … */
   status: string;
   taskId: string;
+  /** The polled task's own kind and state (e.g. local_bash / running). */
+  taskType: string;
+  taskStatus: string;
   body: string;
 }
 
 export function parseTaskResult(result: string): ParsedTaskOutput {
   const status = /<retrieval_status>(\w+)<\/retrieval_status>/.exec(result)?.[1] ?? '';
   const taskId = /<task_id>([^<]+)<\/task_id>/.exec(result)?.[1] ?? '';
+  const taskType = /<task_type>([^<]+)<\/task_type>/.exec(result)?.[1] ?? '';
+  const taskStatus = /<status>([^<]+)<\/status>/.exec(result)?.[1] ?? '';
+  // Strip the whole envelope — any tag we know plus stray empty lines — so the
+  // preview shows the task's actual output, never the protocol scaffolding.
   const body = result
-    .replace(/<retrieval_status>[^<]*<\/retrieval_status>/g, '')
-    .replace(/<task_id>[^<]*<\/task_id>/g, '')
+    .replace(/<(?:retrieval_status|task_id|task_type|status|exit_code|error)>[^<]*<\/(?:retrieval_status|task_id|task_type|status|exit_code|error)>/g, '')
     .replace(/<\/?output>/g, '')
     .replace(/^\s+/, '')
     .replace(/\s+$/, '');
-  return { status, taskId, body };
+  return { status, taskId, taskType, taskStatus, body };
 }
 
 /** `tool_subagent_agent_<uuid>_call_…` → the uuid: the sub-agent that made
@@ -546,10 +554,21 @@ function TaskOutputView({ block }: { block: ToolBlock }) {
   const dispatchDesc = typeof input.description === 'string' ? input.description : '';
   const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : '';
   const taskId = inputTaskId || parsed.taskId || block.toolUseId || block.id;
+  // Two different things surface through TaskOutput: real sub-agents
+  // (Agent/Task dispatch, their own model loop) and plain background commands
+  // (task_type local_bash — no model, just a process). Label them apart.
+  const isBackgroundTask = parsed.taskType === 'local_bash';
   const label = dispatchDesc
     ? dispatchDesc.slice(0, 20)
-    : `子代理 ${taskShortId(taskId)}`;
-  const status = parsed.status || (block.isError ? 'error' : block.status === 'running' ? 'running' : 'success');
+    : `${isBackgroundTask ? '后台任务' : '子代理'} ${taskShortId(taskId)}`;
+  const HeadIcon = isBackgroundTask ? TerminalSquare : Users;
+  // A retrieval timeout with the task still running means "waited, still
+  // going" — surface the task's own state, not the protocol hiccup.
+  const taskLive = parsed.taskStatus === 'running' || parsed.taskStatus === 'pending' || parsed.taskStatus === 'in_progress';
+  const status = taskLive && (parsed.status === 'timeout' || parsed.status === '')
+    ? 'running'
+    : parsed.status || (block.isError ? 'error' : block.status === 'running' ? 'running' : 'success');
+  const kind = isBackgroundTask ? '' : parsed.taskType;
   const preview = (parsed.body.split('\n').find((l) => l.trim()) ?? '').slice(0, 140);
   const [manual, setManual] = useState<boolean | null>(null);
   const open = manual ?? false;
@@ -559,12 +578,12 @@ function TaskOutputView({ block }: { block: ToolBlock }) {
         onClick={() => setManual(!open)}
         className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-ink-800/40"
       >
-        <Users className="h-4 w-4 shrink-0 text-slate-500" />
+        <HeadIcon className="h-4 w-4 shrink-0 text-slate-500" />
         <span className={cn('max-w-[220px] shrink-0 truncate rounded-md border px-1.5 py-px text-[11px]', taskBadgeClass(taskId))}>
           {label}
         </span>
-        {agentType && (
-          <span className="shrink-0 rounded bg-white/5 px-1.5 py-px text-[10px] text-slate-400">{agentType}</span>
+        {(agentType || kind) && (
+          <span className="shrink-0 rounded bg-white/5 px-1.5 py-px text-[10px] text-slate-400">{agentType || kind}</span>
         )}
         <span
           className={cn(
@@ -575,7 +594,7 @@ function TaskOutputView({ block }: { block: ToolBlock }) {
                   : 'bg-rose-500/10 text-rose-300',
           )}
         >
-          {status === 'success' ? '完成' : status === 'timeout' ? '超时' : status === 'running' ? '收取中' : status || '未知'}
+          {status === 'success' ? '完成' : status === 'timeout' ? '超时' : status === 'running' ? '运行中' : status || '未知'}
         </span>
         <span className="min-w-0 flex-1 truncate text-[12px] text-slate-400">{preview}</span>
         <ChevronRight className={cn('h-3.5 w-3.5 shrink-0 text-slate-600 transition-transform', open && 'rotate-90')} />

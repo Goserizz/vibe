@@ -110,7 +110,9 @@ export const api = {
       body: JSON.stringify({ password }),
     }),
 
-  listProjects: () => request<{ projects: ProjectDir[] }>('/projects').then((r) => r.projects),
+  // Distinct from GET /projects (sidebar custom names). See server route note.
+  listProjects: () =>
+    request<{ projects: ProjectDir[] }>('/projects/recent').then((r) => r.projects ?? []),
 
   // -- Durable monitors -----------------------------------------------------
 
